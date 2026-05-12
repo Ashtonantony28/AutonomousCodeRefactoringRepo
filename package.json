@@ -20,6 +20,7 @@
     "@babel/traverse": "^7.25.0",
     "chalk": "^4.1.2",
     "commander": "^12.1.0",
+    "fast-check": "^4.8.0",
     "ml-logistic-regression": "^2.0.0",
     "ml-matrix": "^6.11.0",
     "uuid": "^10.0.0"

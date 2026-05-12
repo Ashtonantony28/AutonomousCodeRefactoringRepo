@@ -2,7 +2,7 @@
 
 const { callClaude, extractJsonBlock } = require('../utils/claude-client');
 const { FileSnapshot, applyEdit } = require('../runner/reverter');
-const { runTests, detectCommand } = require('../runner/test-runner');
+const { runTests, detectCommand, measureCoverage } = require('../runner/test-runner');
 const { trace } = require('../interpretability/tracer');
 
 const SYSTEM_PROMPT = [
@@ -71,7 +71,7 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
   const snap = new FileSnapshot(repoRoot);
   snap.capture(proposal.file);
 
-  // Apply
+  // Apply (uses 4-tier anchor matching internally)
   let edit;
   try {
     edit = applyEdit({
@@ -124,6 +124,16 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
     status = 'applied_no_tests';
   }
 
+  // Coverage (best-effort, only meaningful when tests actually ran)
+  let coverage = { available: false };
+  if (!reverted && (status === 'passed' || status === 'applied_no_tests')) {
+    try {
+      coverage = await measureCoverage({ repoRoot, file: proposal.file });
+    } catch (err) {
+      coverage = { available: false, reason: err.message };
+    }
+  }
+
   return {
     status,
     reverted,
@@ -131,12 +141,16 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
     failed_tests: testResult.failed_tests,
     execution_time_ms: testResult.execution_time_ms,
     coverage_delta: testResult.coverage_delta,
+    coverage,
     test_command: testResult.command,
     test_framework: testResult.framework,
     stdout_tail: testResult.stdout,
     stderr_tail: testResult.stderr,
     bytes_before: edit.bytesBefore,
     bytes_after: edit.bytesAfter,
+    match_tier: edit.matchTier,
+    match_score: edit.matchScore,
+    match_delta: edit.matchDelta,
     plan
   };
 }

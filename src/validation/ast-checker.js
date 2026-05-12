@@ -6,6 +6,7 @@ const path = require('path');
 let parser, traverse;
 try { parser = require('@babel/parser'); } catch { parser = null; }
 try { traverse = require('@babel/traverse').default; } catch { traverse = null; }
+const polyglot = require('./polyglot-ast');
 
 const PARSE_OPTS = {
   sourceType: 'unambiguous',
@@ -266,29 +267,42 @@ function runChecks({ proposal, repoRoot }) {
   const file = proposal.file;
   const fileAbs = path.join(repoRoot, file);
   const fullSrc = safeRead(fileAbs);
-  // For checks that need an AST of the whole file, we splice the proposal in:
   const splicedSrc = fullSrc && fullSrc.includes(proposal.current_code)
     ? fullSrc.replace(proposal.current_code, proposal.proposed_code)
     : proposal.proposed_code;
   const baselineSrc = fullSrc || proposal.current_code;
 
-  const currentAst = isJsLike(file) ? tryParse(baselineSrc) : null;
-  const proposedAst = isJsLike(file) ? tryParse(splicedSrc) : null;
-
   const checks = [];
-  if (isJsLike(file) && currentAst && proposedAst) {
-    checks.push(checkSignatureDrift({ currentAst, proposedAst, repoRoot }));
-    checks.push(checkNewDependency({ currentAst, proposedAst, repoRoot }));
-    checks.push(checkReturnTypeChange({ currentAst, proposedAst }));
-  } else if (isJsLike(file)) {
-    checks.push({ check_name: 'parse', passed: false, detail: 'failed to parse current or proposed code' });
+  let lang = 'unknown';
+
+  if (isJsLike(file)) {
+    lang = 'javascript';
+    const currentAst = tryParse(baselineSrc);
+    const proposedAst = tryParse(splicedSrc);
+    if (currentAst && proposedAst) {
+      checks.push(checkSignatureDrift({ currentAst, proposedAst, repoRoot }));
+      checks.push(checkNewDependency({ currentAst, proposedAst, repoRoot }));
+      checks.push(checkReturnTypeChange({ currentAst, proposedAst }));
+    } else {
+      checks.push({ check_name: 'parse', passed: false, detail: 'failed to parse current or proposed code' });
+    }
+  } else if (polyglot.languageOf(file)) {
+    const poly = polyglot.runChecks({ file, currentSrc: baselineSrc, proposedSrc: splicedSrc });
+    if (poly) {
+      lang = poly.lang;
+      checks.push(...poly.checks);
+    } else {
+      checks.push({ check_name: 'parse', passed: false, detail: 'polyglot parser failed' });
+    }
   }
-  // Text-based check works for any language
+
+  // Universal text-based error-handling check (catches removal even when AST
+  // can't be built or when the change is local to the snippet).
   checks.push(checkErrorHandlingRemoval({ currentSrc: proposal.current_code, proposedSrc: proposal.proposed_code }));
 
   const passed = checks.filter(c => c.passed).length;
   const score = checks.length ? passed / checks.length : 0.5;
-  return { checks, score };
+  return { checks, score, lang };
 }
 
 module.exports = {

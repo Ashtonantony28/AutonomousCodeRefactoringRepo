@@ -5,6 +5,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const TIMEOUT_MS = 60_000;
+const COVERAGE_DIR = '.refactor-coverage';
 
 function detectCommand(repoRoot) {
   const pkgPath = path.join(repoRoot, 'package.json');
@@ -86,6 +87,48 @@ function runCommand({ cmd, args, cwd, env, timeoutMs }) {
   });
 }
 
+// Coverage of the changed file is opportunistic: we look for c8 / nyc /
+// jest --coverage / pytest-cov in package.json or installed CLIs, and
+// re-run with coverage enabled when a runner is available. If we can't,
+// we return { available: false } and the orchestrator skips this signal.
+async function measureCoverage({ repoRoot, file, command, timeoutMs = TIMEOUT_MS } = {}) {
+  const detected = command || detectCommand(repoRoot);
+  if (!detected) return { available: false, reason: 'no test runner' };
+
+  // Prefer c8 when it's resolvable in the target repo; it overlays nicely
+  // on `npm test` without changing the test script.
+  const c8Bin = path.join(repoRoot, 'node_modules', '.bin', 'c8');
+  if (fs.existsSync(c8Bin) && detected.framework === 'npm') {
+    const result = await runCommand({
+      cmd: c8Bin,
+      args: ['--reporter=json-summary', '--reports-dir', COVERAGE_DIR, '--include', file, 'npm', 'test', '--silent'],
+      cwd: repoRoot,
+      env: { ...process.env, CI: '1' },
+      timeoutMs
+    });
+    const summary = readCoverageSummary(repoRoot, file);
+    return { available: true, ...summary, exit_code: result.exitCode, framework: 'c8' };
+  }
+  return { available: false, reason: 'no c8 in target node_modules' };
+}
+
+function readCoverageSummary(repoRoot, file) {
+  const p = path.join(repoRoot, COVERAGE_DIR, 'coverage-summary.json');
+  if (!fs.existsSync(p)) return { lines_pct: null, branches_pct: null };
+  try {
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const fileKey = Object.keys(j).find(k => k.endsWith(file)) || 'total';
+    const e = j[fileKey] || j.total || {};
+    return {
+      lines_pct: e.lines && typeof e.lines.pct === 'number' ? e.lines.pct / 100 : null,
+      branches_pct: e.branches && typeof e.branches.pct === 'number' ? e.branches.pct / 100 : null,
+      functions_pct: e.functions && typeof e.functions.pct === 'number' ? e.functions.pct / 100 : null
+    };
+  } catch {
+    return { lines_pct: null };
+  }
+}
+
 async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS } = {}) {
   const detected = command || detectCommand(repoRoot);
   if (!detected) {
@@ -138,4 +181,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, detectCommand, parseCounts };
+module.exports = { runTests, detectCommand, parseCounts, measureCoverage, readCoverageSummary };

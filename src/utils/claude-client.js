@@ -7,6 +7,8 @@ try {
   Anthropic = null;
 }
 
+const cache = require('./api-cache');
+
 const MODEL = 'claude-sonnet-4-20250514';
 const DEFAULT_MAX_TOKENS = 4000;
 const RATE_LIMIT_BACKOFF_MS = 10_000;
@@ -34,33 +36,40 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function callClaude({ system, user, maxTokens = DEFAULT_MAX_TOKENS }) {
-  const client = getClient();
-  const params = {
-    model: MODEL,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content: user }]
-  };
+async function callClaude({ system, user, maxTokens = DEFAULT_MAX_TOKENS, temperature, cacheTag }) {
+  const params = { model: MODEL, max_tokens: maxTokens, system, user };
+  if (temperature != null) params.temperature = temperature;
+  if (cacheTag) params._cache_tag = cacheTag;
 
-  let attempt = 0;
-  while (true) {
-    try {
-      const resp = await client.messages.create(params);
-      const text = (resp.content || [])
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('');
-      return { text, usage: resp.usage || {}, raw: resp };
-    } catch (err) {
-      if (attempt === 0 && isRateLimit(err)) {
-        attempt += 1;
-        await sleep(RATE_LIMIT_BACKOFF_MS);
-        continue;
+  return cache.wrap(params, async () => {
+    const client = getClient();
+    const req = {
+      model: MODEL,
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }]
+    };
+    if (temperature != null) req.temperature = temperature;
+
+    let attempt = 0;
+    while (true) {
+      try {
+        const resp = await client.messages.create(req);
+        const text = (resp.content || [])
+          .filter((b) => b.type === 'text')
+          .map((b) => b.text)
+          .join('');
+        return { text, usage: resp.usage || {} };
+      } catch (err) {
+        if (attempt === 0 && isRateLimit(err)) {
+          attempt += 1;
+          await sleep(RATE_LIMIT_BACKOFF_MS);
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
-  }
+  });
 }
 
 function extractJsonBlock(text) {

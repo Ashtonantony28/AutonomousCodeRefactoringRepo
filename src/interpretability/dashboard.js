@@ -2,17 +2,16 @@
 
 const fs = require('fs');
 const path = require('path');
+const calibration = require('../rl/calibration');
+const { clusterFailures } = require('./clustering');
 
 const DASHBOARD_DIR = path.resolve(__dirname, '..', '..', 'dashboard');
 const DASHBOARD_PATH = path.join(DASHBOARD_DIR, 'dashboard.html');
 
 function htmlEscape(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function rowClass(status) {
@@ -23,15 +22,8 @@ function rowClass(status) {
   return 'row-other';
 }
 
-function pct(n) {
-  if (n == null || isNaN(n)) return '—';
-  return (Number(n) * 100).toFixed(1) + '%';
-}
-
-function fmtNum(n, d = 3) {
-  if (n == null || isNaN(n)) return '—';
-  return Number(n).toFixed(d);
-}
+function pct(n) { if (n == null || isNaN(n)) return '—'; return (Number(n) * 100).toFixed(1) + '%'; }
+function fmtNum(n, d = 3) { if (n == null || isNaN(n)) return '—'; return Number(n).toFixed(d); }
 
 function aggregateStats(session) {
   const props = session.proposals || [];
@@ -47,21 +39,51 @@ function aggregateStats(session) {
     if (s === 'critic_rejected') criticRejected++;
     if (s) decided++;
     if (typeof p.combined_confidence === 'number') { confSum += p.combined_confidence; confN++; }
-    if (typeof p.rl_prediction === 'number' && (s === 'passed' || s === 'failed' || s === 'reverted')) {
+    if (typeof p.rl_prediction === 'number' && ['passed', 'failed', 'reverted'].includes(s)) {
       rlN++;
       const predictedPass = p.rl_prediction >= 0.5;
       const actualPass = s === 'passed';
       if (predictedPass === actualPass) rlCorrect++;
     }
   }
-  const passRate = decided ? passed / decided : 0;
   return {
     total, decided, passed, failed, rl_rejected: rlRejected, critic_rejected: criticRejected,
-    pass_rate: passRate,
+    pass_rate: decided ? passed / decided : 0,
     avg_confidence: confN ? confSum / confN : 0,
     rl_accuracy: rlN ? rlCorrect / rlN : null,
     rl_eval_count: rlN
   };
+}
+
+function reliability(session) {
+  const xs = [], ys = [];
+  for (const p of session.proposals || []) {
+    const s = p.test_outcome && p.test_outcome.status;
+    if (!['passed', 'failed', 'reverted'].includes(s)) continue;
+    if (typeof p.combined_confidence !== 'number') continue;
+    xs.push(p.combined_confidence);
+    ys.push(s === 'passed' ? 1 : 0);
+  }
+  if (!xs.length) return null;
+  const bins = calibration.reliabilityBins(xs, ys);
+  const ece = calibration.expectedCalibrationError(xs, ys);
+  return { bins, ece, n: xs.length };
+}
+
+function agreementMatrix(session) {
+  // 2x2: critic-approved (combined >= 0.5) × test outcome (pass/fail)
+  const cells = { tp: 0, fp: 0, fn: 0, tn: 0 };
+  for (const p of session.proposals || []) {
+    const s = p.test_outcome && p.test_outcome.status;
+    if (!['passed', 'failed', 'reverted'].includes(s)) continue;
+    const approved = (p.combined_confidence || 0) >= 0.5;
+    const passed = s === 'passed';
+    if (approved && passed) cells.tp++;
+    else if (approved && !passed) cells.fp++;
+    else if (!approved && passed) cells.fn++;
+    else cells.tn++;
+  }
+  return cells;
 }
 
 function renderRow(p, idx) {
@@ -72,6 +94,8 @@ function renderRow(p, idx) {
   const critic = p.critic_verdict ? fmtNum(p.critic_verdict.claude_confidence, 2) : '—';
   const rlPred = typeof p.rl_prediction === 'number' ? fmtNum(p.rl_prediction, 2) : '—';
   const failClass = p.failure_class ? `<span class="tag tag-${p.failure_class}">${p.failure_class}</span>` : '';
+  const repair = p.parent_issue_id ? `<span class="tag tag-repair">repair #${p.attempt || ''}</span>` : '';
+  const tier = (p.test_outcome && p.test_outcome.match_tier) ? `<span class="tag tag-${p.test_outcome.match_tier}">${p.test_outcome.match_tier}</span>` : '';
   const trace = (p.decision_trace || []).map(step => `
     <li class="trace-step trace-${htmlEscape(step.stage)}">
       <span class="trace-stage">${htmlEscape(step.stage)}</span>
@@ -83,6 +107,22 @@ function renderRow(p, idx) {
   const checks = (p.pattern_check_results || []).map(c =>
     `<li class="${c.passed ? 'check-pass' : 'check-fail'}"><b>${htmlEscape(c.check_name)}:</b> ${htmlEscape(c.detail)}</li>`
   ).join('');
+  const panel = (p.critic_verdict && Array.isArray(p.critic_verdict.panel)) ? `
+    <h4>Critic jury</h4>
+    <table class="jury">
+      <thead><tr><th>persona</th><th>approves</th><th>conf</th><th>reasoning</th></tr></thead>
+      <tbody>
+        ${p.critic_verdict.panel.map(v => `<tr>
+          <td>${htmlEscape(v.persona)}</td>
+          <td>${v.preserves_semantics ? '✓' : '✗'}</td>
+          <td>${fmtNum(v.claude_confidence, 2)}</td>
+          <td>${htmlEscape((v.reasoning || '').slice(0, 240))}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>` : '';
+  const diff = p.diff_test && p.diff_test.applicable
+    ? `<h4>Differential testing</h4><pre>${htmlEscape(JSON.stringify(p.diff_test, null, 2))}</pre>`
+    : '';
   const detailsId = `details-${idx}`;
   return `
     <tr class="${klass}" data-toggle="${detailsId}">
@@ -92,25 +132,22 @@ function renderRow(p, idx) {
       <td>${critic}</td>
       <td>${fmtNum(p.combined_confidence, 2)}</td>
       <td>${rlPred}</td>
-      <td><span class="status status-${htmlEscape(status)}">${htmlEscape(status)}</span> ${failClass}</td>
+      <td><span class="status status-${htmlEscape(status)}">${htmlEscape(status)}</span> ${failClass}${repair}${tier}</td>
     </tr>
     <tr class="details-row" id="${detailsId}" style="display:none">
       <td colspan="7">
         <div class="details">
           <div class="cols">
             <div class="col">
-              <h4>Analyzer reasoning</h4>
-              <pre>${htmlEscape(p.reasoning)}</pre>
-              <h4>Current code</h4>
-              <pre>${htmlEscape(p.current_code)}</pre>
-              <h4>Proposed code</h4>
-              <pre>${htmlEscape(p.proposed_code)}</pre>
+              <h4>Analyzer reasoning</h4><pre>${htmlEscape(p.reasoning)}</pre>
+              <h4>Current code</h4><pre>${htmlEscape(p.current_code)}</pre>
+              <h4>Proposed code</h4><pre>${htmlEscape(p.proposed_code)}</pre>
             </div>
             <div class="col">
-              <h4>Critic verdict</h4>
-              <pre>${htmlEscape(JSON.stringify(p.critic_verdict || {}, null, 2))}</pre>
+              ${panel}
               <h4>AST checks</h4>
               <ul class="checks">${checks || '<li>(none)</li>'}</ul>
+              ${diff}
               <h4>Decision trace</h4>
               <ol class="trace">${trace || '<li>(empty)</li>'}</ol>
             </div>
@@ -127,6 +164,19 @@ function renderHtml(session) {
   const updatedAt = session.updated_at || new Date().toISOString();
   const tokenUsage = session.token_usage || {};
   const saturation = session.context_saturation || {};
+  const rel = reliability(session);
+  const agree = agreementMatrix(session);
+  let clusters = { clusters: [] };
+  try { clusters = clusterFailures(session.proposals || []); } catch { /* */ }
+  const calibModel = calibration.load();
+
+  const inline = {
+    session: { proposals: session.proposals || [], updated_at: updatedAt },
+    reliability: rel,
+    agreement: agree,
+    clusters,
+    calibration: calibModel
+  };
 
   return `<!doctype html>
 <html lang="en">
@@ -142,6 +192,10 @@ function renderHtml(session) {
   .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 14px; }
   .stat .label { font-size: 11px; text-transform: uppercase; color: #8b949e; letter-spacing: .5px; }
   .stat .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+  .panel h3 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; color: #8b949e; letter-spacing: .5px; }
+  canvas { display: block; max-width: 100%; }
   table { width: 100%; border-collapse: collapse; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
   th, td { padding: 8px 10px; text-align: left; font-size: 13px; border-bottom: 1px solid #21262d; vertical-align: top; }
   th { background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
@@ -160,10 +214,31 @@ function renderHtml(session) {
   .tag-environment_issue { background: #9e6a03; }
   .tag-caught_correctly { background: #238636; }
   .tag-rl_miss { background: #8957e5; }
+  .tag-repair { background: #1f6feb; }
+  .tag-fuzzy { background: #6e7681; }
+  .tag-whitespace, .tag-indent-shift { background: #8b949e; }
+  .agree-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 10px; }
+  .agree-cell { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 14px; text-align: center; }
+  .agree-cell.tp { background: rgba(46, 160, 67, 0.20); }
+  .agree-cell.tn { background: rgba(56, 139, 253, 0.15); }
+  .agree-cell.fp { background: rgba(218, 54, 51, 0.30); }
+  .agree-cell.fn { background: rgba(159, 109, 4, 0.30); }
+  .agree-cell .count { font-size: 22px; font-weight: 700; }
+  .agree-cell .lbl { font-size: 10px; color: #c9d1d9; text-transform: uppercase; letter-spacing: .4px; margin-top: 4px; }
+  .clusters { list-style: none; padding: 0; margin: 0; }
+  .clusters li { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .clusters .clbl { font-weight: 600; color: #79c0ff; }
+  .clusters .csz { color: #8b949e; font-size: 11px; margin-left: 8px; }
+  .what-if { font-size: 12px; }
+  .what-if label { display: grid; grid-template-columns: 130px 1fr 50px; align-items: center; gap: 8px; margin: 6px 0; }
+  .what-if input[type=range] { width: 100%; }
+  .what-if .p-pass { font-size: 28px; font-weight: 700; }
   .details { padding: 12px 6px; }
   .details .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .details h4 { margin: 8px 0 6px; font-size: 12px; text-transform: uppercase; color: #8b949e; }
   .details pre { background: #010409; border: 1px solid #30363d; border-radius: 6px; padding: 10px; max-height: 260px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .jury { font-size: 11px; margin-top: 4px; }
+  .jury td { padding: 4px 6px; }
   .checks { padding-left: 18px; font-size: 12px; }
   .check-pass { color: #56d364; }
   .check-fail { color: #ff7b72; }
@@ -173,10 +248,13 @@ function renderHtml(session) {
   .trace-time, .trace-conf, .trace-outcome { color: #8b949e; margin-right: 8px; font-size: 11px; }
   .trace-reason { color: #c9d1d9; margin-top: 2px; }
   footer { margin-top: 24px; color: #8b949e; font-size: 12px; }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #6e7681; vertical-align: middle; margin-right: 4px; }
+  .live-dot.on { background: #56d364; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 </style>
 </head>
 <body>
-  <h1>Multi-Agent Refactoring — Dashboard</h1>
+  <h1>Multi-Agent Refactoring — Dashboard <span class="live-dot" id="live-dot"></span><span id="live-text" style="font-size:12px;color:#8b949e">offline</span></h1>
   <div class="meta">
     run_id: <code>${htmlEscape(session.run_id || '')}</code> ·
     target: <code>${htmlEscape(session.target_repo || '')}</code> ·
@@ -184,49 +262,183 @@ function renderHtml(session) {
   </div>
 
   <div class="stats">
-    <div class="stat"><div class="label">Total proposals</div><div class="value">${stats.total}</div></div>
-    <div class="stat"><div class="label">Pass rate</div><div class="value">${pct(stats.pass_rate)}</div></div>
-    <div class="stat"><div class="label">Avg confidence</div><div class="value">${pct(stats.avg_confidence)}</div></div>
-    <div class="stat"><div class="label">RL accuracy (n=${stats.rl_eval_count})</div><div class="value">${stats.rl_accuracy == null ? '—' : pct(stats.rl_accuracy)}</div></div>
-    <div class="stat"><div class="label">Failed</div><div class="value">${stats.failed}</div></div>
+    <div class="stat"><div class="label">Total proposals</div><div class="value" id="kpi-total">${stats.total}</div></div>
+    <div class="stat"><div class="label">Pass rate</div><div class="value" id="kpi-pass">${pct(stats.pass_rate)}</div></div>
+    <div class="stat"><div class="label">Avg confidence</div><div class="value" id="kpi-conf">${pct(stats.avg_confidence)}</div></div>
+    <div class="stat"><div class="label">RL accuracy (n=${stats.rl_eval_count})</div><div class="value" id="kpi-rl">${stats.rl_accuracy == null ? '—' : pct(stats.rl_accuracy)}</div></div>
+    <div class="stat"><div class="label">Failed</div><div class="value" id="kpi-fail">${stats.failed}</div></div>
     <div class="stat"><div class="label">Critic-rejected</div><div class="value">${stats.critic_rejected}</div></div>
     <div class="stat"><div class="label">RL-rejected</div><div class="value">${stats.rl_rejected}</div></div>
     <div class="stat"><div class="label">Tokens (A/C/E)</div><div class="value">${tokenUsage.analyzer || 0}/${tokenUsage.critic || 0}/${tokenUsage.executor || 0}</div></div>
     <div class="stat"><div class="label">Saturation (max)</div><div class="value">${pct(Math.max(saturation.analyzer || 0, saturation.critic || 0, saturation.executor || 0))}</div></div>
+    <div class="stat"><div class="label">ECE</div><div class="value" id="kpi-ece">${rel ? fmtNum(rel.ece, 3) : '—'}</div></div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h3>Reliability diagram (calibration)</h3>
+      <canvas id="reliability" width="360" height="240"></canvas>
+      <div style="font-size:11px;color:#8b949e;margin-top:6px">
+        Below the diagonal = overconfident · above = underconfident · dot size ∝ samples per bin
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Critic vs. tests (agreement)</h3>
+      <div class="agree-grid">
+        <div class="agree-cell tp"><div class="count" id="ag-tp">${agree.tp}</div><div class="lbl">approved · passed</div></div>
+        <div class="agree-cell fp"><div class="count" id="ag-fp">${agree.fp}</div><div class="lbl">approved · FAILED</div></div>
+        <div class="agree-cell fn"><div class="count" id="ag-fn">${agree.fn}</div><div class="lbl">rejected · would have passed</div></div>
+        <div class="agree-cell tn"><div class="count" id="ag-tn">${agree.tn}</div><div class="lbl">rejected · would have failed</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>What-if · RL gate</h3>
+      <div class="what-if">
+        <div>predicted p_pass: <span class="p-pass" id="wi-ppass">—</span></div>
+        <label>critic_confidence <input id="wi-f0" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v0">0.70</span></label>
+        <label>pattern_score    <input id="wi-f1" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v1">0.70</span></label>
+        <label>complexity (LOC) <input id="wi-f2" type="range" min="1" max="200" step="1" value="20"><span id="wi-v2">20</span></label>
+        <label>files_changed    <input id="wi-f3" type="range" min="1" max="20" step="1" value="1"><span id="wi-v3">1</span></label>
+        <label>risk_estimate    <input id="wi-f4" type="range" min="0" max="1" step="0.01" value="0.3"><span id="wi-v4">0.30</span></label>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Failure clusters</h3>
+      <ul class="clusters" id="cluster-list">
+        ${clusters.clusters.length ? clusters.clusters.map(c => `<li><span class="clbl">${htmlEscape(c.label)}</span><span class="csz">n=${c.size}</span></li>`).join('') : '<li style="color:#8b949e">No failure clusters yet.</li>'}
+      </ul>
+    </div>
   </div>
 
   <table>
     <thead>
       <tr><th>#</th><th>file</th><th>risk</th><th>critic</th><th>combined</th><th>RL</th><th>outcome</th></tr>
     </thead>
-    <tbody>
+    <tbody id="props-tbody">
       ${rows || '<tr><td colspan="7" style="text-align:center;padding:24px;color:#8b949e">No proposals yet.</td></tr>'}
     </tbody>
   </table>
 
-  <footer>Auto-refreshes every 30s while the session updates. Click any row for the full decision trace.</footer>
+  <footer>Auto-refreshes via SSE when served from <code>node src/interpretability/server.js</code>; otherwise polls every 30 s.</footer>
 
 <script>
-  (function () {
-    document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
-      tr.addEventListener('click', function () {
-        var id = tr.getAttribute('data-toggle');
-        var d = document.getElementById(id);
-        if (!d) return;
-        d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+const INLINE = ${JSON.stringify(inline)};
+
+function drawReliability(rel) {
+  const cnv = document.getElementById('reliability');
+  if (!cnv) return;
+  const ctx = cnv.getContext('2d');
+  const W = cnv.width, H = cnv.height, P = 30;
+  ctx.clearRect(0, 0, W, H);
+  // axes
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(P, H-P); ctx.lineTo(W-10, H-P); ctx.moveTo(P, H-P); ctx.lineTo(P, 10); ctx.stroke();
+  // diagonal
+  ctx.strokeStyle = '#6e7681'; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(P, H-P); ctx.lineTo(W-10, 10); ctx.stroke(); ctx.setLineDash([]);
+  if (!rel || !rel.bins) { ctx.fillStyle='#8b949e'; ctx.font='12px sans-serif'; ctx.fillText('no data', W/2-20, H/2); return; }
+  // bars: predicted-confidence height = predicted, gap = predicted-actual
+  const innerW = W - P - 20, innerH = H - P - 20;
+  for (const b of rel.bins) {
+    if (!b.n) continue;
+    const x = P + b.conf * innerW;
+    const y = (H - P) - b.acc * innerH;
+    const r = Math.min(8, 3 + Math.sqrt(b.n));
+    ctx.fillStyle = '#1f6feb';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fill();
+  }
+  // ECE label
+  ctx.fillStyle = '#c9d1d9'; ctx.font = '11px sans-serif';
+  ctx.fillText('ECE = ' + (rel.ece != null ? rel.ece.toFixed(3) : '—') + '  (n=' + rel.n + ')', P+4, 18);
+}
+
+function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
+function predictPpass(weights, x) {
+  if (!weights || !weights.w) return null;
+  let z = weights.b;
+  for (let j = 0; j < weights.w.length; j++) {
+    const xs = (x[j] - weights.means[j]) / (weights.stds[j] || 1);
+    z += weights.w[j] * xs;
+  }
+  return sigmoid(z);
+}
+
+function wireWhatIf() {
+  const f = [0,1,2,3,4].map(i => document.getElementById('wi-f'+i));
+  const v = [0,1,2,3,4].map(i => document.getElementById('wi-v'+i));
+  const out = document.getElementById('wi-ppass');
+  function read() { return f.map(el => Number(el.value)); }
+  function fmt(j) { return j === 2 || j === 3 ? String(read()[j]) : read()[j].toFixed(2); }
+  function update() {
+    const x = read();
+    for (let j = 0; j < 5; j++) v[j].textContent = fmt(j);
+    fetch('/rl-weights.json').then(r => r.ok ? r.json() : null).then(w => {
+      const p = predictPpass(w, x);
+      out.textContent = p == null ? '—' : p.toFixed(3);
+      out.style.color = p == null ? '#8b949e' : (p >= 0.4 ? '#56d364' : '#ff7b72');
+    }).catch(() => { out.textContent = '—'; });
+  }
+  for (const el of f) el.addEventListener('input', update);
+  update();
+}
+
+function refreshFrom(session, rel, clusters) {
+  const tbody = document.getElementById('props-tbody');
+  // We don't re-render the row HTML client-side; we just bump KPIs.
+  // Full rebuild happens via window.location.reload() when SSE fires.
+  document.getElementById('kpi-total').textContent = (session.proposals || []).length;
+  document.getElementById('updated').textContent = session.updated_at || '';
+  if (rel) {
+    document.getElementById('kpi-ece').textContent = rel.ece != null ? rel.ece.toFixed(3) : '—';
+    drawReliability(rel);
+  }
+}
+
+drawReliability(INLINE.reliability);
+wireWhatIf();
+
+document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
+  tr.addEventListener('click', function () {
+    const id = tr.getAttribute('data-toggle');
+    const d = document.getElementById(id);
+    if (!d) return;
+    d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+  });
+});
+
+(function liveOrPoll() {
+  const dot = document.getElementById('live-dot');
+  const lbl = document.getElementById('live-text');
+  if (typeof EventSource !== 'undefined') {
+    try {
+      const es = new EventSource('/events');
+      es.onopen = () => { dot.classList.add('on'); lbl.textContent = 'live'; };
+      es.addEventListener('state', () => {
+        Promise.all([
+          fetch('/session.json').then(r => r.json()),
+          fetch('/calibration.json').then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch('/clusters.json').then(r => r.ok ? r.json() : null).catch(() => null)
+        ]).then(([s, c, cl]) => {
+          // Trigger a full reload on real state change so the table is rebuilt server-side.
+          window.location.reload();
+        });
       });
-    });
-    var lastUpdated = ${JSON.stringify(updatedAt)};
-    setInterval(function () {
-      fetch(window.location.pathname + '?ts=' + Date.now(), { cache: 'no-store' })
-        .then(function (r) { return r.text(); })
-        .then(function (html) {
-          var m = html.match(/id="updated">([^<]+)</);
-          if (m && m[1] && m[1] !== lastUpdated) { window.location.reload(); }
-        })
-        .catch(function () {});
-    }, 30000);
-  }());
+      es.onerror = () => { dot.classList.remove('on'); lbl.textContent = 'reconnecting'; };
+      return;
+    } catch (e) { /* fall through */ }
+  }
+  // No SSE — degrade to polling
+  lbl.textContent = 'polling';
+  let last = ${JSON.stringify(updatedAt)};
+  setInterval(() => {
+    fetch(window.location.pathname + '?ts=' + Date.now(), { cache: 'no-store' })
+      .then(r => r.text())
+      .then(html => {
+        const m = html.match(/id="updated">([^<]+)</);
+        if (m && m[1] && m[1] !== last) window.location.reload();
+      }).catch(() => {});
+  }, 30000);
+}());
 </script>
 </body>
 </html>`;
@@ -239,4 +451,4 @@ function renderDashboard(session) {
   return DASHBOARD_PATH;
 }
 
-module.exports = { renderDashboard, renderHtml, aggregateStats, DASHBOARD_PATH };
+module.exports = { renderDashboard, renderHtml, aggregateStats, reliability, agreementMatrix, DASHBOARD_PATH };

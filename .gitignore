@@ -5,4 +5,6 @@ node_modules/
 .DS_Store
 state/*.json
 state/*.json.bak
+state/cache/
+state/runs/
 dashboard/dashboard.html

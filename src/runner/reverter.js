@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { findAnchor, AnchorError } = require('./anchor-matcher');
 
 class FileSnapshot {
   constructor(repoRoot) {
@@ -47,17 +48,47 @@ function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
     throw new Error(`target file does not exist: ${relPath}`);
   }
   const src = fs.readFileSync(abs, 'utf8');
-  const idx = src.indexOf(currentCode);
-  if (idx === -1) {
-    throw new Error(`current_code anchor not found in ${relPath}`);
+
+  let match;
+  try {
+    match = findAnchor(src, currentCode);
+  } catch (err) {
+    if (err instanceof AnchorError) {
+      const e = new Error(`anchor match failed in ${relPath}: ${err.message}`);
+      e.tier = err.tier;
+      e.detail = err.detail;
+      throw e;
+    }
+    throw err;
   }
-  const occurrences = src.split(currentCode).length - 1;
-  if (occurrences > 1) {
-    throw new Error(`current_code anchor matches ${occurrences} locations in ${relPath}; ambiguous`);
+
+  // For non-exact tiers we may need to re-indent the replacement so it
+  // lands at the column the matched region actually used.
+  let replacement = proposedCode;
+  if (match.tier === 'indent-shift' && typeof match.delta === 'number' && match.delta !== 0) {
+    const lines = replacement.split('\n');
+    if (match.delta > 0) {
+      const pad = ' '.repeat(match.delta);
+      replacement = lines.map(l => l.length ? pad + l : l).join('\n');
+    } else {
+      const trim = -match.delta;
+      replacement = lines.map(l => {
+        let k = 0;
+        while (k < trim && k < l.length && l[k] === ' ') k++;
+        return l.slice(k);
+      }).join('\n');
+    }
   }
-  const next = src.slice(0, idx) + proposedCode + src.slice(idx + currentCode.length);
+
+  const next = src.slice(0, match.start) + replacement + src.slice(match.end);
   fs.writeFileSync(abs, next);
-  return { bytesBefore: src.length, bytesAfter: next.length };
+  return {
+    bytesBefore: src.length,
+    bytesAfter: next.length,
+    matchTier: match.tier,
+    matchScore: match.score == null ? null : match.score,
+    matchDelta: match.delta == null ? null : match.delta
+  };
 }
 
 module.exports = { FileSnapshot, applyEdit };
