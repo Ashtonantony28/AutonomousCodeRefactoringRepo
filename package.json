@@ -1,0 +1,27 @@
+{
+  "name": "autonomous-code-refactoring",
+  "version": "0.1.0",
+  "description": "Multi-agent autonomous code refactoring pipeline (Analyzer / Critic / Executor) with an RL feedback loop and an interpretability dashboard.",
+  "main": "src/orchestrator.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/orchestrator.js",
+    "test": "node test/smoke.js"
+  },
+  "bin": {
+    "refactor": "src/orchestrator.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@babel/parser": "^7.25.0",
+    "@babel/traverse": "^7.25.0",
+    "chalk": "^4.1.2",
+    "commander": "^12.1.0",
+    "ml-logistic-regression": "^2.0.0",
+    "ml-matrix": "^6.11.0",
+    "uuid": "^10.0.0"
+  }
+}
