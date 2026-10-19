@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { findAnchor, AnchorError } = require('./anchor-matcher');
+const { findAnchor, AnchorError, reindentReplacement } = require('./anchor-matcher');
 
 class FileSnapshot {
   constructor(repoRoot) {
@@ -62,23 +62,9 @@ function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
     throw err;
   }
 
-  // For non-exact tiers we may need to re-indent the replacement so it
-  // lands at the column the matched region actually used.
-  let replacement = proposedCode;
-  if (match.tier === 'indent-shift' && typeof match.delta === 'number' && match.delta !== 0) {
-    const lines = replacement.split('\n');
-    if (match.delta > 0) {
-      const pad = ' '.repeat(match.delta);
-      replacement = lines.map(l => l.length ? pad + l : l).join('\n');
-    } else {
-      const trim = -match.delta;
-      replacement = lines.map(l => {
-        let k = 0;
-        while (k < trim && k < l.length && l[k] === ' ') k++;
-        return l.slice(k);
-      }).join('\n');
-    }
-  }
+  // Non-exact tiers: re-indent the replacement to the matched region's
+  // indentation (tab-aware; shared helper with the indent-shift tier).
+  const replacement = reindentReplacement(src, match, currentCode, proposedCode);
 
   const next = src.slice(0, match.start) + replacement + src.slice(match.end);
   fs.writeFileSync(abs, next);
@@ -87,7 +73,10 @@ function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
     bytesAfter: next.length,
     matchTier: match.tier,
     matchScore: match.score == null ? null : match.score,
-    matchDelta: match.delta == null ? null : match.delta
+    matchDelta: match.delta == null ? null : match.delta,
+    matchStart: match.start,
+    matchEnd: match.end,
+    reindented: replacement !== proposedCode
   };
 }
 

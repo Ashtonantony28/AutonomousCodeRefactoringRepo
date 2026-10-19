@@ -47,7 +47,31 @@ function loadCases() {
       cases.push({ fixture: name, repo, abs, original: fs.readFileSync(abs, 'utf8'), proposal: rest });
     }
   }
-  return cases;
+  return cases.concat(largeApplyCases());
+}
+
+// Generated ~200 KB file (PLAN.md apply budget is for files <= 200 KB) to
+// time the slow anchor tiers: fuzzy accept, fuzzy reject (token mismatch,
+// expected to throw) and whitespace reflow, all near the end of the file.
+function largeApplyCases() {
+  const repo = path.join(scratch, 'fixtures', 'large-200kb');
+  fs.mkdirSync(repo, { recursive: true });
+  let src = '';
+  let n = 0;
+  const fn = (i) => `function fn_${i}(a, b) {\n  const r${i} = a * ${i} + b;\n  return r${i};\n}\n`;
+  while (src.length + fn(n).length <= 200 * 1024) src += fn(n++);
+  const abs = path.join(repo, 'big.js');
+  fs.writeFileSync(abs, src);
+  const k = n - 50;
+  const mk = (id, current, proposed, expectError = false) => ({
+    fixture: 'large-200kb', repo, abs, original: src, applyOnly: true, expectError,
+    proposal: { issue_id: id, file: 'big.js', current_code: current, proposed_code: proposed, reasoning: 'bench', risk_estimate: 0.1 }
+  });
+  return [
+    mk('large-fuzzy', `function fn_${k}(a, b) {\n  const r${k} = a*${k} + b;\n  return r${k};\n}`, `function fn_${k}(a, b) {\n  return a * ${k} + b;\n}`),
+    mk('large-fuzzy-reject', `function fn_${k}(a, b) {\n  const r${k} = a - ${k} + b;\n  return r${k};\n}`, 'function x() {}', true),
+    mk('large-whitespace', `function fn_${k}(a, b) { const r${k} = a * ${k} + b; return r${k}; }`, `function fn_${k}(a, b) { return a * ${k} + b; }`)
+  ];
 }
 
 function freshProposal(p) {
@@ -69,18 +93,26 @@ const stubCritic = async ({ proposal }) => ({
 });
 
 const RUNNERS = {
-  ast: { filter: () => true, run: (c) => runChecks({ proposal: freshProposal(c.proposal), repoRoot: c.repo }) },
+  ast: { filter: (c) => !c.applyOnly, run: (c) => runChecks({ proposal: freshProposal(c.proposal), repoRoot: c.repo }) },
   difftest: {
-    filter: (c) => /\.(js|cjs|mjs)$/i.test(c.proposal.file),
+    filter: (c) => !c.applyOnly && /\.(js|cjs|mjs)$/i.test(c.proposal.file),
     run: (c) => diffTesting.run({ currentSrc: c.proposal.current_code, proposedSrc: c.proposal.proposed_code, fileSrc: c.original })
   },
   apply: {
     filter: () => true,
     before: (c) => fs.writeFileSync(c.abs, c.original),
-    run: (c) => applyEdit({ repoRoot: c.repo, relPath: c.proposal.file, currentCode: c.proposal.current_code, proposedCode: c.proposal.proposed_code }),
+    run: (c) => {
+      try {
+        applyEdit({ repoRoot: c.repo, relPath: c.proposal.file, currentCode: c.proposal.current_code, proposedCode: c.proposal.proposed_code });
+      } catch (err) {
+        if (!c.expectError) throw err;
+        return;
+      }
+      if (c.expectError) throw new Error(`${c.proposal.issue_id}: expected apply to fail`);
+    },
     after: (c) => fs.writeFileSync(c.abs, c.original)
   },
-  validator: { filter: () => true, run: (c) => runHybridValidator({ proposal: freshProposal(c.proposal), repoRoot: c.repo, runCritic: stubCritic }) }
+  validator: { filter: (c) => !c.applyOnly, run: (c) => runHybridValidator({ proposal: freshProposal(c.proposal), repoRoot: c.repo, runCritic: stubCritic }) }
 };
 
 function percentile(sorted, q) {
@@ -131,7 +163,7 @@ async function main() {
     rows.push(await benchStage(name, cases, args.iterations));
   }
 
-  console.log(`bench: ${cases.length} fixture proposals, ${args.iterations} iterations`);
+  console.log(`bench: ${cases.length} proposals (${cases.filter(c => c.applyOnly).length} apply-only, 200 KB), ${args.iterations} iterations`);
   console.log(`${pad('stage', 10)} ${pad('description', 38)} ${lpad('n', 5)} ${lpad('p50 ms', 9)} ${lpad('p95 ms', 9)} ${lpad('budget', 8)}  result`);
   let failed = 0;
   for (const r of rows) {
