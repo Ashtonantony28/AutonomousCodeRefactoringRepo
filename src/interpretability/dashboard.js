@@ -216,7 +216,7 @@ function renderHtml(session) {
   const agree = agreementMatrix(session);
   let clusters = { clusters: [] };
   try { clusters = clusterFailures(session.proposals || []); } catch { /* */ }
-  const calibModel = calibration.load();
+  const calibModel = calibration.load(session.target_repo || null);
   const probe = probePanel(session.proposals || []);
 
   const inline = {
@@ -351,11 +351,10 @@ function renderHtml(session) {
       <h3>What-if · RL gate</h3>
       <div class="what-if">
         <div>predicted p_pass: <span class="p-pass" id="wi-ppass">—</span></div>
-        <label>critic_confidence <input id="wi-f0" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v0">0.70</span></label>
+        <label>p_preserves      <input id="wi-f0" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v0">0.70</span></label>
         <label>pattern_score    <input id="wi-f1" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v1">0.70</span></label>
         <label>complexity (LOC) <input id="wi-f2" type="range" min="1" max="200" step="1" value="20"><span id="wi-v2">20</span></label>
-        <label>files_changed    <input id="wi-f3" type="range" min="1" max="20" step="1" value="1"><span id="wi-v3">1</span></label>
-        <label>risk_estimate    <input id="wi-f4" type="range" min="0" max="1" step="0.01" value="0.3"><span id="wi-v4">0.30</span></label>
+        <label>risk_estimate    <input id="wi-f3" type="range" min="0" max="1" step="0.01" value="0.3"><span id="wi-v3">0.30</span></label>
       </div>
     </div>
     <div class="panel">
@@ -423,7 +422,7 @@ function drawReliability(rel) {
 
 function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
 function predictPpass(weights, x) {
-  if (!weights || !weights.w) return null;
+  if (!weights || !weights.w || weights.w.length !== x.length) return null;
   let z = weights.b;
   for (let j = 0; j < weights.w.length; j++) {
     const xs = (x[j] - weights.means[j]) / (weights.stds[j] || 1);
@@ -433,14 +432,14 @@ function predictPpass(weights, x) {
 }
 
 function wireWhatIf() {
-  const f = [0,1,2,3,4].map(i => document.getElementById('wi-f'+i));
-  const v = [0,1,2,3,4].map(i => document.getElementById('wi-v'+i));
+  const f = [0,1,2,3].map(i => document.getElementById('wi-f'+i));
+  const v = [0,1,2,3].map(i => document.getElementById('wi-v'+i));
   const out = document.getElementById('wi-ppass');
   function read() { return f.map(el => Number(el.value)); }
-  function fmt(j) { return j === 2 || j === 3 ? String(read()[j]) : read()[j].toFixed(2); }
+  function fmt(j) { return j === 2 ? String(read()[j]) : read()[j].toFixed(2); }
   function update() {
     const x = read();
-    for (let j = 0; j < 5; j++) v[j].textContent = fmt(j);
+    for (let j = 0; j < f.length; j++) v[j].textContent = fmt(j);
     fetch('/rl-weights.json').then(r => r.ok ? r.json() : null).then(w => {
       const p = predictPpass(w, x);
       out.textContent = p == null ? '—' : p.toFixed(3);

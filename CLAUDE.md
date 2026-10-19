@@ -133,29 +133,55 @@ errors introduced by the proposal), or every persona says
 
 ---
 
-## Reward function
+## Reward function (diagnostic)
 
 ```
 reward = log(p_correct + 1e-9) - 2.0 * false_positive_penalty
+         (+ stage-signal, coverage and disagreement terms, see src/rl/reward.js)
 ```
 
-- `p_correct` = combined_confidence when test_passed, else `1 - combined_confidence`
+- `p_correct` = c when test_passed, else `1 - c`, where `c` is the target's
+  isotonic-calibrated `combined_confidence` once calibration is trained
+  (raw `combined_confidence` before that)
 - `false_positive_penalty = 1` iff the Critic approved (`combined_confidence >= 0.5`)
   but tests failed; else `0`.
 
-If the rolling average reward over the last 10 samples decreases vs the prior
-window, log a warning to stdout.
+The reward is a **diagnostic**: it is logged, charted and checked for trend,
+but nothing is trained on it. If the rolling average reward over the last 10
+samples decreases vs the prior window, log a warning to stdout.
 
 ---
 
-## RL gate
+## Learned gate ("RL gate" in code and flags)
 
-When >= 10 RL samples exist, the Orchestrator trains the logistic-regression
-classifier and uses it as a pre-Executor gate:
+The gate is supervised learning on test outcomes, not reinforcement learning.
+All learning state is **per target repo**, under
+`stateDirFor(target) = <state>/targets/<sha256(abs repo path)>/`:
+`rl-samples.json`, `rl-weights.json`, `calibration.json`,
+`calibration-points.json`. Samples and calibration points accumulate across
+runs (de-duplicated by proposal id / mutant); training always uses all of them.
 
-- Features: `[critic_confidence, pattern_score, proposal_complexity, files_changed, risk_estimate]`
-- `p_pass < 0.4` → skip Executor, log as `rl_rejected`
-- `p_pass >= 0.4` → proceed
+- **Samples**: one per executed proposal with a label (`passed` = 1,
+  `reverted`/`failed` = 0; environment errors, apply failures and untested
+  edits are not samples).
+- **Features** (`FEATURE_NAMES` in `src/rl/features.js`):
+  `[p_preserves, pattern_score, proposal_complexity, risk_estimate]`
+  (`p_preserves` = jury mean). Weights saved under a different feature list
+  are ignored and retrained, never applied.
+- **Synthetic negatives**: for each passing proposal, up to 3 bug-injected
+  mutants of `proposed_code`, re-scored with `ast-checker.runChecks` and the
+  differential test (no Claude calls). Mutants the diff test shows
+  `equivalent` are dropped. Features = parent critic features + the mutant's
+  real AST/complexity features; `synthetic: true`, weight 0.5 in training.
+- **Classifier**: weighted logistic regression, trained after each run when
+  >= 10 samples with both labels exist for the target.
+- **Calibration**: isotonic regression of `combined_confidence` → pass, fitted
+  on all executed proposals for the target (needs >= 20).
+- **Gate** (pre-Executor): `p_pass` = min of the classifier's prediction and
+  the calibrated `combined_confidence`, over whichever is trained (no gate
+  when neither is).
+  - `p_pass < 0.4` → skip Executor, log as `rl_rejected`
+  - `p_pass >= 0.4` → proceed
 
 ---
 

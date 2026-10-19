@@ -7,10 +7,10 @@ const { featuresFor, summarizeRun, runPipeline } = require('../src/orchestrator'
 const { extractFeatures } = require('../src/rl/features');
 const { fakeProposals } = require('./helpers/factories');
 
-test('featuresFor returns 5 numbers', () => {
+test('featuresFor returns one number per feature', () => {
   const p = fakeProposals()[0];
   const f = featuresFor(p);
-  assert.strictEqual(f.length, 5);
+  assert.strictEqual(f.length, require('../src/rl/features').FEATURE_NAMES.length);
   assert.deepStrictEqual(f, extractFeatures(p));
 });
 

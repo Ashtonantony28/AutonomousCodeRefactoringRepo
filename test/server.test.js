@@ -108,3 +108,25 @@ test('server does not keep the process alive by default and close() stops it', a
   await close();
   assert.strictEqual(server.listening, false);
 });
+
+test('/rl-weights.json and /calibration.json follow the session target_repo', async () => {
+  const { saveWeights } = require('../src/rl/classifier');
+  const calibration = require('../src/rl/calibration');
+  const repoA = path.join(os.tmpdir(), 'sg6-server-a');
+  const repoB = path.join(os.tmpdir(), 'sg6-server-b');
+  saveWeights({ w: [1, 2, 3, 4], b: 0, marker: 'A' }, repoA);
+  saveWeights({ w: [4, 3, 2, 1], b: 0, marker: 'B' }, repoB);
+  calibration.fitFromProposals(fakeProposals(), repoA);
+  const { server, close } = await start({ port: 0, quiet: true });
+  try {
+    const { port } = server.address();
+    saveSession(freshSession(repoA));
+    assert.strictEqual(JSON.parse((await get(port, '/rl-weights.json')).body).marker, 'A');
+    assert(Array.isArray(JSON.parse((await get(port, '/calibration.json')).body).xs));
+    saveSession(freshSession(repoB));
+    assert.strictEqual(JSON.parse((await get(port, '/rl-weights.json')).body).marker, 'B');
+    assert.strictEqual(JSON.parse((await get(port, '/calibration.json')).body), null);
+  } finally {
+    await close();
+  }
+});

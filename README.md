@@ -28,8 +28,9 @@ Orchestrator
   │                       p_preserves >= 0.5; hard vetoes
   │                       (divergent diff test, parse veto, unanimous reject)
   │
-  ├── RL gate  ─► dependency-free logistic regression with counterfactual
-  │              "what-if" attribution; isotonic-calibrated combined_confidence
+  ├── Learned gate ("RL gate") ─► supervised logistic regression on test
+  │              outcomes, per target repo, plus isotonic-calibrated
+  │              combined_confidence; counterfactual "what-if" attribution
   │
   ├── Executor  ─► 4-tier anchor matching (exact → whitespace → indent → fuzzy);
   │               git worktree per run, one commit per passing edit;
@@ -42,7 +43,8 @@ Orchestrator
                             diagram + ECE; SSE live updates; failure clustering
 ```
 
-See [`CLAUDE.md`](./CLAUDE.md) for conventions, budgets, and the reward function.
+See [`CLAUDE.md`](./CLAUDE.md) for conventions, budgets, the learned gate, and the
+(diagnostic) reward function.
 
 ## Setup
 
@@ -103,8 +105,9 @@ src/
   runner/      anchor-matcher.js · reverter.js · test-runner.js · worktree.js
   utils/       file-discovery.js · token-tracker.js · checkpoint.js
                api-cache.js · claude-client.js
-state/         session.json · rl-weights.json · rl-samples.json   (override: REFACTOR_STATE_DIR)
-               calibration.json · cache/<hash>.json · runs/<run_id>/spans.ndjson
+state/         session.json · cache/<hash>.json · runs/<run_id>/spans.ndjson   (override: REFACTOR_STATE_DIR)
+               targets/<sha256(repo)>/  rl-samples.json · rl-weights.json
+                                        calibration.json · calibration-points.json
 dashboard/     dashboard.html   (override: REFACTOR_DASHBOARD_DIR)
 test/          *.test.js (node:test, stub Claude client, no API calls) · fixtures/ · helpers/
 bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
@@ -141,11 +144,21 @@ bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
   full pipeline. Reflexion (Shinn et al., NeurIPS 2023) + CRITIC (Gou et al.,
   ICLR 2024).
 
-- **Isotonic calibration** (`src/rl/calibration.js`): PAVA-based monotone
-  calibration of `combined_confidence`. Produces reliability bins and ECE
-  for the dashboard. Niculescu-Mizil & Caruana.
+- **Learned gate** (`src/rl/classifier.js`): weighted logistic regression on
+  `[p_preserves, pattern_score, proposal_complexity, risk_estimate]` with the
+  test outcome as label. Supervised learning, not RL (the "RL" names are kept
+  in code and flags). Samples accumulate per target repo across runs and every
+  training run uses all of them. The gate's `p_pass` is the lower of the
+  classifier and the calibrated `combined_confidence`; `p_pass < 0.4` →
+  `rl_rejected`.
 
-- **Richer reward function** (`src/rl/reward.js`):
+- **Isotonic calibration** (`src/rl/calibration.js`): PAVA-based monotone
+  calibration of `combined_confidence`, fitted on every executed proposal for
+  the target. Feeds the gate and the reward; produces reliability bins and
+  ECE for the dashboard. Niculescu-Mizil & Caruana.
+
+- **Diagnostic reward** (`src/rl/reward.js`), logged and trend-checked but
+  not trained on:
   ```
   reward = log(calibrated(p_correct))
          - 2.0 * false_positive_penalty
@@ -160,8 +173,10 @@ bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
 
 - **Bug injector** (`src/rl/bug-injector.js`): CriticGPT-style synthetic
   negatives (off-by-one, `==`/`===` swap, drop `await`, flip boolean,
-  drop `return`, remove null guard) emitted for every passing proposal
-  to enlarge the negative class without paying for real test failures.
+  drop `return`, remove null guard), up to 3 per passing proposal. Each
+  mutant is re-scored through the AST checks and the differential test (no
+  Claude calls); mutants shown equivalent are dropped, and the rest train
+  with weight 0.5 using the parent's critic features.
 
 - **API response cache** (`src/utils/api-cache.js`): sha256-keyed cache of
   Claude responses. `--cache replay` enables deterministic regression runs

@@ -29,9 +29,33 @@ test('fitFromProposals refuses too-few samples', () => {
   assert.strictEqual(calibration.fitFromProposals(fakeProposals().slice(0, 3)).trained, false);
 });
 
-test('fitFromProposals fits and writes calibration.json', () => {
+test('fitFromProposals without a target fits and writes the global calibration.json', () => {
   const r = calibration.fitFromProposals(fakeProposals());
   assert.strictEqual(r.trained, true);
   assert.strictEqual(calibration.MODEL_PATH, path.join(env.stateDir, 'calibration.json'));
   assert(fs.existsSync(calibration.MODEL_PATH));
+});
+
+test('fitFromProposals with a target writes under stateDirFor(target) and loadPredictor reads it', () => {
+  const { stateDirFor } = require('../src/utils/checkpoint');
+  const repo = path.join(env.root, 'cal-target');
+  assert.strictEqual(calibration.loadPredictor(repo).isTrained(), false);
+  const r = calibration.fitFromProposals(fakeProposals(), repo);
+  assert.strictEqual(r.trained, true);
+  assert.strictEqual(calibration.modelPath(repo), path.join(stateDirFor(repo), 'calibration.json'));
+  assert(fs.existsSync(calibration.modelPath(repo)));
+  const pred = calibration.loadPredictor(repo);
+  assert(pred.isTrained());
+  assert(pred.predict(0.78) > pred.predict(0.42));
+});
+
+test('only executed (labeled) proposals are calibration points', () => {
+  const pts = calibration.executedPoints([
+    { issue_id: 'a', combined_confidence: 0.7, test_outcome: { status: 'passed' } },
+    { issue_id: 'b', combined_confidence: 0.6, test_outcome: { status: 'reverted' } },
+    { issue_id: 'c', combined_confidence: 0.9, test_outcome: { status: 'dry_run' } },
+    { issue_id: 'd', combined_confidence: 0.9, test_outcome: { status: 'environment_error' } },
+    { issue_id: 'e', combined_confidence: null, test_outcome: { status: 'passed' } }
+  ]);
+  assert.deepStrictEqual(pts, [{ proposal_id: 'a', x: 0.7, y: 1 }, { proposal_id: 'b', x: 0.6, y: 0 }]);
 });

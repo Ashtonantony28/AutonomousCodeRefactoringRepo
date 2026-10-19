@@ -46,7 +46,7 @@ function fakeProposals(n = 25) {
       issue_id: 'p' + i, file: 'f.js', reasoning: '', current_code: 'x', proposed_code: 'y',
       risk_estimate: 0.1 + (i % 5) * 0.1,
       critic_verdict: {
-        claude_confidence: passed ? 0.85 : 0.4, edge_cases: passed ? [] : ['x'], hallucination_flags: [], reasoning: passed ? 'fine' : 'risky', preserves_semantics: passed,
+        p_preserves: passed ? 0.85 : 0.4, edge_cases: passed ? [] : ['x'], hallucination_flags: [], reasoning: passed ? 'fine' : 'risky', preserves_semantics: passed,
         agreement: { mean_confidence: passed ? 0.85 : 0.4, std_confidence: passed ? 0.03 : 0.2, unanimous_approval: passed, approval_rate: passed ? 1 : 0.3, verbal_entropy: passed ? 0.1 : 0.6 }
       },
       pattern_check_results: [{ check_name: 'a', passed: true, detail: '' }, { check_name: 'b', passed, detail: '' }],

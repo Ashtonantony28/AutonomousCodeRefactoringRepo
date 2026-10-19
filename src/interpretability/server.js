@@ -16,9 +16,10 @@
 
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
 
-const { stateDir, sessionPath } = require('../utils/checkpoint');
+const { sessionPath } = require('../utils/checkpoint');
+const { weightsPath } = require('../rl/classifier');
+const { modelPath } = require('../rl/calibration');
 const { dashboardPath, renderHtml } = require('./dashboard');
 
 const WATCH_INTERVAL_MS = 250;
@@ -117,12 +118,16 @@ function watchSession(state, intervalMs) {
 
 function route(req, res, state) {
   const url = req.url.split('?')[0];
-  const dir = stateDir();
   if (url === '/' || url === '/index.html') return serveDashboard(res);
+  // Learned-gate state is per target repo: follow the current session's target.
+  let target = null;
+  if (url === '/calibration.json' || url === '/rl-weights.json') {
+    try { target = (readJson(sessionPath()) || {}).target_repo || null; } catch { target = null; }
+  }
   const jsonFiles = {
     '/session.json': [sessionPath(), { proposals: [] }],
-    '/calibration.json': [path.join(dir, 'calibration.json'), null],
-    '/rl-weights.json': [path.join(dir, 'rl-weights.json'), null]
+    '/calibration.json': [modelPath(target), null],
+    '/rl-weights.json': [weightsPath(target), null]
   };
   if (jsonFiles[url]) {
     const [file, empty] = jsonFiles[url];
