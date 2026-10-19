@@ -11,8 +11,10 @@ const { execFileSync } = require('child_process');
 const BOT_NAME = 'refactor-bot';
 const BOT_EMAIL = 'refactor-bot@localhost';
 
+// No output cap: `git status` of a target with many untracked files easily
+// exceeds the 1 MB default, and a truncated answer must never read as "clean".
 function gitRaw(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: Infinity });
 }
 
 function git(cwd, args) {
@@ -45,10 +47,15 @@ function identityArgs(cwd) {
 }
 
 // Uncommitted target changes (what the Analyzer saw) are copied into the
-// worktree uncommitted, so the executor tests against the same code.
+// worktree uncommitted, so the executor tests against the same code. Any
+// failure throws: validating HEAD instead of what the Analyzer read is wrong.
 function syncDirtyFiles(top, wtTop) {
-  const out = tryGitRaw(top, ['status', '--porcelain', '-z', '-uall']);
-  if (!out) return [];
+  let out;
+  try {
+    out = gitRaw(top, ['status', '--porcelain', '-z', '-uall']);
+  } catch (err) {
+    throw new Error(`git status failed: ${String(err.stderr || err.message).trim()}`);
+  }
   // Entries are "XY path"; a rename/copy entry is followed by its source path.
   const entries = out.split('\0');
   const paths = [];
@@ -63,14 +70,18 @@ function syncDirtyFiles(top, wtTop) {
     const src = path.join(top, rel);
     const dst = path.join(wtTop, rel);
     try {
-      if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+      const st = fs.existsSync(src) ? fs.statSync(src) : null;
+      if (st && st.isDirectory()) continue; // submodule or nested repository: not file content
+      if (st && st.isFile()) {
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         fs.copyFileSync(src, dst);
       } else if (fs.existsSync(dst)) {
-        fs.rmSync(dst, { force: true });
+        fs.rmSync(dst, { force: true, recursive: true });
       }
       synced.push(rel);
-    } catch { /* best effort */ }
+    } catch (err) {
+      throw new Error(`could not copy ${rel} into the worktree: ${err.message}`);
+    }
   }
   return synced;
 }
@@ -85,6 +96,7 @@ function linkNodeModules(targetRoot, workRoot) {
 
 // Returns { mode: 'worktree', path, root, branch, base } or
 // { mode: 'in-place', root, reason } when the target is not a usable git repo.
+// Throws (worktree and branch removed) when the dirty-file sync fails.
 function createWorktree({ targetRepo, runId, baseDir }) {
   const absTarget = fs.realpathSync(path.resolve(targetRepo));
   const top = gitToplevel(absTarget);
@@ -103,7 +115,14 @@ function createWorktree({ targetRepo, runId, baseDir }) {
     return { mode: 'in-place', root: absTarget, reason: `git worktree add failed: ${String(err.stderr || err.message).trim()}` };
   }
   const base = git(wtPath, ['rev-parse', 'HEAD']);
-  const synced = syncDirtyFiles(top, wtPath);
+  let synced;
+  try {
+    synced = syncDirtyFiles(top, wtPath);
+  } catch (err) {
+    tryGit(top, ['worktree', 'remove', '--force', wtPath]);
+    tryGit(top, ['branch', '-D', branch]);
+    throw new Error(`uncommitted target changes could not be copied into the worktree (${err.message}); refusing to validate HEAD instead`);
+  }
   const root = path.join(wtPath, sub);
   linkNodeModules(absTarget, root);
   return { mode: 'worktree', path: wtPath, root, branch, base, sub, dirty_synced: synced };

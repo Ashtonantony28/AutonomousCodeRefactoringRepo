@@ -15,10 +15,11 @@ const MUTANT_CAP = 3;
 // share what the main run left of the test budget, each getting at most
 // 2x the main run's time + 1 s, and stop when less than the main run's time
 // + 0.5 s is left. The edited content is always written back.
-async function mutationEvidence({ repoRoot, file, edited, span, budgetMs, usedMs }) {
+async function mutationEvidence({ repoRoot, file, edited, span, budgetMs, usedMs, coverageMs = 0 }) {
   const t0 = Date.now();
   const abs = path.join(repoRoot, file);
   const suiteMs = usedMs;
+  usedMs += coverageMs; // the main run's coverage evaluation shares the budget; mutant runs collect none
   const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP });
   const out = { mutants: mutants.length, run: 0, killed: null };
   try {
@@ -48,7 +49,8 @@ async function mutationEvidence({ repoRoot, file, edited, span, budgetMs, usedMs
 // itself in the non-git fallback), runs the tests and keeps the edit only on a
 // pass that executed every changed function and killed a mutant of the edited
 // lines. Otherwise it is reverted: `reverted` with reason `edit_not_exercised`
-// / `no_coverage_tool` when no test ran the edit (pass or fail), or
+// / `no_coverage_tool` when no test ran the edit (pass or fail), `coverage_timeout`
+// when evaluating coverage overran the test budget, or
 // `tests_insensitive` when no mutant failed the suite. `snapshotPath` persists
 // the pre-edit content so a signal or crash mid-test can be undone. `onKept`
 // runs once an edit is final (the worktree commit) and its return value is
@@ -134,7 +136,7 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
     try {
       mutation = await mutationEvidence({
         repoRoot, file: proposal.file, edited, span,
-        budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs: testResult.execution_time_ms
+        budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs: testResult.execution_time_ms, coverageMs: coverage.duration_ms || 0
       });
     } catch (err) {
       mutation = { killed: null, error: err.message };

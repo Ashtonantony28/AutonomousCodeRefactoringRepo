@@ -159,3 +159,50 @@ test('stripCode keepStrings blanks comments only', () => {
   assert.strictEqual(polyglot.stripCode('x = "a#b"  # c\n', 'python', { keepStrings: true }), 'x = "a#b"     \n');
   assert.strictEqual(polyglot.stripCode("a('//x') // y", 'javascript', { keepStrings: true }), "a('//x')     ");
 });
+
+// ---------- SG16: the polyglot signature_drift scan gets the JS bounds ----------
+
+const PY_CUR = 'def normalize(a, b):\n    return float(a) + float(b)';
+const PY_PROP = 'def normalize(a, b, c=0):\n    return float(a) + float(b) + c';
+const pyDrift = (dir) => find(runAll({ proposal: makeProposal('core/util.py', PY_CUR, PY_PROP), repoRoot: dir }), 'signature_drift');
+
+test('Python signature_drift stops at the first file with a call site', () => {
+  const files = { 'core/util.py': `${PY_CUR}\n` };
+  for (let i = 0; i < 20; i++) files[`p/m${i}.py`] = `from core.util import normalize\n\n\ndef use${i}(a, b):\n    return normalize(a, b)\n`;
+  const c = pyDrift(tmpRepo(files));
+  assert.strictEqual(c.passed, false);
+  assert.strictEqual(c.severity, 'veto');
+  assert.match(c.detail, /stops at the first call site/);
+  assert.strictEqual((c.detail.match(/normalize in /g) || []).length, 1, c.detail);
+});
+
+test('Python signature_drift scans at most 200 files naming the function, says so, and scans files naming the edited module first', () => {
+  const files = { 'core/util.py': `${PY_CUR}\n` };
+  for (let i = 0; i < 205; i++) files[`m${i}.py`] = `# normalize\nx${i} = ${i}\n`;
+  const dir = tmpRepo(files);
+  const c = pyDrift(dir);
+  assert.strictEqual(c.passed, true, c.detail);
+  assert.match(c.detail, /capped at 200 files/);
+  // Root files are walked before z/, so a scan in walk order would cap out first.
+  fs.mkdirSync(path.join(dir, 'z'));
+  fs.writeFileSync(path.join(dir, 'z', 'caller.py'), 'from core.util import normalize\n\nprint(normalize(1, 2))\n');
+  const c2 = pyDrift(dir);
+  assert.strictEqual(c2.passed, false, c2.detail);
+  assert.match(c2.detail, /normalize in z\/caller\.py \(1\)/);
+});
+
+test('Python signature_drift over ~15 MB of files naming the function: repeat scans come from the strip cache', () => {
+  const files = { 'core/util.py': `${PY_CUR}\n` };
+  for (let i = 0; i < 150; i++) {
+    let body = `# normalize is not called here\n\n\n`;
+    for (let j = 0; body.length < 100_000; j++) body += `def f${i}_${j}(a, b):\n    t = a * ${j} + b\n    return t\n\n\n`;
+    files[`p${i % 7}/m${i}.py`] = body;
+  }
+  const dir = tmpRepo(files);
+  assert.strictEqual(pyDrift(dir).passed, true);
+  const t0 = performance.now();
+  const c = pyDrift(dir);
+  const ms = performance.now() - t0;
+  assert.strictEqual(c.passed, true, c.detail);
+  assert(ms < 400, `warm runChecks took ${ms.toFixed(0)} ms`);
+});

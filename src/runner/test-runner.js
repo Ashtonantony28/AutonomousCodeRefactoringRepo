@@ -143,14 +143,33 @@ function changedSpan(before, after) {
   return { start: pre, end: after.length - suf };
 }
 
-function lineOf(src, offset) {
-  let n = 1;
-  for (let i = 0; i < offset && i < src.length; i++) if (src[i] === '\n') n++;
-  return n;
+function lineStarts(src) {
+  const out = [0];
+  for (let i = src.indexOf('\n'); i !== -1; i = src.indexOf('\n', i + 1)) out.push(i + 1);
+  return out;
 }
+
+// 1-based line of `offset`, by binary search over lineStarts().
+function lineAt(starts, offset) {
+  let lo = 0, hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid] <= offset) lo = mid; else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+// Post-exit coverage work shares the test budget: past `deadline` it stops
+// and the edit is reverted with reason `coverage_timeout`.
+class CoverageTimeout extends Error {}
+function checkDeadline(deadline) {
+  if (Date.now() > deadline) throw new CoverageTimeout('coverage evaluation exceeded the test budget');
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
 
 // coverage.py has to be importable by the interpreter that runs pytest, so it
 // is looked up through pytest's shebang. Returns that python, or null.
+const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 const pyCoverage = new Map();
 function pytestPythonWithCoverage() {
   const key = process.env.PATH || '';
@@ -229,61 +248,83 @@ function codeProbes(src, span, isComment) {
   return probes;
 }
 
-function smallest(ranges, off) {
-  let best = null;
-  for (const r of ranges) {
-    if (r.startOffset <= off && off < r.endOffset &&
-        (!best || r.endOffset - r.startOffset < best.endOffset - best.startOffset)) best = r;
+// For each offset of the ascending `offs`, the innermost range containing it
+// (or null): ranges sorted by start (longer first, then by original order),
+// swept once with a stack of the ranges still open. V8 ranges nest.
+function innermost(ranges, offs) {
+  const order = ranges.map((_, i) => i).sort((a, b) =>
+    ranges[a].startOffset - ranges[b].startOffset || ranges[b].endOffset - ranges[a].endOffset || b - a);
+  const out = new Array(offs.length);
+  const open = [];
+  let k = 0;
+  for (let j = 0; j < offs.length; j++) {
+    const off = offs[j];
+    while (k < order.length && ranges[order[k]].startOffset <= off) {
+      const r = ranges[order[k++]];
+      while (open.length && open[open.length - 1].endOffset <= r.startOffset) open.pop();
+      open.push(r);
+    }
+    while (open.length && open[open.length - 1].endOffset <= off) open.pop();
+    out[j] = open.length ? open[open.length - 1] : null;
   }
-  return best;
+  return out;
 }
 
 // A character counts as executed when, in some process, the innermost V8
 // range containing it has a non-zero count; its group is the innermost V8
-// function containing it.
-function v8Exercised(covDir, absFile, src, span) {
+// function containing it. Only coverage files naming the edited file are
+// parsed; the event loop gets a turn between files.
+async function v8Exercised(covDir, absFile, src, span, deadline) {
   const urls = new Set([pathToFileURL(absFile).href]);
   try { urls.add(pathToFileURL(fs.realpathSync(absFile)).href); } catch { /* */ }
   const shift = src.charCodeAt(0) === 0xFEFF ? 1 : 0; // the CJS loader strips a BOM
   const probes = codeProbes(src, span, commentMask(src, absFile));
-  const hit = new Set();
-  const groupOf = new Map();
+  const offs = probes.map(o => o - shift);
+  checkDeadline(deadline);
+  const hit = new Uint8Array(probes.length);
+  let hits = 0;
+  let groupOf = null;
   let loaded = false;
   let names = [];
-  try { names = fs.readdirSync(covDir).filter(n => n.endsWith('.json')); } catch { /* */ }
+  try { names = (await fs.promises.readdir(covDir)).filter(n => n.endsWith('.json')); } catch { /* */ }
   for (const name of names) {
+    if (hits === probes.length && groupOf) break;
+    await tick();
+    checkDeadline(deadline);
     let data;
     try {
-      const raw = fs.readFileSync(path.join(covDir, name), 'utf8');
+      const raw = await fs.promises.readFile(path.join(covDir, name), 'utf8');
       if (![...urls].some(u => raw.includes(u))) continue;
+      checkDeadline(deadline);
       data = JSON.parse(raw);
-    } catch { continue; }
+    } catch (err) {
+      if (err instanceof CoverageTimeout) throw err;
+      continue;
+    }
     for (const script of data.result || []) {
       if (!urls.has(script.url)) continue;
       loaded = true;
       const fns = (script.functions || []).filter(f => f.ranges && f.ranges.length);
-      const ranges = fns.flatMap(f => f.ranges);
-      const extents = fns.map(f => f.ranges[0]);
-      for (const off of probes) {
-        if (!groupOf.has(off)) {
-          const fn = smallest(extents, off - shift);
-          groupOf.set(off, fn ? `${fn.startOffset}:${fn.endOffset}` : 'script');
-        }
-        if (hit.has(off)) continue;
-        const best = smallest(ranges, off - shift);
-        if (best && best.count > 0) hit.add(off);
+      if (!groupOf) groupOf = innermost(fns.map(f => f.ranges[0]), offs).map(fn => fn ? `${fn.startOffset}:${fn.endOffset}` : 'script');
+      const best = innermost(fns.flatMap(f => f.ranges), offs);
+      for (let j = 0; j < probes.length; j++) {
+        if (!hit[j] && best[j] && best[j].count > 0) { hit[j] = 1; hits++; }
       }
     }
   }
+  const starts = lineStarts(src);
   const groups = new Map();
-  for (const off of probes) {
-    const k = groupOf.get(off) || 'unloaded';
-    const g = groups.get(k) || { line: lineOf(src, off), hit: false };
-    g.hit = g.hit || hit.has(off);
+  const lines = new Set();
+  const executed = new Set();
+  probes.forEach((off, j) => {
+    const line = lineAt(starts, off);
+    lines.add(line);
+    if (hit[j]) executed.add(line);
+    const k = groupOf ? groupOf[j] : 'unloaded';
+    const g = groups.get(k) || { line, hit: false };
+    g.hit = g.hit || !!hit[j];
     groups.set(k, g);
-  }
-  const lines = new Set(probes.map(o => lineOf(src, o)));
-  const executed = new Set([...hit].map(o => lineOf(src, o)));
+  });
   return summarize('v8', lines.size, executed.size, { detail: loaded ? null : 'file never loaded by the tests', groups: [...groups.values()] });
 }
 
@@ -292,11 +333,12 @@ function v8Exercised(covDir, absFile, src, span) {
 // Only statements count (coverage.py's executed + missing lines: no comments,
 // docstrings or continuation lines); each is grouped by its innermost def.
 const PY_HEADER = /^\s*(?:@|(?:async\s+)?def\b|class\b)/;
-function pyExercised(jsonPath, repoRoot, absFile, src, span) {
-  let files;
-  try { files = JSON.parse(fs.readFileSync(jsonPath, 'utf8')).files || {}; } catch { return summarize('coverage.py', 0, 0, { detail: 'no coverage data' }); }
-  const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
-  const key = Object.keys(files).find(k => real(path.resolve(repoRoot, k)) === real(absFile));
+function pyExercised(jsonPath, repoRoot, absFile, src, span, { noData = false } = {}) {
+  let files = {};
+  if (!noData) {
+    try { files = JSON.parse(fs.readFileSync(jsonPath, 'utf8')).files || {}; } catch { return summarize('coverage.py', 0, 0, { detail: 'no coverage data' }); }
+  }
+  const key = Object.keys(files).find(k => realOr(path.resolve(repoRoot, k)) === realOr(absFile));
   const executed = new Set(key ? files[key].executed_lines || [] : []);
   const statements = key ? new Set([...executed, ...(files[key].missing_lines || [])]) : null;
   const srcLines = src.split('\n');
@@ -306,15 +348,14 @@ function pyExercised(jsonPath, repoRoot, absFile, src, span) {
     const t = (srcLines[n - 1] || '').trim();
     return !!t && !t.startsWith('#');
   };
-  const first = lineOf(src, span.start);
-  const last = span.end > span.start ? lineOf(src, span.end - 1) : first;
+  const lineStart = lineStarts(src);
+  const first = lineAt(lineStart, span.start);
+  const last = span.end > span.start ? lineAt(lineStart, span.end - 1) : first;
   let lines = [];
   for (let n = first; n <= last; n++) if (isStmt(n)) lines.push(n);
   if (!lines.length) {
     for (let n = last + 1; n <= srcLines.length; n++) if (isStmt(n)) { lines = [n]; break; }
   }
-  const lineStart = [0];
-  for (let i = 0; i < src.length; i++) if (src[i] === '\n') lineStart.push(i + 1);
   const defs = require('../validation/polyglot-ast').parsePython(src).functions;
   const groups = new Map();
   for (const n of lines) {
@@ -354,6 +395,11 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   // (an edit, a mutant) must not be served a stale .pyc.
   const pycDir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-pyc-'));
   const env = { ...process.env, CI: '1', PYTHONPYCACHEPREFIX: pycDir };
+  // Coverage is collected only when it is evaluated (an inherited
+  // NODE_V8_COVERAGE would make every run, mutant runs included, pay for it;
+  // spawn re-adds it unless the key is present, so it is emptied).
+  env.NODE_V8_COVERAGE = '';
+  delete env.COVERAGE_PROCESS_START;
   let cmd = detected.cmd, args = detected.args;
   if (tool === 'v8') env.NODE_V8_COVERAGE = covDir;
   if (tool === 'coverage.py') {
@@ -363,21 +409,30 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   }
 
   let result, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
+  const deadline = Date.now() + timeoutMs;
+  let tCov = null;
   try {
     result = await runCommand({ cmd, args, cwd: repoRoot, env, timeoutMs });
     if (tool && !result.timedOut && !result.spawnError) {
+      tCov = Date.now();
+      checkDeadline(deadline);
       const absFile = path.resolve(repoRoot, edit.file);
       const src = fs.readFileSync(absFile, 'utf8');
       if (tool === 'v8') {
-        coverage = v8Exercised(covDir, absFile, src, edit);
+        coverage = await v8Exercised(covDir, absFile, src, edit, deadline);
       } else {
+        // Report the edited file only, in what is left of the test budget.
         const jsonPath = path.join(covDir, 'coverage.json');
-        spawnSync(cmd, ['-m', 'coverage', 'json', '-q', '-o', jsonPath], { cwd: repoRoot, env, stdio: 'ignore', timeout: 30_000 });
-        coverage = pyExercised(jsonPath, repoRoot, absFile, src, edit);
+        const include = [...new Set([absFile, realOr(absFile)])].join(',');
+        const r = await runCommand({ cmd, args: ['-m', 'coverage', 'json', '-q', '-o', jsonPath, '--include', include], cwd: repoRoot, env, timeoutMs: Math.max(1, deadline - Date.now()) });
+        if (r.timedOut) throw new CoverageTimeout('coverage json exceeded the test budget');
+        coverage = pyExercised(jsonPath, repoRoot, absFile, src, edit, { noData: r.exitCode !== 0 && /No data to report/.test(r.stdout + r.stderr) });
       }
     }
   } catch (err) {
-    coverage = { available: true, tool, exercised: false, reason: 'edit_not_exercised', detail: `coverage unreadable: ${err.message}` };
+    coverage = err instanceof CoverageTimeout
+      ? { available: true, tool, exercised: false, reason: 'coverage_timeout', detail: `${err.message} (${timeoutMs} ms)` }
+      : { available: true, tool, exercised: false, reason: 'edit_not_exercised', detail: `coverage unreadable: ${err.message}` };
   } finally {
     if (covDir) fs.rmSync(covDir, { recursive: true, force: true });
     fs.rmSync(pycDir, { recursive: true, force: true });
@@ -403,7 +458,10 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     stderr: truncate(result.stderr, 4000),
     timed_out: result.timedOut
   };
-  if (coverage) out.coverage = coverage;
+  if (coverage) {
+    if (tCov != null) coverage.duration_ms = Date.now() - tCov;
+    out.coverage = coverage;
+  }
   return out;
 }
 

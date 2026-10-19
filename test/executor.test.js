@@ -428,3 +428,38 @@ test('editMutants: parse-valid mutants of the changed characters, else of the ed
   assert(pm.length >= 1 && pm.every(m => !m.src.includes('===')), JSON.stringify(pm));
   assert.deepStrictEqual(editMutants('a = 1\n', { start: 0, end: 5, file: 'a.go' }), []);
 });
+
+// ---------- SG16: coverage evaluation shares the test budget ----------
+
+test('coverage evaluation that overruns the test budget: reverted coverage_timeout, untested, not edit_not_exercised', async (t) => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-sg16-'));
+  t.after(() => env.rm(repo));
+  // `make test` is `true` (far inside 300 ms); evaluating a 4 MB edited file is not.
+  fs.writeFileSync(path.join(repo, 'Makefile'), 'test:\n\t@true\n');
+  const cur = 'function head(a, b) {\n  const t = a + b;\n  return t;\n}';
+  let src = `'use strict';\n${cur}\n`;
+  for (let j = 0; src.length < 4e6; j++) src += `function f${j}(a, b) {\n  const t = a * ${j} + b;\n  return t;\n}\n`;
+  fs.writeFileSync(path.join(repo, 'big.js'), src);
+  let kept = false;
+  const res = await runExecutor({
+    proposal: makeProposal('big.js', cur, 'function head(a, b) {\n  return a + b;\n}'), repoRoot: repo, testTimeoutMs: 300, onKept: () => { kept = true; }
+  });
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.coverage));
+  assert.strictEqual(res.reason, 'coverage_timeout');
+  assert(!isLabeled(res), 'a coverage overrun is no label');
+  assertReverted(res, repo, 'big.js', src, kept);
+});
+
+test('mutant runs collect no coverage, even with NODE_V8_COVERAGE inherited', async (t) => {
+  const covDir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-sg16-cov-'));
+  const prev = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_V8_COVERAGE = covDir;
+  t.after(() => { if (prev === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = prev; env.rm(covDir); });
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo }));
+  assert.strictEqual(res.status, 'passed', res.stderr_tail);
+  assert(res.mutation.run >= 1);
+  assert.strictEqual(res.coverage.exercised, true);
+  assert.deepStrictEqual(fs.readdirSync(covDir), []);
+});

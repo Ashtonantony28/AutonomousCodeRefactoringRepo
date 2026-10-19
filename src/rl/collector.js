@@ -10,7 +10,7 @@ const { extractFeatures } = require('./features');
 const LABELED_STATUSES = ['passed', 'failed', 'reverted'];
 // `reverted` because no test ran the edit, or no mutant of it failed the
 // suite: the tests never judged it.
-const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool', 'tests_insensitive'];
+const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool', 'coverage_timeout', 'tests_insensitive'];
 
 function isLabeled(outcome) {
   return !!outcome && LABELED_STATUSES.includes(outcome.status) && !UNTESTED_REASONS.includes(outcome.reason);

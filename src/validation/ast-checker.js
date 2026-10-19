@@ -240,6 +240,27 @@ function importsTarget(fileAbs, sources, targetAbs) {
   return false;
 }
 
+// Every quote-delimited run starting with '.' (tried at every quote, so a
+// mis-paired quote cannot hide the next one): a superset of the relative
+// module specifiers collectImports() finds, without a parse.
+function relativeSpecifiers(src) {
+  const out = [];
+  for (const m of src.matchAll(/(['"`])(?=(\.[^'"`\n]*)\1)/g)) out.push(m[2]);
+  return out;
+}
+
+// Lexical superset of the calls callMatches() accepts for `d` (comments may
+// sit between the tokens), so a file without a match needs no parse.
+const GAP = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n)*`;
+function callShapeRe(d) {
+  const n = escapeRegExp(d.callName);
+  if (d.kind === 'constructor') return new RegExp(`(?<![\\w$])${n}(?![\\w$])`); // `new C` needs no parens
+  const computed = `\\[${GAP}(['"\`])${n}\\1${GAP}\\]`;
+  const call = `${GAP}(?:\\?\\.${GAP})?\\(`;
+  if (d.kind === 'method') return new RegExp(`(?:\\.${GAP}${n}(?![\\w$])|${computed})${call}`);
+  return new RegExp(`(?:(?<![\\w$])${n}(?![\\w$])(?:${GAP}\\.${GAP}(?:call|apply)(?![\\w$]))?|${computed})${call}`);
+}
+
 function findCallSites({ drifted, proposedAst, region, repoRoot, file, fullSrc }) {
   const hits = [];
   const add = (d, where, count) => { if (count) hits.push({ name: d.callName, file: where, count }); };
@@ -266,20 +287,33 @@ function findCallSites({ drifted, proposedAst, region, repoRoot, file, fullSrc }
   const targetAbs = file ? path.resolve(repoRoot, file) : null;
   const names = [...new Set(drifted.map(d => d.callName))];
   const nameRe = new RegExp(`(?<![\\w$])(?:${names.map(escapeRegExp).join('|')})(?![\\w$])`);
-  let scanned = 0;
-  for (const f of polyglot.collectRepoFiles(repoRoot, 500, JS_RE)) {
-    // One call site already fails the check; stop parsing.
-    if (hits.length) { hits.stopped = true; break; }
+  // A plain function or constructor is only matched in files that import the
+  // edited module, so files that do (lexically) are scanned first and, with
+  // no method among the drifted, the others are not read further. A file is
+  // parsed only when some drifted name appears in a call shape.
+  const shapes = drifted.map(d => ({ d, re: callShapeRe(d) }));
+  const importers = [], others = [];
+  for (const f of polyglot.collectRepoFiles(repoRoot, polyglot.SCAN_MAX_WALK, JS_RE)) {
     if (f === targetAbs) continue;
     const src = polyglot.safeRead(f);
     if (!src || !nameRe.test(src)) continue;
-    if (scanned >= CALL_SCAN_MAX_FILES) { hits.capped = true; break; }
+    const imp = !targetAbs || importsTarget(f, relativeSpecifiers(src), targetAbs);
+    if (!shapes.some(({ d, re }) => (imp || d.kind === 'method') && re.test(src))) continue;
+    (imp ? importers : others).push({ f, src, imp });
+  }
+  let scanned = 0, bytes = 0;
+  for (const { f, src, imp } of importers.concat(others)) {
+    // One call site already fails the check; stop parsing.
+    if (hits.length) { hits.stopped = true; break; }
+    if (scanned >= CALL_SCAN_MAX_FILES || (scanned && bytes + src.length > CALL_SCAN_MAX_BYTES)) { hits.capped = true; break; }
     scanned++;
+    bytes += src.length;
     const rel = path.relative(repoRoot, f);
     const parsed = parsedCalls(f, src);
     if (!parsed) {
       const stripped = polyglot.stripCode(src, 'javascript');
       for (const d of drifted) {
+        if (d.kind !== 'method' && !imp) continue;
         const n = escapeRegExp(d.callName);
         const calls = (stripped.match(new RegExp(`(?<![\\w$])${n}\\s*\\(`, 'g')) || []).length;
         const defs = (stripped.match(new RegExp(`\\bfunction\\s*\\*?\\s*${n}\\s*\\(`, 'g')) || []).length;
@@ -297,8 +331,10 @@ function findCallSites({ drifted, proposedAst, region, repoRoot, file, fullSrc }
 }
 
 // Parse cache for call-site scans: per process (one run), keyed by path and
-// validated by size + mtime, bounded in entries.
+// validated by size + mtime, bounded in entries. The scan parses at most
+// CALL_SCAN_MAX_FILES files and CALL_SCAN_MAX_BYTES of source.
 const CALL_SCAN_MAX_FILES = 200;
+const CALL_SCAN_MAX_BYTES = 2_000_000;
 const PARSE_CACHE_MAX = 2000;
 const parseCache = new Map();
 
@@ -335,7 +371,7 @@ function checkSignatureDrift({ currentAst, proposedAst, repoRoot, region = null,
     : `${d.qname}: ${d.before}→${d.after} args`;
   const where = hits.map(h => `${h.name} in ${h.file} (${h.count})`).join(', ');
   const scan = hits.stopped ? ' (repo scan stops at the first call site)'
-    : hits.capped ? ` (repo scan capped at ${CALL_SCAN_MAX_FILES} files mentioning the name; rest not checked)` : '';
+    : hits.capped ? ` (repo scan capped at ${CALL_SCAN_MAX_FILES} files / ${CALL_SCAN_MAX_BYTES / 1e6} MB calling the name; rest not checked)` : '';
   return {
     check_name: 'signature_drift',
     passed: hits.length === 0,

@@ -235,7 +235,7 @@ test('signature_drift parses only files naming the function on a word boundary, 
   const prop = 'function tally(a, b) {\n  return a + (b || 0);\n}';
   const files = { 'lib.js': `${cur}\nmodule.exports = { tally };\n` };
   for (let i = 0; i < 5; i++) files[`near/n${i}.js`] = `// near${i}\nconst tallyTotal = 1;\nfunction untally() { return tallyTotal; }\n`;
-  for (let i = 0; i < 3; i++) files[`word/w${i}.js`] = `// word${i}\nconst label = 'tally';\nmodule.exports = { label };\n`;
+  for (let i = 0; i < 3; i++) files[`word/w${i}.js`] = `// word${i}\nconst lib = require('../lib');\nconst label = 'tally()';\nmodule.exports = { label };\n`;
   const dir = repoWith(files);
   const proposal = makeProposal('lib.js', cur, prop);
   const first = countParses(() => assert.strictEqual(check(runChecks({ proposal, repoRoot: dir }), 'signature_drift').passed, true));
@@ -252,7 +252,7 @@ test('signature_drift scan is capped and says so; it stops at the first call sit
   const cur = 'function capme(a) {\n  return a;\n}';
   const prop = 'function capme(a, b) {\n  return a + (b || 0);\n}';
   const files = { 'lib.js': `${cur}\nmodule.exports = { capme };\n` };
-  for (let i = 0; i < 205; i++) files[`m/f${i}.js`] = `// mention${i}\nconst name = 'capme';\nmodule.exports = { name };\n`;
+  for (let i = 0; i < 205; i++) files[`m/f${i}.js`] = `// mention${i}\nconst lib = require('../lib');\nconst name = 'capme()';\nmodule.exports = { name };\n`;
   const dir = repoWith(files);
   let c;
   const parsed = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', cur, prop), repoRoot: dir }), 'signature_drift'); });
@@ -268,4 +268,87 @@ test('signature_drift scan is capped and says so; it stops at the first call sit
   assert.strictEqual(c.severity, 'veto');
   assert.strictEqual(parsed2.filter(s => s.startsWith('// caller')).length, 1, 'scan stops at the first file with a call site');
   assert.match(c.detail, /stops at the first call site/);
+});
+
+// ---------- SG16: the scan prefers importers and stays bounded with common names ----------
+
+const NORM_CUR = 'function normalize(a, b) {\n  return Number(a) + Number(b);\n}';
+const NORM_PROP = 'function normalize(a, b, c) {\n  return Number(a) + Number(b) + (c ? 0 : 0);\n}';
+
+// `n` root-level files that define and call their own `normalize` without
+// importing lib.js: no call site of the edited function.
+function commonNameFiles(n, bytes = 0) {
+  const files = { 'lib.js': `${NORM_CUR}\nmodule.exports = { normalize };\n` };
+  for (let i = 0; i < n; i++) {
+    let body = `// local${i}\nfunction normalize(x) { return String(x).trim(); }\nfunction use${i}(a) { return normalize(a); }\n`;
+    for (let j = 0; body.length < bytes; j++) body += `function f${i}_${j}(a, b) {\n  const t = a * ${j} + b;\n  return t;\n}\n`;
+    files[`f${i}.js`] = body + `module.exports = { use${i} };\n`;
+  }
+  return files;
+}
+
+test('signature_drift of a plain function does not parse files that never import the edited module', () => {
+  const dir = repoWith(commonNameFiles(30));
+  let c;
+  const parsed = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', NORM_CUR, NORM_PROP), repoRoot: dir }), 'signature_drift'); });
+  assert.strictEqual(c.passed, true, c.detail);
+  assert.strictEqual(parsed.filter(s => s.startsWith('// local')).length, 0);
+});
+
+test('signature_drift scans importers first: a real caller behind 200+ files naming the function is found', () => {
+  // Root files are walked before sub/, so a scan in walk order caps out first.
+  const files = commonNameFiles(205);
+  // The quote after 'a' pairs with the specifier's opening quote: the import must still be seen.
+  files['sub/caller.js'] = "// caller\nconst n = 'a'.length; const { normalize } = require('../lib');\nmodule.exports = (x) => normalize(x, n);\n";
+  const dir = repoWith(files);
+  const c = check(runChecks({ proposal: makeProposal('lib.js', NORM_CUR, NORM_PROP), repoRoot: dir }), 'signature_drift');
+  assert.strictEqual(c.passed, false, c.detail);
+  assert.strictEqual(c.severity, 'veto');
+  assert.match(c.detail, /normalize in sub\/caller\.js \(1\)/);
+});
+
+test('signature_drift with a common name over ~15 MB of non-importing files stays fast (cold)', () => {
+  const dir = repoWith(commonNameFiles(250, 60_000));
+  // A different edited module so no earlier test warmed the parse cache.
+  fs.writeFileSync(path.join(dir, 'lib2.js'), `${NORM_CUR}\nmodule.exports = { normalize };\n`);
+  const t0 = performance.now();
+  const c = check(runChecks({ proposal: makeProposal('lib2.js', NORM_CUR, NORM_PROP), repoRoot: dir }), 'signature_drift');
+  const ms = performance.now() - t0;
+  assert.strictEqual(c.passed, true, c.detail);
+  assert(ms < 1000, `runChecks took ${ms.toFixed(0)} ms`);
+});
+
+test('signature_drift parses an importer only when the name appears in a call shape', () => {
+  const cur = 'function shape(a) {\n  return a;\n}';
+  const prop = 'function shape(a, b) {\n  return a + (b || 0);\n}';
+  const dir = repoWith({
+    'lib.js': `${cur}\nmodule.exports = { shape };\n`,
+    // Root files are walked before sub/: a parse in walk order reaches ref.js first.
+    'ref.js': "// ref\nconst { shape } = require('./lib');\nmodule.exports = [1].map(shape);\n",
+    'sub/calls.js': "// calls\nconst lib = require('../lib');\nmodule.exports = lib.shape /* old */ (1);\n",
+    'sub/quoted.js': "// quoted\nconst lib = require('../lib');\nmodule.exports = lib['shape'](2);\n"
+  });
+  let c;
+  const parsed = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', cur, prop), repoRoot: dir }), 'signature_drift'); });
+  assert.strictEqual(c.passed, false, c.detail);
+  assert.match(c.detail, /shape in sub\/(calls|quoted)\.js \(1\)/);
+  assert.strictEqual(parsed.filter(s => s.startsWith('// ref')).length, 0, 'a reference that is not a call is not parsed');
+});
+
+test('signature_drift of a method is bounded by bytes parsed as well as files', () => {
+  const cur = 'class Fmt {\n  fmt(a) {\n    return a;\n  }\n}';
+  const prop = 'class Fmt {\n  fmt(a, b) {\n    return a + b;\n  }\n}';
+  const files = { 'lib.js': `${cur}\nmodule.exports = { Fmt };\n` };
+  for (let i = 0; i < 30; i++) {
+    let body = `// meth${i}\nconst doc = 'call x.fmt(1) for help';\n`;
+    for (let j = 0; body.length < 100_000; j++) body += `function g${i}_${j}(a) {\n  return a + ${j};\n}\n`;
+    files[`m${i}.js`] = body;
+  }
+  const dir = repoWith(files);
+  let c;
+  const parsed = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', cur, prop), repoRoot: dir }), 'signature_drift'); });
+  assert.strictEqual(c.passed, true, c.detail);
+  assert.match(c.detail, /capped at 200 files \/ 2 MB/);
+  const n = parsed.filter(s => s.startsWith('// meth')).length;
+  assert(n >= 1 && n < 30, `parsed ${n} files`);
 });
