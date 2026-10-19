@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { stateDir, stateDirFor } = require('../utils/checkpoint');
 const { extractFeatures } = require('./features');
 
@@ -24,10 +25,18 @@ function learningDir(targetRepo) {
 
 function samplesPath(targetRepo = null) { return path.join(learningDir(targetRepo), 'rl-samples.json'); }
 
+// issue_id names the snippet being replaced; the edit is that plus what
+// replaces it, so a different edit of the same snippet is a different sample.
+function editId(proposal) {
+  const h = crypto.createHash('sha256').update(String(proposal.proposed_code || '')).digest('hex').slice(0, 16);
+  return `${proposal.issue_id}:${h}`;
+}
+
 function buildSample(proposal, targetRepo = null) {
   const outcome = proposal.test_outcome ? proposal.test_outcome.status : null;
   return {
     proposal_id: proposal.issue_id,
+    edit_id: editId(proposal),
     target_repo: targetRepo,
     features: extractFeatures(proposal),
     label: outcome === 'passed' ? 1 : 0,
@@ -36,10 +45,11 @@ function buildSample(proposal, targetRepo = null) {
   };
 }
 
-// Timestamp-free identity: the same proposal (or the same mutant of it) is
-// one sample however many times it is collected.
+// Timestamp-free identity: the same edit (or the same mutant of it) is one
+// sample however many times it is collected. Samples stored before edit_id
+// existed keep their proposal_id key.
 function sampleKey(s) {
-  return `${s.proposal_id}|${s.synthetic ? 'synthetic' : 'real'}|${s.mutation || ''}`;
+  return `${s.edit_id || s.proposal_id}|${s.synthetic ? 'synthetic' : 'real'}|${s.mutation || ''}`;
 }
 
 function loadSamples(targetRepo = null) {
@@ -81,7 +91,7 @@ function collectSample(proposal, targetRepo = null) {
 }
 
 module.exports = {
-  collectSample, buildSample, loadSamples, persistSamples, appendSamples, sampleKey,
+  collectSample, buildSample, editId, loadSamples, persistSamples, appendSamples, sampleKey,
   samplesPath, learningDir, LABELED_STATUSES, UNTESTED_REASONS, isLabeled
 };
 Object.defineProperty(module.exports, 'SAMPLES_PATH', { enumerable: true, get: () => samplesPath() });

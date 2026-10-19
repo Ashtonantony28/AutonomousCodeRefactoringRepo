@@ -28,7 +28,23 @@ async function scenario(label, breakIt) {
   fs.writeFileSync(sessionPath(repo), JSON.stringify(sess));
   breakIt(repo, wt);
 
-  const r2 = await runWith(repo, loadFixtureResponses('js-basic'), { resume: true });
+  let r2;
+  try {
+    r2 = await runWith(repo, loadFixtureResponses('js-basic'), { resume: true });
+  } catch (err) {
+    // Stopping with an error is an accepted outcome when the branch is gone,
+    // as long as nothing ran in place and the session keeps the branch record.
+    const dirty = git(repo, 'status', '--porcelain', '--untracked-files=no');
+    const kept = JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8'));
+    const p = kept.proposals.find(q => q.issue_id === add.issue_id);
+    console.log(`[${label}] resume stopped: ${err.message}`);
+    report(`H3 [${label}] --resume falls back to editing the git target in place`,
+      err.code === 'EWORKTREE' && err.message.includes(wt.branch) && kept.worktree.mode === 'worktree' &&
+        kept.worktree.branch === wt.branch && !p.test_outcome && dirty === '',
+      `stopped (${err.code}); session.worktree=${kept.worktree.mode} ${kept.worktree.branch}; ${add.issue_id} outcome ${JSON.stringify(p.test_outcome)}; target ${dirty ? `modified: ${dirty}` : 'clean'}`,
+      'an error naming the branch, session.worktree kept, nothing executed, target clean');
+    return;
+  }
   const after = r2.s.proposals.find(p => p.issue_id === add.issue_id);
   const dirty = git(repo, 'status', '--porcelain', '--untracked-files=no');
   console.log(`[${label}] run 1 committed ${add.issue_id} on ${wt.branch}; resumed session.worktree=${JSON.stringify({ mode: r2.s.worktree.mode, reason: r2.s.worktree.reason })}`);

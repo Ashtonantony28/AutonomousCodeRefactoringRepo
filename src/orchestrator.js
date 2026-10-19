@@ -295,7 +295,14 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   logInfo(`run_id=${session.run_id} repo=${absRepo} dry_run=${!!dryRun} cache=${cache} hierarchical=${hierarchical}`);
 
-  const work = setupWorkspace({ session, absRepo, dryRun });
+  let work;
+  try {
+    work = setupWorkspace({ session, absRepo, dryRun });
+  } catch (err) {
+    logErr(err.message);
+    if (cli && err.code === 'EWORKTREE') process.exit(2);
+    throw err;
+  }
   if (resume) reconcileWithBranch({ session, info: session.worktree, absRepo });
   saveSession(session);
 
@@ -377,11 +384,14 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 }
 
 // Executor isolation: a git worktree on refactor/<run_id> under the state dir.
-// Dry runs never write, so they validate against the target directly.
+// Dry runs never write, so they validate against the target directly. A
+// recorded worktree that cannot be re-attached throws (resumeWorktree) and
+// leaves session.worktree as it was; only a fresh run (or a recorded in-place
+// run) gets createWorktree, whose in-place fallback is for non-git targets.
 function setupWorkspace({ session, absRepo, dryRun }) {
   const snapshotPath = inflightPath(absRepo);
   if (dryRun) return { root: absRepo, info: null, snapshotPath };
-  let info = session.worktree
+  let info = session.worktree && session.worktree.mode === 'worktree'
     ? worktree.resumeWorktree({ targetRepo: absRepo, info: session.worktree })
     : null;
   if (!info) info = worktree.createWorktree({ targetRepo: absRepo, runId: session.run_id, baseDir: worktreesDir(absRepo) });

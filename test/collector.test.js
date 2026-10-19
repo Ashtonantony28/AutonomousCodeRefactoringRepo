@@ -68,3 +68,47 @@ test('an edit reverted because no mutant of it failed the suite (tests_insensiti
   assert.strictEqual(collectSample(q, repo), null);
   assert.strictEqual(calibration.executedPoints([q]).length, 0);
 });
+
+// ---------- SG17: samples are keyed by the edit, not the snippet ----------
+
+test('a different edit of the same snippet adds a sample; the same edit stays one', () => {
+  const repo = path.join(env.root, 'collector-edit-identity');
+  const base = { ...fakeProposals()[1], issue_id: 'snippet0000000001' };
+  const a = { ...base, proposed_code: 'return a;', test_outcome: { status: 'reverted' } };
+  const b = { ...base, proposed_code: 'return b;', test_outcome: { status: 'passed' } };
+  collectSample(a, repo);
+  collectSample(b, repo);
+  collectSample(a, repo);
+  const all = loadSamples(repo);
+  assert.deepStrictEqual(all.map(s => [s.proposal_id, s.label]), [['snippet0000000001', 0], ['snippet0000000001', 1]]);
+  assert.notStrictEqual(all[0].edit_id, all[1].edit_id);
+  for (const s of all) assertSample(s);
+});
+
+test('samples stored before edit_id load and keep their slot; new edits of that snippet are added', () => {
+  const { persistSamples } = require('../src/rl/collector');
+  const repo = path.join(env.root, 'collector-legacy');
+  const p = { ...fakeProposals()[1], issue_id: 'legacy00000000001', test_outcome: { status: 'passed' } };
+  const legacy = { ...buildSample(p, repo), label: 0 };
+  delete legacy.edit_id;
+  persistSamples([legacy], repo);
+  appendSamples([{ ...legacy, timestamp: new Date(Date.now() + 1000).toISOString() }], repo);
+  assert.strictEqual(loadSamples(repo).length, 1, 'legacy samples still de-dup by proposal_id');
+  collectSample(p, repo);
+  const all = loadSamples(repo);
+  assert.deepStrictEqual(all.map(s => s.label), [0, 1]);
+  for (const s of all) assertSample(s);
+});
+
+test('synthetic negatives of two different edits of one snippet are separate samples', () => {
+  const { syntheticNegatives } = require('../src/rl/bug-injector');
+  const repo = path.join(env.root, 'collector-mutants');
+  const mk = (proposed) => ({ ...fakeProposals()[1], issue_id: 'mutsnippet0000001', file: 'src/x.py',
+    current_code: 'def f(a):\n    return a + 1', proposed_code: proposed, test_outcome: { status: 'passed' } });
+  const n1 = syntheticNegatives(mk('def f(a):\n    return 1 + a'), repo, { repoRoot: repo, persist: false });
+  const n2 = syntheticNegatives(mk('def f(a):\n    return (a + 1)'), repo, { repoRoot: repo, persist: false });
+  assert(n1.length && n2.length);
+  assert(n1.some(s => n2.some(t => t.mutation === s.mutation)), 'same mutation operator on both edits');
+  appendSamples([...n1, ...n2], repo);
+  assert.strictEqual(loadSamples(repo).length, n1.length + n2.length);
+});

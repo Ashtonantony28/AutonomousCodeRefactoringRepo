@@ -57,5 +57,17 @@ test('only executed (labeled) proposals are calibration points', () => {
     { issue_id: 'd', combined_confidence: 0.9, test_outcome: { status: 'environment_error' } },
     { issue_id: 'e', combined_confidence: null, test_outcome: { status: 'passed' } }
   ]);
-  assert.deepStrictEqual(pts, [{ proposal_id: 'a', x: 0.7, y: 1 }, { proposal_id: 'b', x: 0.6, y: 0 }]);
+  assert.deepStrictEqual(pts.map(({ proposal_id, x, y }) => ({ proposal_id, x, y })), [{ proposal_id: 'a', x: 0.7, y: 1 }, { proposal_id: 'b', x: 0.6, y: 0 }]);
+});
+
+test('calibration points are keyed by the edit; points stored before edit_id still load', () => {
+  const repo = path.join(env.root, 'cal-edit-identity');
+  fs.mkdirSync(path.dirname(calibration.pointsPath(repo)), { recursive: true });
+  fs.writeFileSync(calibration.pointsPath(repo), JSON.stringify([{ proposal_id: 'snip', x: 0.9, y: 1 }]));
+  const mk = (proposed, status) => ({ issue_id: 'snip', proposed_code: proposed, combined_confidence: 0.8, test_outcome: { status } });
+  calibration.fitFromProposals([mk('a()', 'reverted')], repo);
+  calibration.fitFromProposals([mk('b()', 'passed'), mk('a()', 'reverted')], repo);
+  const pts = calibration.loadPoints(repo);
+  assert.deepStrictEqual(pts.map(p => [p.proposal_id, p.y]), [['snip', 1], ['snip', 0], ['snip', 1]]);
+  assert.strictEqual(new Set(pts.map(p => p.edit_id)).size, 3);
 });

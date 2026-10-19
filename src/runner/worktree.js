@@ -49,7 +49,8 @@ function identityArgs(cwd) {
 // Uncommitted target changes (what the Analyzer saw) are copied into the
 // worktree uncommitted, so the executor tests against the same code. Any
 // failure throws: validating HEAD instead of what the Analyzer read is wrong.
-function syncDirtyFiles(top, wtTop) {
+// Paths in `skip` (relative to the repo top) are left as the worktree has them.
+function syncDirtyFiles(top, wtTop, skip = null) {
   let out;
   try {
     out = gitRaw(top, ['status', '--porcelain', '-z', '-uall']);
@@ -67,6 +68,7 @@ function syncDirtyFiles(top, wtTop) {
   }
   const synced = [];
   for (const rel of paths) {
+    if (skip && skip.has(rel)) continue;
     const src = path.join(top, rel);
     const dst = path.join(wtTop, rel);
     try {
@@ -128,22 +130,42 @@ function createWorktree({ targetRepo, runId, baseDir }) {
   return { mode: 'worktree', path: wtPath, root, branch, base, sub, dirty_synced: synced };
 }
 
-// Reattach to a run's worktree on --resume (re-adding it if it was pruned).
+// Reattach to a run's worktree on --resume. A missing worktree is re-created
+// from refactor/<run_id> (stale registration pruned first; the target's
+// uncommitted changes synced again, except files the branch changed). Never
+// falls back to editing a git target in place: throws (code EWORKTREE) when
+// the branch is gone or the worktree cannot be re-attached.
 function resumeWorktree({ targetRepo, info }) {
   if (!info || info.mode !== 'worktree') return info;
   const absTarget = fs.realpathSync(path.resolve(targetRepo));
   const top = gitToplevel(absTarget);
-  if (!fs.existsSync(info.path) && top) {
-    try { git(top, ['worktree', 'add', info.path, info.branch]); } catch { /* */ }
-  }
+  const fail = (why) => Object.assign(new Error(`cannot resume run worktree ${info.path} on ${info.branch}: ${why}; ` +
+    'the target is not edited in place. Restore the branch, or start a new run without --resume'), { code: 'EWORKTREE' });
+  if (!top) throw fail('target is no longer a git repository');
+  let synced = null;
   if (!fs.existsSync(info.path)) {
-    return { mode: 'in-place', root: absTarget, reason: `worktree ${info.path} is gone and could not be re-added` };
+    if (tryGit(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${info.branch}`]) == null) throw fail(`branch ${info.branch} no longer exists`);
+    tryGit(top, ['worktree', 'prune']);
+    try {
+      fs.mkdirSync(path.dirname(info.path), { recursive: true });
+      git(top, ['worktree', 'add', info.path, info.branch]);
+    } catch (err) {
+      throw fail(`git worktree add failed: ${String(err.stderr || err.message).trim()}`);
+    }
+    const changed = info.base ? tryGitRaw(info.path, ['diff', '--name-only', '-z', info.base, 'HEAD']) : '';
+    try {
+      synced = syncDirtyFiles(top, info.path, new Set((changed || '').split('\0').filter(Boolean)));
+    } catch (err) {
+      tryGit(top, ['worktree', 'remove', '--force', info.path]);
+      throw fail(err.message);
+    }
   }
-  const sub = info.sub != null ? info.sub : (top ? path.relative(top, absTarget) : '');
+  if (tryGit(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']) !== info.branch) throw fail(`${info.path} is not a worktree on ${info.branch}`);
+  const sub = info.sub != null ? info.sub : path.relative(top, absTarget);
   const root = path.join(info.path, sub);
   linkNodeModules(absTarget, root);
   const base = info.base || tryGit(info.path, ['rev-parse', 'HEAD']);
-  return { ...info, root, sub, base };
+  return { ...info, root, sub, base, ...(synced ? { dirty_synced: synced } : {}) };
 }
 
 // One commit per passing proposal; only the edited file is staged.

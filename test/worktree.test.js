@@ -125,3 +125,42 @@ test('a dirty submodule-like directory entry is skipped, not an error', (t) => {
   assert.deepStrictEqual(info.dirty_synced, ['src/b.js']);
   assert.strictEqual(read('src/b.js'), 'module.exports = 20;\n');
 });
+
+// ---------- SG17: resume never falls back to editing a git target in place ----------
+
+test('resumeWorktree re-creates a deleted worktree from the run branch, commits and dirty changes kept', (t) => {
+  const { repo, info } = makeRepo(t, (r) => {
+    write(r, 'src/a.js', 'module.exports = 100;\n');
+    write(r, 'src/b.js', 'module.exports = 200;\n');
+  });
+  fs.writeFileSync(path.join(info.root, 'src', 'b.js'), 'module.exports = 2000;\n');
+  const sha = worktree.commitProposal(info, { issue_id: 'cccc000011112222', file: 'src/b.js', reasoning: '' });
+  fs.rmSync(info.path, { recursive: true, force: true });
+  const before = git(repo, ['status', '--porcelain']);
+
+  const again = worktree.resumeWorktree({ targetRepo: repo, info });
+  assert.strictEqual(again.mode, 'worktree');
+  assert.strictEqual(again.path, info.path);
+  assert.strictEqual(again.branch, info.branch);
+  assert.strictEqual(git(again.path, ['rev-parse', 'HEAD']), sha);
+  assert.strictEqual(worktree.committedIssues(again).get('cccc000011112222'), sha);
+  assert.strictEqual(fs.readFileSync(path.join(again.root, 'src', 'a.js'), 'utf8'), 'module.exports = 100;\n', 'target change re-synced');
+  assert.strictEqual(fs.readFileSync(path.join(again.root, 'src', 'b.js'), 'utf8'), 'module.exports = 2000;\n', 'committed edit not overwritten');
+  assert.strictEqual(git(repo, ['status', '--porcelain']), before, 'target untouched');
+});
+
+test('resumeWorktree stops with an error naming the branch when the run branch is gone', (t) => {
+  const { repo, info } = makeRepo(t, () => {});
+  git(repo, ['worktree', 'remove', '--force', info.path]);
+  git(repo, ['branch', '-D', info.branch]);
+  assert.throws(() => worktree.resumeWorktree({ targetRepo: repo, info }),
+    (err) => err.code === 'EWORKTREE' && err.message.includes(`branch ${info.branch} no longer exists`) && /not edited in place/.test(err.message));
+  assert.strictEqual(git(repo, ['status', '--porcelain']), '');
+});
+
+test('resumeWorktree refuses a directory that is not the run branch worktree', (t) => {
+  const { repo, info } = makeRepo(t, () => {});
+  git(repo, ['worktree', 'remove', '--force', info.path]);
+  fs.mkdirSync(info.path, { recursive: true });
+  assert.throws(() => worktree.resumeWorktree({ targetRepo: repo, info }), (err) => err.code === 'EWORKTREE');
+});

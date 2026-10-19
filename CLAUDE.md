@@ -49,7 +49,12 @@ saturation figures are reported on the dashboard as a spend indicator only.
   every proposal without a `test_outcome`, including pending Reflexion repairs.
   It first reconciles with the `refactor/<run_id>` branch: a proposal whose
   `issue_id` is in a commit message but has no `test_outcome` (crash after the
-  commit) is marked `passed` with that commit, not re-executed.
+  commit) is marked `passed` with that commit, not re-executed. A run worktree
+  that is gone is re-created from `refactor/<run_id>` (stale registration
+  pruned, uncommitted target changes synced again except files the branch
+  changed); if the branch is gone or the worktree cannot be re-attached the
+  run stops with an error (`EWORKTREE`, exit 2) and `session.worktree` is left
+  as it was. Resume never edits a git target in place.
 
 ## Executor isolation
 
@@ -72,10 +77,11 @@ saturation figures are reported on the dashboard as a spend indicator only.
   starts with less than the main run's time + 0.5 s left; a run that fails,
   or times out on its full slice, kills the mutant. Otherwise `reverted` with
   reason `edit_not_exercised` / `no_coverage_tool` (no test ran the edit,
-  whether the suite passed or failed) or `tests_insensitive` (no mutant
-  failed). These three reasons are untested outcomes: no sample, calibration
+  whether the suite passed or failed), `coverage_timeout` (coverage
+  post-processing overran the test budget) or `tests_insensitive` (no mutant
+  failed). These four reasons are untested outcomes: no sample, calibration
   point, reward or Reflexion repair.
-- If the target is not a git repo (or has no commits) the Executor falls back
+- If the target is not a git repo (or has no commits) a fresh run falls back
   to editing the target in place, with a warning.
 - No test runner detected → `skipped_no_tests`, edit reverted, no RL sample.
 - Test commands run detached in their own process group; the 60 s timeout
@@ -172,8 +178,12 @@ introduced by the proposal), or every persona says
 `preserves_semantics: false` (malformed verdicts count as false).
 
 `signature_drift` scans only repo files that name the function on a word
-boundary, parses at most 200 of them (over the cap the check passes with a
-`detail` saying so), stops at the first call site, and caches parses per run.
+boundary and stops at the first call site; over a cap the check passes with a
+`detail` saying so. JS: a plain function is matched only in files that import
+the edited module (importers scanned first), a file is parsed only when the
+name appears in a call shape, at most 200 files / 2 MB are parsed, and parses
+are cached per run. Polyglot: files that also name the edited module first,
+at most 200 scanned, stripped sources cached per run.
 
 ---
 
@@ -203,12 +213,15 @@ All learning state is **per target repo**, under
 `stateDirFor(target) = <state>/targets/<sha256(abs repo path)>/`:
 `rl-samples.json`, `rl-weights.json`, `calibration.json`,
 `calibration-points.json`. Samples and calibration points accumulate across
-runs (de-duplicated by proposal id / mutant); training always uses all of them.
+runs, de-duplicated by the edit: `edit_id` = `issue_id` + hash of
+`proposed_code` (mutants: that + the mutation), so a different edit of the
+same snippet in a later run adds a sample/point. Entries stored without
+`edit_id` keep their `proposal_id` key. Training always uses all of them.
 
 - **Samples**: one per executed proposal with a label (`passed` = 1,
   `reverted`/`failed` = 0; environment errors, apply failures and untested
   edits, i.e. `reverted` with `edit_not_exercised` / `no_coverage_tool` /
-  `tests_insensitive`, are not samples).
+  `coverage_timeout` / `tests_insensitive`, are not samples).
 - **Features** (`FEATURE_NAMES` in `src/rl/features.js`):
   `[p_preserves, pattern_score, proposal_complexity, risk_estimate]`
   (`p_preserves` = jury mean). Weights saved under a different feature list

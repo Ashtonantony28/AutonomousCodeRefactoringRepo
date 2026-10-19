@@ -77,6 +77,48 @@ test('resume after a crash between commit and save takes the outcome from the br
   assert.deepStrictEqual(branchCommits(repo, s2.worktree.branch), [sha]);
 });
 
+// SG17: a resume whose run worktree is gone never edits the git target in place.
+async function crashedRunWithBrokenWorktree(t, breakIt) {
+  const { git, treeHash } = require('./helpers/git');
+  const repo = gitInit(env.copyFixture('js-basic'));
+  const responses = loadFixtureResponses('js-basic');
+  installStub(responses);
+  t.after(() => { resetClient(); env.rm(repo); });
+  const s1 = await withoutTestContext(() => runPipeline({ repo, cache: 'off' }));
+  const passed = s1.proposals.find(p => p.test_outcome.status === 'passed');
+  const saved = JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8'));
+  saved.proposals.find(x => x.issue_id === passed.issue_id).test_outcome = null;
+  fs.writeFileSync(sessionPath(repo), JSON.stringify(saved));
+  breakIt(repo, s1.worktree, git);
+  return { repo, s1, passed, tree: treeHash(repo), treeHash, stub: installStub(responses) };
+}
+
+test('resume with the run worktree deleted re-creates it from the branch; target untouched', async (t) => {
+  const { repo, s1, passed, tree, treeHash, stub } = await crashedRunWithBrokenWorktree(t, (r, wt) => fs.rmSync(wt.path, { recursive: true, force: true }));
+  const s2 = await withoutTestContext(() => runPipeline({ repo, cache: 'off', resume: true }));
+  assert.strictEqual(s2.worktree.mode, 'worktree');
+  assert.strictEqual(s2.worktree.branch, s1.worktree.branch);
+  assert(fs.existsSync(s2.worktree.path));
+  const after = s2.proposals.find(x => x.issue_id === passed.issue_id);
+  assert.strictEqual(after.test_outcome.commit, passed.test_outcome.commit, 'reconciled from the branch, not re-executed');
+  assert.strictEqual(stub.count(), 0);
+  assert.deepStrictEqual(treeHash(repo), tree);
+});
+
+test('resume with the run branch removed stops with an error; session.worktree kept, target untouched', async (t) => {
+  const { repo, s1, passed, tree, treeHash, stub } = await crashedRunWithBrokenWorktree(t, (r, wt, git) => {
+    git(r, ['worktree', 'remove', '--force', wt.path]);
+    git(r, ['branch', '-D', wt.branch]);
+  });
+  await assert.rejects(withoutTestContext(() => runPipeline({ repo, cache: 'off', resume: true })),
+    (err) => err.code === 'EWORKTREE' && err.message.includes(s1.worktree.branch));
+  const kept = JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8'));
+  assert.deepStrictEqual(kept.worktree, s1.worktree);
+  assert.strictEqual(kept.proposals.find(x => x.issue_id === passed.issue_id).test_outcome, null);
+  assert.strictEqual(stub.count(), 0);
+  assert.deepStrictEqual(treeHash(repo), tree);
+});
+
 test('a run on another target does not discard a resumable session', async (t) => {
   const A = gitInit(env.copyFixture('js-basic'));
   const B = env.copyFixture('no-tests');

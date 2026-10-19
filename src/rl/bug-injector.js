@@ -23,7 +23,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { extractFeatures } = require('./features');
 const polyglot = require('../validation/polyglot-ast');
-const { appendSamples } = require('./collector');
+const { appendSamples, editId } = require('./collector');
 const { runChecks } = require('../validation/ast-checker');
 const diffTesting = require('../validation/diff-testing');
 
@@ -133,6 +133,7 @@ function syntheticNegatives(proposal, targetRepo = null, opts = {}) {
     if (diff_test && diff_test.verdict === 'equivalent') continue;
     out.push({
       proposal_id: `${proposal.issue_id}::${m.mutation}`,
+      edit_id: `${editId(proposal)}::${m.mutation}`,
       target_repo: targetRepo,
       features: extractFeatures({
         critic_verdict: proposal.critic_verdict,

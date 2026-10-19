@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { learningDir, isLabeled } = require('./collector');
+const { learningDir, isLabeled, editId } = require('./collector');
 
 // Isotonic regression via pool-adjacent-violators (PAVA). Non-parametric,
 // monotone, robust to mis-calibrated linear blends. Used to map raw
@@ -139,19 +139,21 @@ function executedPoints(proposals) {
     const s = p.test_outcome && p.test_outcome.status;
     if (!isLabeled(p.test_outcome)) continue;
     if (typeof p.combined_confidence !== 'number') continue;
-    out.push({ proposal_id: p.issue_id, x: p.combined_confidence, y: s === 'passed' ? 1 : 0 });
+    out.push({ proposal_id: p.issue_id, edit_id: editId(p), x: p.combined_confidence, y: s === 'passed' ? 1 : 0 });
   }
   return out;
 }
 
-// With a targetRepo the session's executed proposals are merged (by
-// proposal_id) into that target's persisted points and the fit uses all of
-// them; without one only the given proposals are used.
+// With a targetRepo the session's executed proposals are merged (by edit_id;
+// points stored before it existed by proposal_id) into that target's
+// persisted points and the fit uses all of them; without one only the given
+// proposals are used.
 function fitFromProposals(proposals, targetRepo = null) {
   let points = executedPoints(proposals);
   if (targetRepo) {
-    const byId = new Map(loadPoints(targetRepo).map(pt => [pt.proposal_id, pt]));
-    for (const pt of points) byId.set(pt.proposal_id, pt);
+    const key = pt => pt.edit_id || pt.proposal_id;
+    const byId = new Map(loadPoints(targetRepo).map(pt => [key(pt), pt]));
+    for (const pt of points) byId.set(key(pt), pt);
     points = [...byId.values()];
     savePoints(points, targetRepo);
   }
