@@ -8,11 +8,17 @@
 // timeout. Values never cross into the host realm: the context serialises
 // results to a JSON string, which the worker parses into plain host data.
 //
-// A run compares, per input: the return value (returned functions are probed,
-// thrown errors include own props), the arguments after the call, the `this`
-// object, recorded calls into callbacks and dependency stubs, and the
-// non-function exports of the module. Only value/throw/side-effect mismatches
-// are divergent; timeouts and too few normal returns are inconclusive.
+// After load, the module-scope bindings, the exports and the interactions
+// recorded during load are compared. A run then compares, per input: the
+// return value (and whether it is an object an earlier call returned;
+// returned functions are probed with shaped argument lists and their owner as
+// `this`; generators are drained; thrown errors include own props), the
+// arguments after the call, the `this` object, recorded calls into callbacks
+// and dependency stubs, the non-function exports and the module-scope
+// bindings. Dependency stubs answer with values from the mined literals on
+// alternate runs. Only value/throw/side-effect mismatches are divergent, and
+// not when the original threw an engine TypeError (the input is outside its
+// domain); timeouts, unrun inputs and too few normal returns are inconclusive.
 
 const vm = require('vm');
 const { workerData } = require('worker_threads');
@@ -22,14 +28,15 @@ const PRELUDE = `(function () {
   var G = globalThis;
   var stringify = JSON.stringify, isArray = Array.isArray;
   var create = Object.create, freeze = Object.freeze, assign = Object.assign, getDesc = Object.getOwnPropertyDescriptor;
-  var ownNames = Object.getOwnPropertyNames, ownSymbols = Object.getOwnPropertySymbols;
+  var ownNames = Object.getOwnPropertyNames, ownSymbols = Object.getOwnPropertySymbols, objToStr = Object.prototype.toString;
   var objIs = Object.is, toStr = String, defineProperty = Object.defineProperty, imul = Math.imul;
   var construct = Reflect.construct, apply = Reflect.apply;
   var PromiseC = Promise, MapC = Map, SetC = Set, DateC = Date, RegExpC = RegExp, ErrorC = Error, WeakSetC = WeakSet, WeakMapC = WeakMap, ProxyC = Proxy;
   var ReferenceErrorC = ReferenceError, symToPrim = Symbol.toPrimitive, symIter = Symbol.iterator, emptyIter = [][Symbol.iterator];
-  var MAX_NODES = 20000, MAX_DEPTH = 24, MAX_CALLS = 50, PROBE_ARGS = [0, 1, 'a'];
+  var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
   var STATE = 0, PLAIN = 1, PROBE = 2;
-  var lookup = null, mod = null, rec = null, cur = null, targets = [];
+  var lookup = null, mod = null, rec = null, cur = null, targets = [], bindNames = [], pool = [], known = [];
+  var probeArgs = [[0], [1], ['a']], vi = 0;
   var stubNames = new WeakMapC(), stubCache = new MapC(), seed = 0;
 
   Math.random = function () {
@@ -38,8 +45,13 @@ const PRELUDE = `(function () {
     t ^= t + imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  G.Date = new ProxyC(DateC, {
+    construct: function (tg, a, nt) { return construct(tg, a.length ? a : [FIXED_NOW], nt); },
+    apply: function () { return toStr(construct(DateC, [FIXED_NOW])); }
+  });
+  DateC.now = function () { return FIXED_NOW; };
 
-  function newSt(mode) { return { seen: new WeakSetC(), budget: MAX_NODES, trunc: false, mode: mode, probes: 0 }; }
+  function newSt(mode) { return { seen: new WeakSetC(), budget: MAX_NODES, trunc: false, mode: mode, probes: 0, pi: 0 }; }
   function ctorName(v) {
     try { var c = v.constructor; return c && typeof c.name === 'string' ? c.name : 'Object'; } catch (e) { return '?'; }
   }
@@ -48,7 +60,12 @@ const PRELUDE = `(function () {
     for (var i = 0; i < s.length; i++) { var c = s.charCodeAt(i); a = imul(a ^ c, 16777619); b = (imul(b, 33) + c) | 0; }
     return (a >>> 0).toString(16) + ':' + (b >>> 0).toString(16);
   }
-  function ser(v, st, depth) {
+  function hash32(s) {
+    var a = 0;
+    for (var i = 0; i < s.length; i++) a = (imul(a, 31) + s.charCodeAt(i)) >>> 0;
+    return a;
+  }
+  function ser(v, st, depth, owner) {
     if (--st.budget < 0) { st.trunc = true; return { t: 'trunc' }; }
     var t = typeof v;
     if (v === undefined) return { t: 'u' };
@@ -62,11 +79,15 @@ const PRELUDE = `(function () {
     if (depth > MAX_DEPTH) { st.trunc = true; return { t: 'deep' }; }
     if (t === 'function') {
       var f = { t: 'fn', name: toStr(v.name), len: v.length };
+      // Returned functions are called with every probe list; one level
+      // deeper with three of them, rotating with the outer probe.
       if (st.mode === PROBE && st.probes < 2) {
+        var n = probeArgs.length, list = st.probes === 0 ? probeArgs : [probeArgs[st.pi % n], probeArgs[(st.pi + 1) % n], probeArgs[(st.pi + 2) % n]];
         st.probes++;
         f.probes = [];
-        for (var p = 0; p < PROBE_ARGS.length; p++) {
-          try { f.probes[p] = ser(apply(v, undefined, [PROBE_ARGS[p]]), st, depth + 1); } catch (e) { f.probes[p] = { t: 'throw', error: describeThrown(e) }; }
+        for (var p = 0; p < list.length; p++) {
+          if (st.probes === 1) st.pi = p;
+          try { f.probes[p] = ser(apply(v, owner, list[p]), st, depth + 1); } catch (e) { f.probes[p] = { t: 'throw', error: describeThrown(e) }; }
         }
         st.probes--;
       }
@@ -88,12 +109,19 @@ const PRELUDE = `(function () {
       v.forEach(function (val, key) { if (st.budget >= 0) out[out.length] = [ser(key, st, depth + 1), ser(val, st, depth + 1)]; });
       return { t: v instanceof MapC ? 'map' : 'set', v: out };
     }
+    if (st.mode !== STATE && objToStr.call(v) === '[object Generator]') {
+      out = [];
+      for (i = 0; i < 64 && st.budget >= 0; i++) { var r = v.next(); if (r.done) break; out[i] = ser(r.value, st, depth + 1); }
+      return { t: 'gen', v: out };
+    }
     if (v instanceof ErrorC) return { t: 'err', name: ctorName(v), message: toStr(v.message), v: props(v, st, depth, true) };
     return { t: 'obj', c: ctorName(v), v: props(v, st, depth, false) };
   }
   // Own string and symbol keys, enumerable or not ('~' marks non-enumerable).
+  // Methods are serialised (probed, with the object as \`this\`) before the
+  // data properties, so their effects on the object show.
   function props(v, st, depth, isErr) {
-    var out = {}, names = ownNames(v).sort(), syms = ownSymbols(v), n = names.length + syms.length;
+    var out = {}, names = ownNames(v).sort(), syms = ownSymbols(v), n = names.length + syms.length, vals = [];
     for (var i = 0; i < n && st.budget >= 0; i++) {
       var k = i < names.length ? names[i] : syms[i - names.length];
       if (isErr && (k === 'stack' || k === 'message')) continue;
@@ -107,7 +135,12 @@ const PRELUDE = `(function () {
         try { val = apply(d.get, v, []); } catch (e) { out[key] = { t: 'throw', error: describeThrown(e) }; continue; }
       } else { out[key] = { t: 'acc' }; continue; }
       if (st.mode === STATE && typeof val === 'function') continue;
-      out[key] = ser(val, st, depth + 1);
+      vals[vals.length] = [key, val];
+    }
+    for (var pass = 0; pass < 2; pass++) {
+      for (var j = 0; j < vals.length && st.budget >= 0; j++) {
+        if ((typeof vals[j][1] === 'function') === (pass === 0)) out[vals[j][0]] = ser(vals[j][1], st, depth + 1, v);
+      }
     }
     return out;
   }
@@ -132,18 +165,31 @@ const PRELUDE = `(function () {
   // Inert dependency stub: every access, call and construction yields
   // another stub. Interactions are recorded; the host treats differences
   // that involve stubs as unresolved unless both sides interacted alike.
+  // On odd runs a property of a call result is a pool value, and numeric
+  // coercions draw from the pool, so branches on dependency results are
+  // taken both ways.
   function stub(name) {
     var s = stubCache.get(name);
     if (s) return s;
     s = new ProxyC(function () {}, {
       get: function (tg, k) {
-        if (k === symToPrim) return function (hint) { note('prim ' + name, [hint], true); return hint === 'number' ? 0 : ''; };
+        if (k === symToPrim) {
+          return function (hint) {
+            note('prim ' + name, [hint], true);
+            if (hint !== 'number') return '';
+            var nums = [];
+            for (var q = 0; q < pool.length; q++) if (typeof pool[q] === 'number') nums[nums.length] = pool[q];
+            return nums.length ? nums[(hash32(name) + vi) % nums.length] : 0;
+          };
+        }
         if (k === symIter) return function () { return apply(emptyIter, [], []); };
         if (typeof k === 'symbol' || k === 'then') return undefined;
         if (k === '__esModule') return false;
         if (k === 'prototype') return tg.prototype;
-        note('get ' + name + '.' + k, [], true);
-        return stub(name + '.' + k);
+        var nm = name + '.' + k;
+        note('get ' + nm, [], true);
+        if ((vi & 1) && pool.length && name.indexOf('()') >= 0) return pool[(hash32(nm) + (vi >> 1)) % pool.length];
+        return stub(nm);
       },
       apply: function (tg, self, args) { note(name + '()', args, true); return stub(name + '()'); },
       construct: function (tg, args) { note('new ' + name, args, true); return stub('new ' + name); }
@@ -161,7 +207,8 @@ const PRELUDE = `(function () {
     function () { throw new ErrorC('callback failed'); },
     function () { return 1; },
     function (a) { return PromiseC.resolve(a); },
-    function () { return PromiseC.reject(new ErrorC('callback rejected')); }
+    function () { return PromiseC.reject(new ErrorC('callback rejected')); },
+    function () { return [1, 2, 3]; }
   ];
   function look(n) {
     var v;
@@ -190,10 +237,10 @@ const PRELUDE = `(function () {
     if (d.kind === 'method') {
       var cls = look(d.className);
       if (typeof cls !== 'function') return { ok: false, error: 'class ' + d.className + ' not found' };
-      var holder = d.isStatic ? cls : cls.prototype;
+      var holder = d.isStatic ? cls : cls.prototype, key = d.keyExpr ? look(d.keyExpr) : d.name;
       top = cls;
       if (d.accessor === 'constructor') { t.fn = cls; t.mode = 'new'; } else {
-        if (d.accessor) { var ds = holder && getDesc(holder, d.name); t.fn = ds && ds[d.accessor]; } else t.fn = holder && holder[d.name];
+        if (d.accessor) { var ds = holder && getDesc(holder, key); t.fn = ds && ds[d.accessor]; } else t.fn = holder && holder[key];
         if (d.isStatic) t.self = cls; else { t.mode = 'instance'; t.proto = holder; }
       }
     } else if (d.kind === 'prop') {
@@ -201,6 +248,10 @@ const PRELUDE = `(function () {
       if (owner === null || (typeof owner !== 'object' && typeof owner !== 'function')) return { ok: false, error: d.owner + ' not found' };
       if (d.accessor) { var od = getDesc(owner, d.name); t.fn = od && od[d.accessor]; } else t.fn = owner[d.name];
       t.self = owner; t.mode = 'owner'; top = owner;
+    } else if (d.kind === 'field') {
+      var fc = look(d.className);
+      if (typeof fc !== 'function') return { ok: false, error: 'class ' + d.className + ' not found' };
+      t.mode = 'field'; t.fn = fc; t.name = d.keyExpr ? look(d.keyExpr) : d.name; t.fnField = d.fnField; top = fc;
     } else {
       t.fn = look(d.name); top = t.fn;
     }
@@ -220,16 +271,34 @@ const PRELUDE = `(function () {
     }
     return out;
   }
+  // Non-function module-scope bindings present in both versions.
+  function bindState() {
+    if (!lookup || !bindNames.length) return undefined;
+    var st = newSt(STATE), out = {};
+    st.budget = MAX_BIND_NODES;
+    for (var i = 0; i < bindNames.length; i++) {
+      var v;
+      try { v = lookup(bindNames[i]); } catch (e) { continue; }
+      if (typeof v !== 'function') out[bindNames[i]] = ser(v, st, 1);
+    }
+    return out;
+  }
 
   var api = freeze({
+    setup: function (names, values) { bindNames = names; pool = values; },
     load: function (wrapper) {
       mod = { exports: {} };
+      var r = rec = { kind: 'load', calls: [], ncalls: 0 };
       try {
         wrapper.call(mod.exports, mod.exports, function (n) { return stub(toStr(n)); }, mod, '/sandbox/file.js', '/sandbox');
-        return stringify({ ok: true });
       } catch (e) {
+        rec = null;
         return stringify({ ok: false, error: describeThrown(e) });
       }
+      rec = null;
+      r.bind = bindState();
+      r.state = exportsState(newSt(STATE));
+      return stringify({ ok: true, load: r });
     },
     capture: function (fn) { lookup = fn; },
     cb: function (id) {
@@ -243,13 +312,25 @@ const PRELUDE = `(function () {
       }
       return stringify(out);
     },
-    call: function (ti, args, selfProps) {
+    call: function (ti, args, selfProps, i, probes) {
       var t = targets[ti];
       seed = 0;
+      vi = i | 0;
+      if (probes && probes.length) probeArgs = probes;
       rec = { kind: 'pending', async: false, calls: [], ncalls: 0 };
       cur = { t: t, args: args, self: t.mode === 'instance' ? assign(create(t.proto), selfProps || {}) : t.self };
       try {
-        var out = t.mode === 'new' ? construct(t.fn, args) : apply(t.fn, cur.self, args);
+        var out;
+        if (t.mode === 'field') {
+          cur.self = construct(t.fn, []);
+          out = cur.self[t.name];
+          if (t.fnField && typeof out === 'function') out = apply(out, cur.self, args);
+        } else out = t.mode === 'new' ? construct(t.fn, args) : apply(t.fn, cur.self, args);
+        if (out !== null && (typeof out === 'object' || typeof out === 'function') && !stubNames.has(out)) {
+          var at = known.indexOf(out);
+          if (at < 0 && known.length < MAX_KNOWN) known[known.length] = out;
+          rec.ident = at;
+        }
         if (out !== null && (typeof out === 'object' || typeof out === 'function') && !stubNames.has(out) && typeof out.then === 'function') {
           rec.async = true;
           var r = rec;
@@ -269,7 +350,7 @@ const PRELUDE = `(function () {
     value: function (ti) {
       seed = 0;
       rec = { kind: 'value', async: false, calls: [], ncalls: 0 };
-      var st = newSt(PLAIN);
+      var st = newSt(PROBE);
       rec.value = ser(look(targets[ti].expr), st, 0);
       if (st.trunc) rec.trunc = true;
       var out = stringify(rec);
@@ -277,7 +358,7 @@ const PRELUDE = `(function () {
       return out;
     },
     take: function () {
-      var parts = [['args', cur.args], ['self', cur.t.mode === 'instance' || cur.t.mode === 'owner' ? cur.self : undefined]];
+      var parts = [['args', cur.args], ['self', cur.t.mode === 'instance' || cur.t.mode === 'owner' || cur.t.mode === 'field' ? cur.self : undefined]];
       for (var i = 0; i < parts.length; i++) {
         var st = newSt(STATE);
         rec[parts[i][0]] = ser(parts[i][1], st, 0);
@@ -286,6 +367,7 @@ const PRELUDE = `(function () {
       var sst = newSt(STATE);
       rec.state = exportsState(sst);
       if (sst.trunc) rec.trunc = true;
+      rec.bind = bindState();
       var out = stringify(rec);
       rec = null;
       return out;
@@ -306,30 +388,31 @@ function hostError(err) {
   return { name: String(name), message: String((err && err.message) || err) };
 }
 
-function makeSide(label, code, descs, loadTimeoutMs) {
+function makeSide(label, code, descs, data) {
   const ctx = vm.createContext(Object.create(null), {
     name: `diff-test-${label}`,
     codeGeneration: { strings: true, wasm: false },
     microtaskMode: 'afterEvaluate'
   });
-  vm.runInContext(PRELUDE, ctx, { timeout: loadTimeoutMs });
+  vm.runInContext(PRELUDE, ctx, { timeout: data.loadTimeoutMs });
+  vm.runInContext(`__dt.setup(${JSON.stringify(data.bindings || [])}, ${JSON.stringify(data.pool || [])})`, ctx, { timeout: data.loadTimeoutMs });
   const wrapped = `__dt.load(function (exports, require, module, __filename, __dirname) {${code}\n;__dt.capture(function (__dt_n) { return eval(__dt_n); });\n})`;
   let res;
   try {
     const script = new vm.Script(wrapped, { filename: `${label}.js` });
-    res = JSON.parse(script.runInContext(ctx, { timeout: loadTimeoutMs }));
+    res = JSON.parse(script.runInContext(ctx, { timeout: data.loadTimeoutMs }));
   } catch (err) {
     return { ok: false, error: hostError(err) };
   }
   if (!res.ok) return { ok: false, error: res.error };
   let resolved;
   try {
-    resolved = JSON.parse(vm.runInContext(`__dt.resolve(${JSON.stringify(descs)})`, ctx, { timeout: loadTimeoutMs }));
+    resolved = JSON.parse(vm.runInContext(`__dt.resolve(${JSON.stringify(descs)})`, ctx, { timeout: data.loadTimeoutMs }));
   } catch (err) {
     const e = hostError(err);
     resolved = descs.map(() => ({ ok: false, error: `${e.name}: ${e.message}` }));
   }
-  return { ok: true, ctx, resolved };
+  return { ok: true, ctx, resolved, load: res.load };
 }
 
 function runIn(side, src, timeoutMs) {
@@ -378,37 +461,54 @@ function hallucinated(r, fileText) {
   return !new RegExp(`(^|[^\\w$])${m[1].replace(/\$/g, '\\$')}([^\\w$]|$)`).test(fileText);
 }
 
-const hasStub = (r) => JSON.stringify([r.value, r.error, r.self, r.state]).includes('{"t":"stub"');
+const hasStub = (r) => JSON.stringify([r.value, r.error, r.self, r.state, r.bind]).includes('{"t":"stub"');
 
 // V8's own TypeError wording depends on the expression shape, not on the
 // behaviour; two engine TypeErrors count as the same throw.
-const ENGINE_TYPE_ERROR = /^(Cannot (read|set|destructure|convert|create|use)\b|.* is not (a function|iterable|a constructor|an object)\b|Reduce of empty array)/;
+const ENGINE_TYPE_ERROR = /^(Cannot (read|set|destructure|convert|create|use)\b|.* is not (a function|iterable|a constructor|an object)\b|Reduce of empty array|Spread syntax requires)/;
+const engineTypeError = (e) => !!e && e.name === 'TypeError' && ENGINE_TYPE_ERROR.test(e.message);
 
 function errorsEq(a, b) {
   if (deepEq(a, b)) return true;
-  return !!(a && b) && a.name === 'TypeError' && b.name === 'TypeError' &&
-    ENGINE_TYPE_ERROR.test(a.message) && ENGINE_TYPE_ERROR.test(b.message) && deepEq(a.props, b.props);
+  return engineTypeError(a) && engineTypeError(b) && deepEq(a.props, b.props);
 }
 
 function outputsDiffer(a, b) {
-  return a.kind !== b.kind || a.async !== b.async || (a.kind === 'throw' ? !errorsEq(a.error, b.error) : !deepEq(a.value, b.value));
+  return a.kind !== b.kind || a.async !== b.async || a.ident !== b.ident || (a.kind === 'throw' ? !errorsEq(a.error, b.error) : !deepEq(a.value, b.value));
 }
 
-// 'equal' | 'mismatch' | 'differs' | 'unresolved' | 'timeout'. Stubs stand
-// for unknown dependency behaviour: a difference is only a mismatch when both
-// sides interacted with the stubs identically and no stub value is compared;
-// otherwise it 'differs' (blocks equivalence without being a veto).
+const callsEqual = (a, b) => deepEq(a.calls, b.calls) && a.ncalls === b.ncalls;
+
+// 'equal' | 'mismatch' | 'differs' | 'ood' | 'unresolved' | 'timeout'. Stubs
+// stand for unknown dependency behaviour: a difference is only a mismatch
+// when both sides interacted with the stubs identically and no stub value is
+// compared; otherwise it 'differs' (blocks equivalence without being a veto).
+// A difference where the original threw an engine TypeError is on an input
+// outside the original's domain ('ood').
 function compare(a, b, opts) {
   if (a.kind === 'timeout' || b.kind === 'timeout') return 'timeout';
   const refA = isRefError(a), refB = isRefError(b);
   if (refA && refB) return 'unresolved';
   if (!opts.fileMode && (refA || refB)) return refB && hallucinated(b, opts.fileText) ? 'mismatch' : 'differs';
-  const callsEq = deepEq(a.calls, b.calls) && a.ncalls === b.ncalls;
-  if (!outputsDiffer(a, b) && callsEq && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state)) {
+  const callsEq = callsEqual(a, b);
+  if (!outputsDiffer(a, b) && callsEq && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state) && deepEq(a.bind, b.bind)) {
     return a.trunc || b.trunc ? 'unresolved' : 'equal';
   }
   if (((a.stubbed || b.stubbed) && !callsEq) || hasStub(a) || hasStub(b)) return 'differs';
+  if (a.kind === 'throw' && engineTypeError(a.error)) return 'ood';
   return 'mismatch';
+}
+
+// Load-time comparison: module-scope bindings and exports after load, and
+// the interactions recorded while loading. -> null | { divergent } | { note }
+function compareLoad(a, b) {
+  if (!a || !b) return null;
+  const stateSame = deepEq(a.bind, b.bind) && stateEq(a.state, b.state);
+  const callsEq = callsEqual(a, b);
+  if (!stateSame && callsEq && !hasStub(a) && !hasStub(b)) return { divergent: true };
+  if (!stateSame) return { note: 'module-scope state after load differs through dependency stubs' };
+  if (!callsEq) return { note: 'load-time interactions with dependencies differ' };
+  return null;
 }
 
 function main(data) {
@@ -418,9 +518,9 @@ function main(data) {
   const descs = targets.map(t => t.desc);
   const opts = { fileMode, fileText };
 
-  const cur = makeSide('current', currentCode, descs, loadTimeoutMs);
+  const cur = makeSide('current', currentCode, descs, data);
   if (!cur.ok) return { verdict: 'inconclusive', reason: `current failed to load: ${cur.error.name}: ${cur.error.message}`, runs: 0 };
-  const prop = makeSide('proposed', proposedCode, descs, loadTimeoutMs);
+  const prop = makeSide('proposed', proposedCode, descs, data);
   if (!prop.ok) {
     if (prop.error.name === 'Timeout') return { verdict: 'inconclusive', reason: `proposed side exceeded the ${loadTimeoutMs} ms load timeout`, runs: 0 };
     if (!fileMode && prop.error.name === 'ReferenceError') {
@@ -432,9 +532,19 @@ function main(data) {
       counterexample: { phase: 'load', proposed: { kind: 'throw', error: prop.error } }
     };
   }
+  const load = compareLoad(cur.load, prop.load);
+  if (load && load.divergent) {
+    return {
+      verdict: 'divergent', runs: 1,
+      reason: 'module-scope state differs after load',
+      counterexample: { phase: 'load', current: cur.load, proposed: prop.load }
+    };
+  }
+  if (!targets.length) return load ? { verdict: 'inconclusive', runs: 1, reason: load.note } : { verdict: 'equivalent', runs: 1 };
 
   let runs = 0, tested = 0, inconclusive = false;
   const notes = [];
+  if (load) { inconclusive = true; notes.push(load.note); }
   for (let ti = 0; ti < targets.length; ti++) {
     const t = targets[ti];
     const ra = cur.resolved[ti] || {}, rb = prop.resolved[ti] || {};
@@ -453,15 +563,15 @@ function main(data) {
     tested++;
     const end = now() + (t0 + budgetMs - now()) / (targets.length - ti);
     const calls = t.desc.kind === 'value' ? [null] : t.inputs;
-    let value = 0, thrown = 0, refBoth = 0, differs = 0, n = 0;
+    let value = 0, thrown = 0, refBoth = 0, differs = 0, ood = 0, n = 0;
     for (let i = 0; i < calls.length; i++) {
-      if (now() - t0 > budgetMs || (now() > end && value >= minValueRuns)) break;
+      if (now() - t0 > budgetMs || now() > end) break;
       let a, b;
       if (calls[i] === null) {
         a = valueOf(cur, ti, callTimeoutMs);
         b = valueOf(prop, ti, callTimeoutMs);
       } else {
-        const src = `__dt.call(${ti}, ${calls[i][0]}, ${calls[i][1]})`;
+        const src = `__dt.call(${ti}, ${calls[i][0]}, ${calls[i][1]}, ${i}, ${t.probes || '[]'})`;
         a = runIn(cur, src, callTimeoutMs);
         b = runIn(prop, src, callTimeoutMs);
       }
@@ -480,16 +590,17 @@ function main(data) {
         };
       }
       if (c === 'equal') { if (a.kind === 'value') value++; else thrown++; } else if (c === 'differs') differs++;
+      else if (c === 'ood') ood++;
       else if (isRefError(a) && isRefError(b)) refBoth++;
     }
-    const need = t.desc.kind === 'value' ? 1 : minValueRuns;
-    if (value >= need && !differs) {
-      if (n < calls.length) notes.push(`${t.label}: time budget reached after ${n} of ${calls.length} inputs`);
-      continue;
-    }
+    // At least one in five distinct inputs (all of them when there are 3 or
+    // fewer), up to minValueRuns.
+    const need = t.desc.kind === 'value' ? 1 : Math.min(minValueRuns, Math.max(Math.ceil(calls.length / 5), Math.min(3, calls.length)));
+    if (value >= need && !differs && !ood && n === calls.length) continue;
     inconclusive = true;
     if (differs) notes.push(`${t.label}: ${differs} of ${n} runs differ only through dependency stubs or missing snippet context`);
-    else if (n === 0) notes.push(`${t.label}: time budget exhausted before any input ran`);
+    else if (ood) notes.push(`${t.label}: ${ood} of ${n} runs differ only on inputs the current version rejects with a TypeError (outside its domain)`);
+    else if (n < calls.length) notes.push(`${t.label}: time budget reached after ${n} of ${calls.length} inputs`);
     else if (refBoth === n) notes.push(`${t.label}: both sides threw ReferenceError on every input (${fileMode ? 'unresolved name in the file' : 'missing context; pass fileSrc'})`);
     else if (thrown === n) notes.push(`${t.label}: both sides threw on every input (${n} runs)`);
     else notes.push(`${t.label}: only ${value} of ${n} runs returned comparable values on both sides (need ${need})`);

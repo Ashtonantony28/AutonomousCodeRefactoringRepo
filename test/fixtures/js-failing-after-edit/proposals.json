@@ -3,8 +3,8 @@
     "issue_id": "js-failing-greeting",
     "file": "src/greet.js",
     "current_code": "const GREETING = 'hello';",
-    "proposed_code": "const GREETING = typeof process === 'object' ? 'hi' : 'hello';",
-    "reasoning": "Environment-dependent greeting: the sandboxed diff test has no `process` and sees 'hello' (equivalent), the real test run sees 'hi', so the tests fail after the edit.",
+    "proposed_code": "const GREETING = 'hi';",
+    "reasoning": "The module reads `process.env` at load, which the sandboxed diff test does not provide, so it cannot load the file (inconclusive, runs=0); a unanimous jury lets the edit through and the real test run catches the changed greeting.",
     "risk_estimate": 0.2,
     "expected_status": "reverted"
   }
