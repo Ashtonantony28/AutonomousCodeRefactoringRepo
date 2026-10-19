@@ -63,9 +63,15 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG6 | Learning loop on real features | SG0, SG1 | thread worker | done |
 | SG7 | Live dashboard, safe rendering, real spans | SG0 | thread worker | done |
 | SG8 | Live end-to-end run on a sample repo | SG1–SG7 | thread worker | proposed |
+| SG9 | Fail-closed gate | SG11 | thread worker | proposed |
+| SG10 | Anchors validate the region they replace | SG9 | thread worker | proposed |
+| SG11 | Diff test that exercises the code | — | thread worker | proposed |
+| SG12 | Test-execution evidence and bounded runner | — | thread worker | proposed |
+| SG13 | Per-target session and worktree sync | SG12 | thread worker | proposed |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
+Audit round 1 fixes: (SG11 ∥ SG12) → (SG9 ∥ SG13) → SG10 → audit round 2. No contract changes: CheckResult `severity:'veto'`, DiffTest `inconclusive` and TestOutcome `reverted` + reason already cover these.
 
 ### SG0 — Contracts, test harness, fixtures, bench
 - `src/contracts.js`, `src/rl/features.js` (replaces `featuresFor`, `buildSample` feature code, `featuresOf`).
@@ -138,6 +144,45 @@ Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6)
 - **Accept:** run completes, no budget violations, every applied edit is a commit on the run branch with tests green; findings logged as new SGs if anything breaks.
 - **Verify:** `node src/orchestrator.js --repo <sample> --dry-run && node src/orchestrator.js --repo <sample>`
 
+### SG9 — Fail-closed gate (A1-C1 gate part, A1-H1, A2-H1, A3-H1)
+- The four CLAUDE.md anti-pattern checks return `severity:'veto'` on failure; `runChecks` result shape unchanged.
+- `inconclusive` / inapplicable diff test adds no confidence: fusion falls back to 0.6/0.4, and the proposal proceeds only with a unanimous jury approve and every AST check passed.
+- Gate and fusion read only `JuryVerdict` / `DiffTest` contract fields (`p_preserves`, `agreement`, `verdict`, `applicable`); drop reads of `jury.preserves_semantics` and `diff_test.score`.
+- `signature_drift` scans only files whose text matches the name with a word-boundary regex, caps parsed files (e.g. 200) and caches parses per run; over the cap → check passes with `detail` saying it was capped.
+- **Accept:** `node audit/1/ast-checks-cannot-block.js` reports every case blocked; `node audit/1/mutation-corpus.js` escape count drops vs 21/36 with no new rejections of the safe corpus; `node audit/3/whatif-vs-gate.js` and `node audit/3/boundaries.js` show no non-contract reads; `node audit/2/ast-scale.js` p95 ≤ 300 ms on the 500-file fixture.
+- **Verify:** `node --test test/hybrid-validator.test.js test/ast-checker.test.js test/orchestrator.test.js && npm test && npm run bench`
+
+### SG10 — Anchors validate the region they replace (A1-H2, A2-C2, A4-H3)
+- `applyEdit` returns the matched region; validators run on that region (re-run when it differs from `current_code`).
+- Whitespace and fuzzy tiers refuse a match that changes whitespace inside string/template literals, crosses an ASI boundary, or alters Python indentation → `apply_failed` with tier/detail.
+- Fuzzy tier bounded: candidate windows pre-filtered by line-hash/token anchors, total work O(n·k); hard cap → `apply_failed` reason `fuzzy_budget`.
+- Tests for whitespace-tier uniqueness (two copies → refuse).
+- **Accept:** `node audit/1/validated-vs-applied-region.js` all cases refused or validated on the applied region; `node audit/2/anchor-patho.js` p95 ≤ 100 ms on ≤ 200 KB files, worst case < 1 s; new uniqueness test fails on the old code.
+- **Verify:** `node --test test/anchor-matcher.test.js test/reverter.test.js && npm test && npm run bench`
+
+### SG11 — Diff test that exercises the code (A1-H3, A1-H4, A2-H2)
+- Input generation: objects/arrays/callbacks plus literals mined from both versions; arity-aware.
+- All-throw (both sides throw on every input) or < N non-throwing runs → `inconclusive`, never `equivalent`.
+- Every changed callable is tested (incl. object-literal methods, getters, class methods); top-level `require` of non-builtin modules gets inert stubs; changed constants compared by value.
+- Per-call timeout on one side only, or on both, → `inconclusive` with reason; only value/throw mismatches are `divergent`.
+- **Accept:** `node audit/1/difftest-holes.js` has no `equivalent` on a semantics-changing case; `node audit/2/diff-patho.js` under load shows 0 divergent verdicts for identical code; bench diff p95 ≤ 2000 ms.
+- **Verify:** `node --test test/diff-testing.test.js && npm test && npm run bench`
+
+### SG12 — Test-execution evidence and bounded runner (A1-C1 executor part, A1-M4, A2-C1, A4-H1)
+- JS: run tests with `NODE_V8_COVERAGE` into a temp dir; the edit is kept only if a test executed at least one edited line. Otherwise `reverted` with reason `edit_not_exercised`. Python: `coverage run` when available, else `reverted` reason `no_coverage_tool`.
+- `runTests` resolves on child `exit` + timeout, not stdio `close`; kills the process group; held stdio no longer delays the result.
+- Tests for revert paths: timeout, environment error, commit failure, spawn failure.
+- **Accept:** `node audit/1/e2e-commit.js` no longer commits the guard-removal edit; `node audit/2/tests-load.js` setsid case returns in < timeout + 2 s with the real status; the four revert-path tests fail on the old code.
+- **Verify:** `node --test test/test-runner.test.js test/executor.test.js && npm test`
+
+### SG13 — Per-target session and worktree sync (A3-H2, A4-H2, A3-M1)
+- `session.json` lives under `stateDirFor(repo)`; legacy global session is read once for its own `target_repo` only.
+- Worktree dirty-file sync parses `git status -z` without trimming entries (rename entries handled).
+- Resume reconciles the session with `refactor/<run_id>` commits (proposal ids in commit trailers) before acting.
+- **Accept:** `node audit/3/resume-scope.js`, `node audit/4/worktree-dirty-sync.js`, `node audit/3/resume-after-commit-crash.js` all pass; dashboard server watches the per-target session.
+- **Verify:** `node --test test/state-dir.test.js test/worktree.test.js test/orchestrator.test.js` (`worktree.test.js` new)
+- **Verify (all):** `npm test && npm test`
+
 ## Audits (after SG8)
 
 Separate sessions, none run by a worker that wrote the code under audit. Each writes `AUDIT-<n>.md`, findings ranked by severity, each with a repro or failing test. Critical/high findings become new SGs here. Repeat until a full round has no critical/high.
@@ -160,3 +205,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-19 | SG1 | green | critic/validator tests 24/24, `npm test` 172/172, bench all stages within budget. Jury `p_preserves` (mean) drives fusion; vetoes (divergent diff test, `severity:'veto'` check, unanimous reject) → `vetoed`; gate also requires jury majority approve AND `p_preserves >= MIN_CRITIC_P` (0.5) so AST+diff can't outvote the critic; `fileSrc` wired; `RL_GATE_THRESHOLD` shared; `run_id`/`trace_id` on traces. Fixture `js-basic-safeparse` now `vetoed` (intended). Malformed critic output counts as reject. Open for SG6: features/bug-injector/classifyFailure still read the `claude_confidence` alias. |
 | 2026-10-19 | SG5 | green | executor+e2e 12/12, `npm test` 184/184, bench within budget. Edits run in a git worktree on `refactor/<run_id>` with one commit per passing proposal (non-git targets fall back in-place with a warning); SIGINT/crash restore via on-disk snapshot; process-group kill; Executor Claude call removed; `apply_failed` carries tier/detail; deterministic issue_id; `--resume` skips Analyzer and runs pending repairs; replay rerun makes 0 calls. `pruneContext` removed, CLAUDE.md updated. `--allow-untested` dropped (would need a contract change). Open: worktrees not cleaned up after runs; dashboard/reward still mention dead `applied_no_tests`. |
 | 2026-10-19 | SG6 | green | SG6 tests 30/30, `npm test` 204/204 after merging with SG5, bench within budget. Per-target samples/weights/calibration accumulate across runs; features `[p_preserves, pattern_score, proposal_complexity, risk_estimate]` (legacy 5-feature weights ignored); synthetic negatives re-scored via AST + diff test, equivalent mutants dropped, ≤3 per pass, weight 0.5; gate p_pass = min(classifier, calibrated combined) when trained; reward documented as diagnostic. Open: calibration still only sees combined ≥ 0.5 (selection bias); old global RL files not migrated; dashboard label still says "RL gate". |
+| 2026-10-19 | audits r1 | 4 audits done | AUDIT-1 1C/4H, AUDIT-2 2C/2H, AUDIT-3 0C/2H, AUDIT-4 0C/3H (coverage ≥ 85% all dirs). C/H → SG9–SG13. SG8 waits on `ANTHROPIC_API_KEY`. |
