@@ -322,3 +322,114 @@ test('pytest never runs a stale .pyc: a same-size, same-mtime rewrite is what ge
   const second = await runTests({ repoRoot: dir, command });
   assert.strictEqual(second.status, 'failed', 'the rewritten source is tested, not the cached bytecode');
 });
+
+// ---------- SG16: coverage post-processing is linear, bounded and shares the test budget ----------
+
+// ~199 KB of small functions; the edit rewrites the bodies in its last `spanBytes`.
+function bigModule(spanBytes) {
+  let src = "'use strict';\n";
+  for (let j = 0; src.length + 200 < 199_000; j++) src += `function f${j}(a, b) {\n  const t${j} = a * ${j} + b;\n  return t${j};\n}\n`;
+  src += 'module.exports = { f0 };\n';
+  const cut = src.length - spanBytes;
+  const after = src.slice(0, cut) + src.slice(cut).replace(/return t(\d+);/g, 'return t$1 + 0;');
+  return { before: src, after };
+}
+
+// Post-exit time (total - suite) and the longest event-loop stall during runTests.
+async function timedRun(opts) {
+  let last = Date.now(), stall = 0;
+  const ticker = setInterval(() => { const now = Date.now(); stall = Math.max(stall, now - last); last = now; }, 10);
+  const t0 = Date.now();
+  try {
+    const r = await runTests(opts);
+    return { r, post: Date.now() - t0 - r.execution_time_ms, stall: Math.max(stall, Date.now() - last) };
+  } finally { clearInterval(ticker); }
+}
+
+function bigRepo(t, spanBytes, suite) {
+  const dir = tmp(t, 'refactor-v8big-');
+  const m = bigModule(spanBytes);
+  fs.writeFileSync(path.join(dir, 'mod.js'), m.after);
+  fs.writeFileSync(path.join(dir, 'check.js'), suite);
+  return { dir, command: { cmd: process.execPath, args: ['check.js'], framework: 'npm' }, edit: { file: 'mod.js', ...changedSpan(m.before, m.after) } };
+}
+
+test('V8 coverage: a 60 KB edit span on a 199 KB file is evaluated quickly, without stalling the event loop', async (t) => {
+  const { dir, command, edit } = bigRepo(t, 60_000, "require('./mod.js');\n");
+  const { r, post, stall } = await timedRun({ repoRoot: dir, command, edit });
+  assert.strictEqual(r.status, 'passed', r.stderr);
+  assert.strictEqual(r.coverage.exercised, false);
+  assert.strictEqual(r.coverage.reason, 'edit_not_exercised');
+  assert(post < 3000, `post-exit coverage work took ${post} ms`);
+  assert(stall < 1500, `event loop stalled ${stall} ms`);
+  // The same sweep still sees an executed function body.
+  fs.writeFileSync(path.join(dir, 'call.js'), "require('./mod.js').f0(1, 2);\n");
+  const body = '  const t0 = a * 0 + b;\n  return t0;';
+  const at = fs.readFileSync(path.join(dir, 'mod.js'), 'utf8').indexOf(body);
+  const hit = await runTests({ repoRoot: dir, command: { ...command, args: ['call.js'] }, edit: { file: 'mod.js', start: at, end: at + body.length } });
+  assert.strictEqual(hit.coverage.exercised, true, JSON.stringify(hit.coverage));
+  assert.strictEqual(hit.coverage.edited_lines, 2);
+  assert.strictEqual(hit.coverage.executed_lines, 2);
+});
+
+test('V8 coverage: many test processes loading the edited file cost seconds at most', async (t) => {
+  const suite = "const { spawnSync } = require('child_process');\nfor (let i = 0; i < 20; i++) spawnSync(process.execPath, ['-e', \"require('./mod.js')\"], { cwd: __dirname, stdio: 'ignore' });\n";
+  const { dir, command, edit } = bigRepo(t, 20_000, suite);
+  const { r, post, stall } = await timedRun({ repoRoot: dir, command, edit });
+  assert.strictEqual(r.status, 'passed', r.stderr);
+  assert.strictEqual(r.coverage.exercised, false);
+  assert(post < 3000, `post-exit coverage work took ${post} ms`);
+  assert(stall < 1500, `event loop stalled ${stall} ms`);
+});
+
+test('V8 coverage that overruns the test budget: coverage_timeout, not edit_not_exercised', async (t) => {
+  const dir = tmp(t, 'refactor-v8slow-');
+  // Evaluating a multi-MB edited file outlasts a 300 ms budget that the
+  // suite itself (`true`) is far inside.
+  let src = "'use strict';\n";
+  for (let j = 0; src.length < 4e6; j++) src += `function f${j}(a, b) {\n  const t = a * ${j} + b;\n  return t;\n}\n`;
+  fs.writeFileSync(path.join(dir, 'big.js'), src);
+  const r = await runTests({ repoRoot: dir, command: { cmd: 'true', args: [], framework: 'make' }, timeoutMs: 300, edit: { file: 'big.js', start: 20, end: 40 } });
+  assert.strictEqual(r.status, 'passed');
+  assert.strictEqual(r.coverage.exercised, false);
+  assert.strictEqual(r.coverage.reason, 'coverage_timeout', JSON.stringify(r.coverage));
+  assert(r.coverage.duration_ms >= 0);
+});
+
+test('a run without an edit collects no coverage, even with NODE_V8_COVERAGE inherited', async (t) => {
+  const covDir = tmp(t, 'refactor-inherited-cov-');
+  const prev = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_V8_COVERAGE = covDir;
+  t.after(() => { if (prev === undefined) delete process.env.NODE_V8_COVERAGE; else process.env.NODE_V8_COVERAGE = prev; });
+  const r = await runTests({ repoRoot: covDir, command: { cmd: process.execPath, args: ['-e', '0'], framework: 'npm' } });
+  assert.strictEqual(r.status, 'passed');
+  assert.deepStrictEqual(fs.readdirSync(covDir), []);
+});
+
+test('coverage.py reports only the edited file: megabytes of other imported modules add little post-exit time', { skip: hasPyCoverage ? false : 'coverage.py/pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-pybig-');
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\ntestpaths = tests\n');
+  fs.mkdirSync(path.join(dir, 'pkg'));
+  fs.writeFileSync(path.join(dir, 'pkg', '__init__.py'), '');
+  fs.mkdirSync(path.join(dir, 'tests'));
+  let suite = 'import importlib\n\n\ndef test_all():\n';
+  for (let i = 0; i < 13; i++) {
+    let body = '';
+    for (let j = 0; body.length < 197_000; j++) body += `def f${i}_${j}(a, b):\n    t = a * ${j} + b\n    return t\n\n\n`;
+    fs.writeFileSync(path.join(dir, 'pkg', `m${i}.py`), body);
+    suite += `    assert importlib.import_module('pkg.m${i}').f${i}_0(1, 2) == 2\n`;
+  }
+  fs.writeFileSync(path.join(dir, 'tests', 'test_all.py'), suite);
+  const src = fs.readFileSync(path.join(dir, 'pkg', 'm0.py'), 'utf8');
+  const needle = '    t = a * 0 + b\n    return t';
+  const { r, post } = await timedRun({ repoRoot: dir, edit: { file: 'pkg/m0.py', start: src.indexOf(needle), end: src.indexOf(needle) + needle.length } });
+  assert.strictEqual(r.status, 'passed', r.stdout + r.stderr);
+  assert.strictEqual(r.coverage.exercised, true, JSON.stringify(r.coverage));
+  assert(post < 4000, `post-exit coverage work took ${post} ms`);
+  // An edited file the tests never import has an empty report: not exercised, no error.
+  fs.writeFileSync(path.join(dir, 'pkg', 'orphan.py'), 'def lone(x):\n    return x\n');
+  const orphan = await runTests({ repoRoot: dir, edit: { file: 'pkg/orphan.py', start: 16, end: 24 } });
+  assert.strictEqual(orphan.coverage.exercised, false);
+  assert.strictEqual(orphan.coverage.reason, 'edit_not_exercised');
+  assert.match(orphan.coverage.detail, /never imported/);
+});

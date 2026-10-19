@@ -458,8 +458,7 @@ const DEF_PATTERNS = {
   ruby: (n) => new RegExp(`\\bdef\\s+(?:self\\.)?${escapeRe(n)}(?![\\w!?=])`, 'g')
 };
 
-function countCallSites(src, lang, name, exclude) {
-  const s = stripCode(src, lang);
+function countCallSites(src, lang, name, exclude, s = stripCode(src, lang)) {
   const defs = new Set();
   let m;
   const defRe = DEF_PATTERNS[lang](name);
@@ -483,20 +482,62 @@ function findCallSites({ lang, names, file, proposedSrc, region, repoRoot }) {
     const c = countCallSites(proposedSrc, lang, n, exclude);
     if (c) hits.push({ name: n, file: file || '(edited file)', count: c });
   }
-  if (repoRoot) {
-    const target = file ? path.resolve(repoRoot, file) : null;
-    for (const f of collectRepoFiles(repoRoot, 500, EXTENSIONS[lang])) {
-      if (f === target) continue;
-      const src = safeRead(f);
-      if (!src) continue;
-      for (const n of names) {
-        if (!src.includes(n)) continue;
-        const c = countCallSites(src, lang, n, null);
-        if (c) hits.push({ name: n, file: path.relative(repoRoot, f), count: c });
-      }
+  if (!repoRoot) return hits;
+  // Repo scan, bounded like the JS one: only files naming a function on a
+  // word boundary, those that also name the edited module first; at most
+  // SCAN_MAX_FILES are scanned, stripped sources are cached per run, and the
+  // scan stops at the first call site (it already fails the check).
+  const target = file ? path.resolve(repoRoot, file) : null;
+  const nameRe = new RegExp(`(?<![\\w])(?:${names.map(escapeRe).join('|')})(?![\\w])`);
+  const stem = target ? path.basename(target).replace(EXTENSIONS[lang], '') : '';
+  const modRe = stem && stem !== '__init__' ? new RegExp(`(?<![\\w])${escapeRe(stem)}(?![\\w])`) : null;
+  const near = [], far = [];
+  for (const f of collectRepoFiles(repoRoot, SCAN_MAX_WALK, EXTENSIONS[lang])) {
+    if (f === target) continue;
+    const src = safeRead(f);
+    if (!src || !nameRe.test(src)) continue;
+    (modRe && modRe.test(src) ? near : far).push({ f, src });
+  }
+  let scanned = 0;
+  for (const { f, src } of near.concat(far)) {
+    if (hits.length) { hits.stopped = true; break; }
+    if (scanned >= SCAN_MAX_FILES) { hits.capped = true; break; }
+    scanned++;
+    const stripped = strippedFor(f, src, lang);
+    for (const n of names) {
+      const c = countCallSites(src, lang, n, null, stripped);
+      if (c) hits.push({ name: n, file: path.relative(repoRoot, f), count: c });
     }
   }
   return hits;
+}
+
+const SCAN_MAX_WALK = 2000;
+const SCAN_MAX_FILES = 200;
+const STRIP_CACHE_MAX_BYTES = 64e6;
+const stripCache = new Map();
+let stripCacheBytes = 0;
+
+// stripCode() per file, cached per process; keyed by path, validated by
+// language, size and mtime, bounded in total bytes.
+function strippedFor(f, src, lang) {
+  let key = null;
+  try { const st = fs.statSync(f); key = `${lang}:${st.size}:${st.mtimeMs}:${src.length}`; } catch { /* uncached */ }
+  const hit = key && stripCache.get(f);
+  if (hit && hit.key === key) return hit.value;
+  const value = stripCode(src, lang);
+  if (key) {
+    if (hit) stripCacheBytes -= hit.value.length;
+    stripCache.delete(f);
+    stripCache.set(f, { key, value });
+    stripCacheBytes += value.length;
+    for (const [k, v] of stripCache) {
+      if (stripCacheBytes <= STRIP_CACHE_MAX_BYTES) break;
+      stripCache.delete(k);
+      stripCacheBytes -= v.value.length;
+    }
+  }
+  return value;
 }
 
 function checkSignatureDrift(before, after, ctx = {}) {
@@ -515,11 +556,13 @@ function checkSignatureDrift(before, after, ctx = {}) {
   }
   const hits = findCallSites({ lang: before.lang, names: [...new Set(all.map(d => d.name))], file: ctx.file, proposedSrc: ctx.proposedSrc || '', region: ctx.region, repoRoot: ctx.repoRoot });
   const where = hits.map(h => `${h.name} in ${h.file} (${h.count})`).join(', ');
+  const scan = hits.stopped ? ' (repo scan stops at the first call site)'
+    : hits.capped ? ` (repo scan capped at ${SCAN_MAX_FILES} files mentioning the name; rest not checked)` : '';
   return {
     check_name: 'signature_drift',
     passed: hits.length === 0,
     severity: hits.length ? 'veto' : 'score',
-    detail: `${all.map(describe).join('; ')}; ${hits.length ? `call sites outside edit: ${where}` : 'no call sites outside edit'}`
+    detail: `${all.map(describe).join('; ')}; ${hits.length ? `call sites outside edit: ${where}` : 'no call sites outside edit'}${scan}`
   };
 }
 
@@ -748,5 +791,6 @@ module.exports = {
   splitTopLevel,
   collectRepoFiles,
   safeRead,
+  SCAN_MAX_WALK,
   PYTHON_STDLIB
 };
