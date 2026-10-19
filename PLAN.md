@@ -71,6 +71,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG14 | Test-backed commit bar | SG13 | thread worker | proposed |
 | SG15 | Diff-test reach, round 2 | SG11 | thread worker | proposed |
 | SG16 | Performance, round 2 | SG14 | thread worker | proposed |
+| SG17 | Learning identity and safe resume | SG16 | thread worker | proposed |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -186,9 +187,9 @@ Audit round 1 fixes: (SG11 ∥ SG12) → (SG9 ∥ SG13) → SG10 → audit round
 - **Verify:** `node --test test/state-dir.test.js test/worktree.test.js test/orchestrator.test.js` (`worktree.test.js` new)
 - **Verify (all):** `npm test`
 
-### SG14 — Test-backed commit bar (A5-C1, A5-C2, A5-C3, A5-H6, A5-M2)
+### SG14 — Test-backed commit bar (A5-C1, A5-C2, A5-C3, A5-H6, A5-M2, A7-H2)
 - Commit bar: an edit is kept only if (a) the jury approves unanimously, (b) no persona has `p_preserves` < 0.2, (c) the diff test is `equivalent`, or for `runs=0` edits a deterministic check covers it (below), and (d) the tests kill at least one bug-injected mutant of the edited lines (reuse `rl/bug-injector`), so the suite is shown to be sensitive to them. Otherwise `critic_rejected` / `reverted` with a reason; no new status.
-- Coverage evidence ignores comments and whitespace; every changed function body (or hunk) must execute.
+- Coverage evidence ignores comments and whitespace; every changed function body (or hunk) must execute. A failing suite that never executed the edit is also an untested revert (not a label-0 sample, no reward, no Reflexion repair) (A7-H2, `node audit/7/untested-failure-label.js`).
 - Proposals to test files (`test/`, `__tests__`, `*.test.*`, `*_test.py`, `test_*.py`) are rejected by the Analyzer and the gate.
 - Python: lexical checks for removed `raise`/guard and changed comparison operators/literals as vetoes.
 - **Accept:** `node audit/5/e2e-commit.js` commits none of E1–E8; `node audit/5/critic-edge-cases.js` ok; benign corpus false rejection reported in the Log row.
@@ -210,6 +211,12 @@ Audit round 1 fixes: (SG11 ∥ SG12) → (SG9 ∥ SG13) → SG10 → audit round
 - Polyglot `signature_drift` gets the JS bounds (word-boundary filter, file cap, parse cache, early stop); JS scan prefers files that `require`/`import` the edited module and stays ≤ 300 ms p95 with common names.
 - **Accept:** `node audit/6/coverage-load.js --quick`, `node audit/6/coverage-py.js --files 50`, `node audit/6/session-resume-scale.js --parts d`, `node audit/6/drift-scan.js` all within budget / ok.
 - **Verify:** `node --test test/test-runner.test.js test/worktree.test.js test/ast-checker.test.js test/polyglot-ast.test.js && npm test && npm run bench`
+
+### SG17 — Learning identity and safe resume (A7-H1, A7-H3)
+- Samples and calibration points are de-duplicated by the edit (issue_id + hash of `proposed_code`, or the mutant id), not by `issue_id` alone; a different edit of the same snippet in a later run adds a sample instead of replacing one. Sample contract fields unchanged.
+- `--resume` on a git target never falls back to in-place editing: if the run worktree or `refactor/<run_id>` branch can't be re-attached, recreate the worktree from the branch, or stop with an error; `session.worktree` is not overwritten by a fallback.
+- **Accept:** `node audit/7/sample-identity.js` and `node audit/7/resume-worktree-gone.js` ok; target working tree untouched in both.
+- **Verify:** `node --test test/collector.test.js test/calibration.test.js test/orchestrator.test.js && npm test`
 
 ## Audits (after SG8)
 
@@ -241,3 +248,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-19 | SG10 | green | anchor+reverter tests 34/34 (14 new), `npm test` 280/280 (17 new: 15 fail on old code, the 2 whitespace-uniqueness tests kill mutant A1), bench apply p95 37 ms. `applyEdit` returns `matchedRegion` and takes `expectedRegion` (mismatch → `apply_failed` tier `region`); orchestrator resolves the anchor before validation (`proposal.validated_region`) and, unless verbatim, runs critic/AST/diff test on the matched region + re-indented replacement; executor requires the same region. Whitespace/fuzzy tiers lex region vs anchor and refuse `literal_whitespace` (string/template/regex), `comment_boundary`, `asi_boundary` (JS restricted productions), `line_structure` (non-JS/Python), `indentation` (Python). Fuzzy: q-gram bound pass O(n), best-bound-first scoring with memo/overlap pruning, 1e7-cell cap → `fuzzy_budget`; indent-shift KMP prefilter; exact/whitespace count capped at 100. `validated-vs-applied-region` W1/W2/W3 refused; `anchor-patho` all 8 cases p50 ≤ 70 ms, max 86 ms (was 45.8 s / >25 min). Open: anchor refusals are only reported at execution (dry run still says `dry_run`); a legitimately ambiguous large near-dup anchor can now end in `fuzzy_budget` instead of `ambiguous`; `audit/4/mutants.js` not run here (worktree has no local `node_modules`, so its temp-copy baseline is red; A1 pattern updated and A1 checked by hand). |
 | 2026-10-19 | audits r2 | AUDIT-5 | round-1 C/H fixed (5/5); new corpus 54/97 escape (unanimous), 34/97 (split), 8 committed e2e, benign false rejection 6/31. 3C/6H/3M/1L → SG14, SG15. Commit bar for SG14 asked of the user; proceeding on the test-backed bar. |
 | 2026-10-19 | audits r2 | AUDIT-6 | round-1 setsid hang and fuzzy blowup fixed; 3C/2H/5M/7L (coverage post-processing up to 110 s, coverage.py 30 s cap, dirty sync skipped over 1 MB, polyglot/common-name drift scan 1–3 s) → SG16. Order: (SG14 ∥ SG15) → SG16. |
+| 2026-10-19 | audits r2 | AUDIT-7 | round-1 highs fixed; 0C/3H/6M/6L new (labels overwritten across runs, failing untested suite labelled 0, resume edits target in place) → SG17 (H1, H3), SG14 (H2). Order: (SG14 ∥ SG15) → SG16 → SG17 → audit round 3. Coverage audit (round 2) folded into round 3 since SG14–SG17 change the covered code. |
