@@ -3,8 +3,8 @@
     "issue_id": "js-failing-greeting",
     "file": "src/greet.js",
     "current_code": "const GREETING = 'hello';",
-    "proposed_code": "const GREETING = 'hi';",
-    "reasoning": "Shorter greeting.",
+    "proposed_code": "const GREETING = require('./greeting-text');",
+    "reasoning": "Load the greeting from a shared module (which does not exist, so the tests fail after the edit; the diff test only sees a dependency stub).",
     "risk_estimate": 0.2,
     "expected_status": "reverted"
   }
