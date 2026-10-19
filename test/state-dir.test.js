@@ -13,11 +13,40 @@ test('STATE_DIR and SESSION_PATH honour REFACTOR_STATE_DIR', () => {
   assert.strictEqual(checkpoint.SESSION_PATH, path.join(env.stateDir, 'session.json'));
 });
 
-test('saveSession / loadOrInit round-trip in the temp state dir', () => {
+test('saveSession / loadOrInit round-trip under the target state dir', () => {
   const s = checkpoint.loadOrInit('/tmp/some-repo');
-  assert(fs.existsSync(path.join(env.stateDir, 'session.json')));
+  const file = path.join(checkpoint.stateDirFor('/tmp/some-repo'), 'session.json');
+  assert(fs.existsSync(file));
+  assert.strictEqual(checkpoint.sessionPath('/tmp/some-repo'), file);
+  assert(!fs.existsSync(checkpoint.legacySessionPath()), 'no global session.json is written');
   const resumed = checkpoint.loadOrInit('/tmp/some-repo', { resume: true });
   assert.strictEqual(resumed.run_id, s.run_id);
+});
+
+test('a run on another target (even --resume) leaves the first target\'s session resumable', () => {
+  const a = checkpoint.loadOrInit('/tmp/sg13-a');
+  a.proposals.push({ issue_id: 'pending', test_outcome: null });
+  checkpoint.saveSession(a);
+  fs.utimesSync(checkpoint.sessionPath('/tmp/sg13-a'), new Date(0), new Date(0));
+  const b = checkpoint.loadOrInit('/tmp/sg13-b', { resume: true });
+  assert.notStrictEqual(b.run_id, a.run_id);
+  assert.strictEqual(checkpoint.sessionPath(), checkpoint.sessionPath('/tmp/sg13-b'), 'no-arg path is the latest session');
+  const again = checkpoint.loadOrInit('/tmp/sg13-a', { resume: true });
+  assert.strictEqual(again.run_id, a.run_id);
+  assert.deepStrictEqual(again.proposals.map(p => p.issue_id), ['pending']);
+});
+
+test('a legacy global session is read once, and only for its own target', () => {
+  const legacy = checkpoint.freshSession('/tmp/sg13-legacy');
+  fs.mkdirSync(env.stateDir, { recursive: true });
+  fs.writeFileSync(checkpoint.legacySessionPath(), JSON.stringify(legacy));
+  const other = checkpoint.loadOrInit('/tmp/sg13-other', { resume: true });
+  assert.notStrictEqual(other.run_id, legacy.run_id);
+  assert(fs.existsSync(checkpoint.legacySessionPath()), 'another target leaves the legacy session alone');
+  const own = checkpoint.loadOrInit('/tmp/sg13-legacy', { resume: true });
+  assert.strictEqual(own.run_id, legacy.run_id);
+  assert(!fs.existsSync(checkpoint.legacySessionPath()), 'migrated into the target dir');
+  assert.strictEqual(checkpoint.loadSession('/tmp/sg13-legacy').run_id, legacy.run_id);
 });
 
 test('default state dir is <tool>/state when the env var is unset', (t) => {

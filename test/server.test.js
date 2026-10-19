@@ -130,3 +130,18 @@ test('/rl-weights.json and /calibration.json follow the session target_repo', as
     await close();
   }
 });
+
+test('a server started for a target serves that target\'s session, not the latest one', async () => {
+  const repoA = path.join(os.tmpdir(), 'sg13-server-a');
+  const repoB = path.join(os.tmpdir(), 'sg13-server-b');
+  const a = freshSession(repoA);
+  saveSession(a);
+  const { server, close } = await start({ port: 0, quiet: true, targetRepo: repoA });
+  try {
+    const { port } = server.address();
+    saveSession(freshSession(repoB));
+    assert.strictEqual(JSON.parse((await get(port, '/session.json')).body).run_id, a.run_id);
+  } finally {
+    await close();
+  }
+});

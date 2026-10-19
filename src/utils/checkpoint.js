@@ -11,13 +11,33 @@ function stateDir() {
   return process.env.REFACTOR_STATE_DIR ? path.resolve(process.env.REFACTOR_STATE_DIR) : DEFAULT_STATE_DIR;
 }
 
-function sessionPath() {
-  return path.join(stateDir(), 'session.json');
-}
-
 function stateDirFor(targetRepo) {
   const key = crypto.createHash('sha256').update(path.resolve(targetRepo)).digest('hex');
   return path.join(stateDir(), 'targets', key);
+}
+
+// Older versions kept one global session; it moves to its target dir on first read.
+function legacySessionPath() {
+  return path.join(stateDir(), 'session.json');
+}
+
+// Per-target session. Without a target: the most recently written one (for
+// the standalone dashboard), else the legacy global file.
+function sessionPath(targetRepo = null) {
+  if (targetRepo) return path.join(stateDirFor(targetRepo), 'session.json');
+  const dir = path.join(stateDir(), 'targets');
+  let best = null;
+  let bestMtime = -Infinity;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { /* none yet */ }
+  for (const name of names) {
+    const p = path.join(dir, name, 'session.json');
+    try {
+      const m = fs.statSync(p).mtimeMs;
+      if (m > bestMtime) { best = p; bestMtime = m; }
+    } catch { /* */ }
+  }
+  return best || legacySessionPath();
 }
 
 // Pre-edit snapshot of the executor's in-flight file (restored on start-up
@@ -49,33 +69,46 @@ function freshSession(targetRepo) {
   };
 }
 
-function loadSession() {
-  ensureStateDir();
-  const p = sessionPath();
+function readSession(p) {
   if (!fs.existsSync(p)) return null;
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch (err) {
-    console.error(`[checkpoint] failed to parse session.json: ${err.message}`);
+    console.error(`[checkpoint] failed to parse ${p}: ${err.message}`);
     return null;
   }
 }
 
-function saveSession(session) {
+// The legacy global session is moved into its target's dir (so it is read
+// once) only when it belongs to `targetRepo`.
+function migrateLegacy(targetRepo) {
+  const legacy = legacySessionPath();
+  const old = readSession(legacy);
+  if (!old || !old.target_repo || path.resolve(old.target_repo) !== path.resolve(targetRepo)) return null;
+  const dest = sessionPath(targetRepo);
+  ensureStateDir(path.dirname(dest));
+  fs.renameSync(legacy, dest);
+  return old;
+}
+
+function loadSession(targetRepo = null) {
   ensureStateDir();
+  if (!targetRepo) return readSession(sessionPath());
+  return readSession(sessionPath(targetRepo)) || migrateLegacy(targetRepo);
+}
+
+function saveSession(session) {
   session.updated_at = new Date().toISOString();
-  const p = sessionPath();
+  const p = session.target_repo ? sessionPath(session.target_repo) : legacySessionPath();
+  ensureStateDir(path.dirname(p));
   const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(session, null, 2));
   fs.renameSync(tmp, p);
 }
 
 function loadOrInit(targetRepo, { resume = false } = {}) {
-  const existing = loadSession();
-  if (resume && existing) {
-    if (!existing.target_repo || path.resolve(existing.target_repo) === path.resolve(targetRepo)) return existing;
-    console.error(`[checkpoint] --resume ignored: session.json belongs to ${existing.target_repo}`);
-  }
+  const existing = loadSession(targetRepo);
+  if (resume && existing) return existing;
   const session = freshSession(targetRepo);
   saveSession(session);
   return session;
@@ -88,6 +121,7 @@ module.exports = {
   inflightPath,
   worktreesDir,
   sessionPath,
+  legacySessionPath,
   ensureStateDir,
   freshSession,
   loadSession,

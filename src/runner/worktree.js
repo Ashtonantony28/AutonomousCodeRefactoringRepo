@@ -11,12 +11,20 @@ const { execFileSync } = require('child_process');
 const BOT_NAME = 'refactor-bot';
 const BOT_EMAIL = 'refactor-bot@localhost';
 
-function git(cwd, args, opts = {}) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts }).trim();
+function gitRaw(cwd, args) {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function git(cwd, args) {
+  return gitRaw(cwd, args).trim();
 }
 
 function tryGit(cwd, args) {
   try { return git(cwd, args); } catch { return null; }
+}
+
+function tryGitRaw(cwd, args) {
+  try { return gitRaw(cwd, args); } catch { return null; }
 }
 
 function gitToplevel(dir) {
@@ -39,15 +47,19 @@ function identityArgs(cwd) {
 // Uncommitted target changes (what the Analyzer saw) are copied into the
 // worktree uncommitted, so the executor tests against the same code.
 function syncDirtyFiles(top, wtTop) {
-  const out = tryGit(top, ['status', '--porcelain', '-z', '-uall']);
+  const out = tryGitRaw(top, ['status', '--porcelain', '-z', '-uall']);
   if (!out) return [];
-  const entries = out.split('\0').filter(Boolean);
-  const synced = [];
+  // Entries are "XY path"; a rename/copy entry is followed by its source path.
+  const entries = out.split('\0');
+  const paths = [];
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
-    const code = e.slice(0, 2);
-    const rel = e.slice(3);
-    if (code[0] === 'R' || code[0] === 'C') i++; // next entry is the rename source
+    if (e.length < 4) continue;
+    paths.push(e.slice(3));
+    if ((e[0] === 'R' || e[0] === 'C') && entries[i + 1]) paths.push(entries[++i]);
+  }
+  const synced = [];
+  for (const rel of paths) {
     const src = path.join(top, rel);
     const dst = path.join(wtTop, rel);
     try {
@@ -126,10 +138,26 @@ function commitProposal(info, proposal) {
   return git(info.path, ['rev-parse', 'HEAD']);
 }
 
+// issue_id -> commit sha for the run branch's commits (the commit message's
+// `issue_id:` line), so --resume can reconcile the session with the branch.
+function committedIssues(info) {
+  const out = new Map();
+  if (!info || info.mode !== 'worktree' || !info.base || !info.branch) return out;
+  const log = tryGitRaw(info.path, ['log', '--format=%H%n%B%x00', `${info.base}..${info.branch}`]);
+  if (!log) return out;
+  for (const rec of log.split('\0')) {
+    const [sha, ...body] = rec.trim().split('\n');
+    // The trailer is the last `issue_id:` line (the reasoning above it is free text).
+    const m = body.map(l => /^issue_id: (\S+)$/.exec(l.trim())).filter(Boolean).pop();
+    if (sha && m && !out.has(m[1])) out.set(m[1], sha);
+  }
+  return out;
+}
+
 function commitsSinceBase(info) {
   if (!info || info.mode !== 'worktree' || !info.base) return [];
   const out = tryGit(info.path, ['rev-list', '--reverse', `${info.base}..HEAD`]);
   return out ? out.split('\n').filter(Boolean) : [];
 }
 
-module.exports = { createWorktree, resumeWorktree, commitProposal, commitsSinceBase, branchFor, gitToplevel };
+module.exports = { createWorktree, resumeWorktree, commitProposal, commitsSinceBase, committedIssues, syncDirtyFiles, branchFor, gitToplevel };

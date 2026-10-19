@@ -70,7 +70,7 @@ test('js-basic: target untouched, one commit for the passing proposal on the run
   assert(passed.decision_trace.some(s => s.stage === 'ast' && typeof s.duration_ms === 'number'));
   assert(passed.decision_trace.some(s => s.stage === 'executor' && s.outcome === 'passed'));
 
-  assert(fs.existsSync(path.join(env.stateDir, 'session.json')));
+  assert(fs.existsSync(sessionPath(repo)));
   assert(fs.existsSync(path.join(env.dashboardDir, 'dashboard.html')));
 });
 
@@ -170,12 +170,12 @@ test('--resume skips the analyzer, processes a pending repair once, no duplicate
 
   // Simulate a crash right after the repair was saved: rewind the repair to
   // pending and drop the commit it produced.
-  const saved = JSON.parse(fs.readFileSync(sessionPath(), 'utf8'));
+  const saved = JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8'));
   const r = saved.proposals.find(p => p.parent_issue_id);
   Object.assign(r, { test_outcome: null, critic_verdict: null, combined_confidence: null, diff_test: null, veto: null, pattern_check_results: [] });
   r.decision_trace = r.decision_trace.filter(s => s.stage === 'analyzer');
   saved.test_results = saved.test_results.filter(x => x.proposal_id !== r.issue_id);
-  fs.writeFileSync(sessionPath(), JSON.stringify(saved));
+  fs.writeFileSync(sessionPath(repo), JSON.stringify(saved));
   git(saved.worktree.path, ['reset', '-q', '--hard', saved.worktree.base]);
 
   const stub = installStub(responses);

@@ -232,12 +232,13 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   logInfo(`run_id=${session.run_id} repo=${absRepo} dry_run=${!!dryRun} cache=${cache} hierarchical=${hierarchical}`);
 
   const work = setupWorkspace({ session, absRepo, dryRun });
+  if (resume) reconcileWithBranch({ session, info: session.worktree, absRepo });
   saveSession(session);
 
   // Optional: start the live dashboard server up-front so refreshes are visible.
   if (serveDashboard) {
     const { start } = require('./interpretability/server');
-    try { await start({ port: dashboardPort }); } catch (err) { logWarn(`dashboard server failed: ${err.message}`); }
+    try { await start({ port: dashboardPort, targetRepo: absRepo }); } catch (err) { logWarn(`dashboard server failed: ${err.message}`); }
   }
 
   const files = discover(absRepo);
@@ -329,6 +330,27 @@ function setupWorkspace({ session, absRepo, dryRun }) {
   return { root: info.root, info, snapshotPath };
 }
 
+// A crash between the executor's commit and the next saveSession leaves a
+// committed proposal without a test_outcome: take the outcome from the branch.
+function reconcileWithBranch({ session, info, absRepo }) {
+  const committed = worktree.committedIssues(info);
+  let n = 0;
+  for (const p of session.proposals) {
+    const sha = committed.get(p.issue_id);
+    if (p.test_outcome || !sha) continue;
+    p.test_outcome = { status: 'passed', reverted: false, commit: sha, reason: 'reconciled from branch commit' };
+    session.test_results.push({ proposal_id: p.issue_id, ...p.test_outcome });
+    trace(p, 'executor', { reasoning: `committed ${sha.slice(0, 12)} before the previous run stopped`, confidence: 1, outcome: 'passed', trace_id: session.run_id });
+    try {
+      const sample = collectSample(p, absRepo);
+      if (sample) session.rl_samples.push(sample);
+    } catch (err) { logWarn(`sample for ${p.issue_id} skipped: ${err.message}`); }
+    n++;
+  }
+  if (n) logInfo(`resume: ${n} proposal(s) already committed on ${info.branch}; marked passed`);
+  return n;
+}
+
 function summarizeRun(session) {
   const out = { total: session.proposals.length, passed: 0, failed: 0, rl_rejected: 0, critic_rejected: 0, vetoed: 0, dry_run: 0, error: 0 };
   for (const p of session.proposals) {
@@ -378,4 +400,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runPipeline, processProposal, handleSignal, setupWorkspace, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };

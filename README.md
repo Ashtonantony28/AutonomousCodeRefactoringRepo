@@ -86,11 +86,11 @@ failure clusters, and per-proposal decision traces.
 | flag                | default      | description                                                  |
 |---------------------|--------------|--------------------------------------------------------------|
 | `--repo <path>`     | (required)   | Target Git repo                                              |
-| `--resume`          | off          | Continue from `state/session.json`: skips the Analyzer when proposals exist, finishes unprocessed proposals and pending repairs |
+| `--resume`          | off          | Continue from the target's session (`state/targets/<sha256(repo)>/session.json`): skips the Analyzer when proposals exist, marks proposals already committed on `refactor/<run_id>` as passed, finishes unprocessed proposals and pending repairs |
 | `--dry-run`         | off          | Run Analyzer + Critic, skip Executor                         |
 | `--cache <mode>`    | `read-write` | `off` · `read-write` · `replay` (sha256-keyed API responses) |
 | `--no-hierarchical` | off          | Disable file→function shortlisting                            |
-| `--serve`           | off          | Serve the live SSE dashboard while the run is in progress; it stops when the run ends (`node src/interpretability/server.js` serves it standalone) |
+| `--serve`           | off          | Serve the live SSE dashboard while the run is in progress; it stops when the run ends (`node src/interpretability/server.js [--repo <path>]` serves it standalone; without `--repo` it follows the most recently written session) |
 | `--port <n>`        | `4173`       | Dashboard server port                                         |
 
 ## Layout
@@ -106,8 +106,8 @@ src/
   runner/      anchor-matcher.js · reverter.js · test-runner.js · worktree.js
   utils/       file-discovery.js · token-tracker.js · checkpoint.js
                api-cache.js · claude-client.js
-state/         session.json · cache/<hash>.json · runs/<run_id>/spans.ndjson   (override: REFACTOR_STATE_DIR)
-               targets/<sha256(repo)>/  rl-samples.json · rl-weights.json
+state/         cache/<hash>.json · runs/<run_id>/spans.ndjson   (override: REFACTOR_STATE_DIR)
+               targets/<sha256(repo)>/  session.json · rl-samples.json · rl-weights.json
                                         calibration.json · calibration-points.json
 dashboard/     dashboard.html   (override: REFACTOR_DASHBOARD_DIR)
 test/          *.test.js (node:test, stub Claude client, no API calls) · fixtures/ · helpers/

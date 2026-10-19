@@ -83,9 +83,9 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function serveDashboard(res) {
+function serveDashboard(res, sessFile) {
   let session = null;
-  try { session = readJson(sessionPath()); } catch { session = null; }
+  try { session = readJson(sessFile); } catch { session = null; }
   if (!session && fs.existsSync(dashboardPath())) return sendFile(res, dashboardPath(), 'text/html; charset=utf-8');
   let html;
   try { html = renderHtml(session || { proposals: [] }); }
@@ -101,7 +101,7 @@ function watchSession(state, intervalMs) {
   let last = null;
   const tick = () => {
     try {
-      const file = sessionPath();
+      const file = sessionPath(state.targetRepo);
       if (!fs.existsSync(file)) return;
       const st = fs.statSync(file);
       const key = `${st.ino}:${st.mtimeMs}:${st.size}`;
@@ -118,14 +118,16 @@ function watchSession(state, intervalMs) {
 
 function route(req, res, state) {
   const url = req.url.split('?')[0];
-  if (url === '/' || url === '/index.html') return serveDashboard(res);
-  // Learned-gate state is per target repo: follow the current session's target.
-  let target = null;
-  if (url === '/calibration.json' || url === '/rl-weights.json') {
-    try { target = (readJson(sessionPath()) || {}).target_repo || null; } catch { target = null; }
+  // The served target's session, else the most recently written one.
+  const sessFile = sessionPath(state.targetRepo);
+  if (url === '/' || url === '/index.html') return serveDashboard(res, sessFile);
+  // Learned-gate state is per target repo.
+  let target = state.targetRepo;
+  if (!target && (url === '/calibration.json' || url === '/rl-weights.json')) {
+    try { target = (readJson(sessFile) || {}).target_repo || null; } catch { target = null; }
   }
   const jsonFiles = {
-    '/session.json': [sessionPath(), { proposals: [] }],
+    '/session.json': [sessFile, { proposals: [] }],
     '/calibration.json': [modelPath(target), null],
     '/rl-weights.json': [weightsPath(target), null]
   };
@@ -137,7 +139,7 @@ function route(req, res, state) {
   if (url === '/clusters.json') {
     try {
       const { clusterFailures } = require('./clustering');
-      const sess = readJson(sessionPath()) || { proposals: [] };
+      const sess = readJson(sessFile) || { proposals: [] };
       return sendJSON(res, clusterFailures(sess.proposals || []));
     } catch (err) { return sendJSON(res, { error: err.message }, 500); }
   }
@@ -149,8 +151,8 @@ function route(req, res, state) {
 // keepAlive=false (the default for programmatic use, e.g. `--serve`) unrefs
 // the server, its sockets and timers so the host process exits when its own
 // work is done. The standalone CLI below passes keepAlive=true.
-function start({ port = 4173, open = false, keepAlive = false, watchIntervalMs = WATCH_INTERVAL_MS, quiet = false } = {}) {
-  const state = { keepAlive };
+function start({ port = 4173, open = false, keepAlive = false, watchIntervalMs = WATCH_INTERVAL_MS, quiet = false, targetRepo = null } = {}) {
+  const state = { keepAlive, targetRepo };
   const sockets = new Set();
   const server = http.createServer((req, res) => route(req, res, state));
   server.on('connection', (sock) => {
@@ -193,7 +195,9 @@ function tryOpen(url) {
 if (require.main === module) {
   const portArg = process.argv.indexOf('--port');
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 4173;
-  start({ port, open: process.argv.includes('--open'), keepAlive: true }).catch((err) => {
+  const repoArg = process.argv.indexOf('--repo');
+  const targetRepo = repoArg !== -1 ? require('path').resolve(process.argv[repoArg + 1]) : null;
+  start({ port, open: process.argv.includes('--open'), keepAlive: true, targetRepo }).catch((err) => {
     console.error('dashboard server failed:', err);
     process.exit(1);
   });

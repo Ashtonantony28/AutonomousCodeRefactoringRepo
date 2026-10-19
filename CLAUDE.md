@@ -38,13 +38,18 @@ saturation figures are reported on the dashboard as a spend indicator only.
 - **The Orchestrator is the only thing that calls agents.** Agents never call
   each other directly and never share state except through the session JSON.
 - The pipeline runs strictly: Analyzer → Critic (+ AST) → RL gate → Executor.
-- After every agent call, the Orchestrator persists `state/session.json`.
+- After every agent call, the Orchestrator persists the target's session
+  (`<state>/targets/<sha256(repo)>/session.json`). A legacy global
+  `<state>/session.json` is moved there on first read, only for its own target.
 - On `SIGINT`/`SIGTERM` the in-flight edit is reverted (its test process
   group killed), state is flushed and the process exits 0. The pre-edit
   snapshot is also persisted (`<state>/targets/<sha256(repo)>/inflight.json`)
   so after a crash the next start restores it before doing anything else.
 - `--resume` with proposals in the session skips the Analyzer and processes
   every proposal without a `test_outcome`, including pending Reflexion repairs.
+  It first reconciles with the `refactor/<run_id>` branch: a proposal whose
+  `issue_id` is in a commit message but has no `test_outcome` (crash after the
+  commit) is marked `passed` with that commit, not re-executed.
 
 ## Executor isolation
 
@@ -65,7 +70,7 @@ saturation figures are reported on the dashboard as a spend indicator only.
 
 ---
 
-## Session state schema (`state/session.json`)
+## Session state schema (`<state>/targets/<sha256(repo)>/session.json`)
 
 ```json
 {
@@ -201,6 +206,6 @@ node src/orchestrator.js --repo <path> [--resume] [--dry-run]
 ```
 
 - `--repo` (required): target Git repo
-- `--resume`: continue from existing `state/session.json` (same target only);
+- `--resume`: continue from the target's existing session;
   no re-analysis when it already has proposals
 - `--dry-run`: run Analyzer + Critic, skip Executor (no file changes)
