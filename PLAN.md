@@ -57,7 +57,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG0 | Contracts, test harness, fixtures, bench | — | thread worker | done |
 | SG1 | Sound score fusion and vetoes | SG0 | thread worker | proposed |
 | SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | done |
-| SG3 | AST and polyglot check precision | SG0 | thread worker | proposed |
+| SG3 | AST and polyglot check precision | SG0 | thread worker | done |
 | SG4 | Safe anchor matching and edit application | SG0 | thread worker | done |
 | SG5 | Executor and session robustness | SG0, SG4 | thread worker | proposed |
 | SG6 | Learning loop on real features | SG0, SG1 | thread worker | proposed |
@@ -156,3 +156,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-19 | SG2 | green | `node --test test/diff-testing.test.js` 23/23, `npm test` 112/112, bench difftest p50 78 ms / p95 119 ms (budget 2000). Sync API kept (worker + `Atomics.wait`). Open: `hybrid-validator.js` does not pass `fileSrc` yet (SG1 wiring); edits to non-callables (e.g. a constant) are `inconclusive`; `run` blocks the event loop up to the 3 s hard kill. |
 | 2026-10-19 | SG4 | green | anchor/reverter tests 20/20, `npm test` 126/126 after merging with SG2, bench apply p95 37 ms (budget 100) incl. 200 KB cases. Tier order now exact → indent-shift → whitespace → fuzzy; fuzzy requires token identity and a runner-up gap ≥ 0.02. Open for SG5: executor's `apply_failed` drops `err.tier`/`err.detail.closest`. |
 | 2026-10-19 | SG7 | green | SG7 tests 17/17, `npm test` 133/133, `state/`+`dashboard/` untouched. Per-request render + in-place swap on SSE; inline JSON in `application/json` script with escaping; spans carry trace/parent/start/end; probe wired in; `--serve` server now unref'd (stops at run end). Open for SG1/SG5: orchestrator should import `RL_GATE_THRESHOLD` from `rl/classifier.js` and pass `trace_id` to `trace()`; confirm veto object shape; server watches global `sessionPath()`. |
+| 2026-10-19 | SG3 | green | ast/polyglot tests 26/26, `npm test` after merge with SG7 green, bench ast p95 ~1 ms. `runChecks` adds `splice{ok,reason,occurrences}`; `severity:'veto'` only for parse errors introduced by the proposal. Open for SG1: treat `severity:'veto'` as hard veto. Python/Go remain lexical; Python return check only flags losing all value returns. `@babel/traverse` now unused. |
