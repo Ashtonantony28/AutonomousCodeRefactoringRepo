@@ -2,9 +2,9 @@
   {
     "issue_id": "js-failing-greeting",
     "file": "src/greet.js",
-    "current_code": "const GREETING = 'hello';",
-    "proposed_code": "const GREETING = 'hi';",
-    "reasoning": "The module reads `process.env` at load, which the sandboxed diff test does not provide, so it cannot load the file (inconclusive, runs=0); a unanimous jury lets the edit through and the real test run catches the changed greeting.",
+    "current_code": "console.log('greet', name);",
+    "proposed_code": "console.log('greet:', name);",
+    "reasoning": "Only the log message changes. The sandboxed diff test replaces console with a no-op, so it sees identical results (equivalent) and a unanimous jury lets the edit through; the real suite captures console.log and catches the changed message.",
     "risk_estimate": 0.2,
     "expected_status": "reverted"
   }

@@ -280,17 +280,19 @@ test('criticGate derives majority and unanimity from panel[]', () => {
 
 // ---------- SG14: commit bar ----------
 
-const STRIP_CUR = "function strip(p) {\n  return String(p).replace(/\\.\\.\\//g, '');\n}";
-const STRIP_PROP = "function strip(p) {\n  return String(p).replace('../', '');\n}";
+// The sandbox's console is a no-op, so the diff test sees this behaviour change
+// as `equivalent`; only the jury can stop it.
+const LOG_CUR = "function audit(user) {\n  console.log('audit', user);\n  return String(user).length;\n}";
+const LOG_PROP = "function audit(user) {\n  console.log('audit:', user);\n  return String(user).length;\n}";
 
-function stripRepo(ctx) {
-  fs.writeFileSync(path.join(ctx.repo, 'paths.js'), `'use strict';\n${STRIP_CUR}\nmodule.exports = { strip };\n`);
+function logRepo(ctx) {
+  fs.writeFileSync(path.join(ctx.repo, 'audit.js'), `'use strict';\n${LOG_CUR}\nmodule.exports = { audit };\n`);
 }
 
 test('a 2/3 jury is critic_rejected even when the diff test says equivalent (AUDIT-5 C1)', async (t) => {
   const ctx = setup(t);
-  stripRepo(ctx);
-  const p = await viaPipeline(ctx, makeProposal('paths.js', STRIP_CUR, STRIP_PROP),
+  logRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('audit.js', LOG_CUR, LOG_PROP),
     perPersona(persona => persona === 'strict' ? { ...base, preserves_semantics: false, p_preserves: 0.2 } : APPROVE_RAW));
   assert.strictEqual(p.diff_test.verdict, 'equivalent');
   assert(p.combined_confidence >= 0.5);
@@ -300,11 +302,12 @@ test('a 2/3 jury is critic_rejected even when the diff test says equivalent (AUD
 
 test('an approving persona listing a behaviour-changing edge case blocks the edit (AUDIT-5 M2 K2)', async (t) => {
   const ctx = setup(t);
-  stripRepo(ctx);
-  const p = await viaPipeline(ctx, makeProposal('paths.js', STRIP_CUR, STRIP_PROP),
-    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ["'../../x' keeps one '../'"] } : APPROVE_RAW));
+  logRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('audit.js', LOG_CUR, LOG_PROP),
+    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ["every call logs 'audit:' instead of 'audit'"] } : APPROVE_RAW));
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
   assert.strictEqual(p.test_outcome.status, 'critic_rejected');
-  assert.match(p.test_outcome.reason, /edge cases: security: '\.\.\/\.\.\/x' keeps one/);
+  assert.match(p.test_outcome.reason, /edge cases: security: every call logs 'audit:'/);
 });
 
 test('criticGate: a persona below the p_preserves floor blocks a unanimous approve', () => {
@@ -321,7 +324,8 @@ test('criticGate: a persona below the p_preserves floor blocks a unanimous appro
 test('a JS edit the diff test cannot run (runs=0) is critic_rejected despite a unanimous approve and clean AST (AUDIT-5 C3/E6)', async (t) => {
   const ctx = setup(t);
   const cur = 'module.exports = function (a, b) {\n  return a - b;\n};';
-  fs.writeFileSync(path.join(ctx.repo, 'sub.js'), `'use strict';\n${cur}\n`);
+  // Reading `process` at load keeps the sandbox from loading the module (runs=0).
+  fs.writeFileSync(path.join(ctx.repo, 'sub.js'), `'use strict';\nconst VERBOSE = Boolean(process.env.SUB_VERBOSE);\n${cur}\n`);
   const p = await viaPipeline(ctx, makeProposal('sub.js', cur, 'module.exports = function (a, b) {\n  return Math.abs(a - b);\n};'), APPROVE_RAW);
   assert.strictEqual(p.diff_test.runs, 0);
   assert(p.pattern_check_results.every(c => c.passed));

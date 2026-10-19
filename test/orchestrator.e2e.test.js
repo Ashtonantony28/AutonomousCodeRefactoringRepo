@@ -155,9 +155,9 @@ test('--resume skips the analyzer, processes a pending repair once, no duplicate
   const responses = loadFixtureResponses('js-failing-after-edit');
   responses.reflexion = {
     file: 'src/greet.js',
-    current_code: "const GREETING = 'hello';",
-    proposed_code: 'const GREETING = "hello";',
-    reasoning: 'keep the greeting, normalise quotes',
+    current_code: "console.log('greet', name);",
+    proposed_code: 'console.log("greet", name);',
+    reasoning: 'keep the log message, normalise quotes',
     risk_estimate: 0.1
   };
   installStub(responses);
@@ -166,7 +166,7 @@ test('--resume skips the analyzer, processes a pending repair once, no duplicate
   const s1 = await withoutTestContext(() => runPipeline({ repo, cache: 'off' }));
   const repair = s1.proposals.find(p => p.parent_issue_id);
   assert(repair, 'repair was emitted');
-  assert.strictEqual(repair.issue_id, `${proposalId('src/greet.js', "const GREETING = 'hello';")}-2`, 'collision gets a suffix');
+  assert.strictEqual(repair.issue_id, `${proposalId('src/greet.js', "console.log('greet', name);")}-2`, 'collision gets a suffix');
 
   // Simulate a crash right after the repair was saved: rewind the repair to
   // pending and drop the commit it produced.
