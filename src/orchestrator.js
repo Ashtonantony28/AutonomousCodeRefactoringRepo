@@ -7,7 +7,7 @@ const { Command } = require('commander');
 let chalk;
 try { chalk = require('chalk'); } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, gray: s => s, bold: s => s }; }
 
-const { loadOrInit, saveSession } = require('./utils/checkpoint');
+const { loadOrInit, saveSession, inflightPath, worktreesDir } = require('./utils/checkpoint');
 const { TokenTracker } = require('./utils/token-tracker');
 const { discover } = require('./utils/file-discovery');
 const apiCache = require('./utils/api-cache');
@@ -17,6 +17,9 @@ const { runCritic } = require('./agents/critic');
 const { runHybridValidator } = require('./validation/hybrid-validator');
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
+const { FileSnapshot } = require('./runner/reverter');
+const { killActive } = require('./runner/test-runner');
+const worktree = require('./runner/worktree');
 
 const { collectSample } = require('./rl/collector');
 const { trainIfReady, loadClassifier, RL_GATE_THRESHOLD } = require('./rl/classifier');
@@ -36,42 +39,39 @@ function logWarn(msg) { console.log(chalk.yellow('[orch] ') + msg); }
 function logErr(msg)  { console.log(chalk.red('[orch] ')  + msg); }
 function logOk(msg)   { console.log(chalk.green('[orch] ')+ msg); }
 
-function summarizeProposal(p) {
-  return {
-    issue_id: p.issue_id,
-    file: p.file,
-    risk_estimate: p.risk_estimate,
-    combined_confidence: p.combined_confidence,
-    outcome: p.test_outcome ? p.test_outcome.status : null
-  };
-}
-
-function pruneContext(agentName, proposals, tracker) {
-  if (!tracker.shouldPrune(agentName)) return proposals;
-  logWarn(`pruning context for ${agentName} (saturation ${(tracker.saturationOf(agentName) * 100).toFixed(1)}%)`);
-  return proposals.map(summarizeProposal);
+// Revert any in-flight edit (killing its test process group first), flush
+// state, exit. Exported so tests can drive it without delivering a signal.
+function handleSignal(signal, session, { exit = process.exit } = {}) {
+  logWarn(`${signal} — reverting in-flight edit and flushing state`);
+  try { killActive(); } catch { /* */ }
+  try {
+    const n = FileSnapshot.restoreLive();
+    if (n) logWarn(`restored ${n} in-flight file(s)`);
+  } catch (e) { logErr(`restore failed: ${e.message}`); }
+  try { if (session) saveSession(session); } catch { /* */ }
+  exit(signal === 'uncaughtException' ? 1 : 0);
 }
 
 function installSignalHandlers(session) {
-  const flush = (code) => {
-    try { saveSession(session); } catch (e) { /* */ }
-    process.exit(code);
-  };
-  process.on('SIGINT', () => { logWarn('SIGINT — flushing state'); flush(0); });
-  process.on('SIGTERM', () => { logWarn('SIGTERM — flushing state'); flush(0); });
-  process.on('uncaughtException', (e) => { logErr(`uncaught: ${e.message}`); flush(1); });
+  process.on('SIGINT', () => handleSignal('SIGINT', session));
+  process.on('SIGTERM', () => handleSignal('SIGTERM', session));
+  process.on('uncaughtException', (e) => { logErr(`uncaught: ${e.message}`); handleSignal('uncaughtException', session); });
 }
 
 function featuresFor(p) {
   return extractFeatures(p);
 }
 
-async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, allowRepair = true, attemptIdx = 0 }) {
+// `work` = { root, info, snapshotPath }: where edits are validated, applied
+// and tested (the run's worktree, or the target itself in dry-run / non-git
+// fallback). `absRepo` is the target, used only as the sample label.
+async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, work = null, allowRepair = true, attemptIdx = 0 }) {
   const trace_id = session.run_id;
+  if (!work) work = { root: absRepo, info: null, snapshotPath: inflightPath(absRepo) };
   proposal.run_id = session.run_id;
   // Hybrid critic + AST + diff-testing
   try {
-    await runHybridValidator({ proposal, tracker, repoRoot: absRepo, runCritic, runId: session.run_id });
+    await runHybridValidator({ proposal, tracker, repoRoot: work.root, runCritic, runId: session.run_id });
   } catch (err) {
     logErr(`hybrid validator error on ${proposal.file}: ${err.message}`);
     trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
@@ -138,8 +138,14 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   // Executor
   let result;
+  const tExec = performance.now();
   try {
-    result = await runExecutor({ proposal, tracker, repoRoot: absRepo });
+    result = await runExecutor({
+      proposal,
+      repoRoot: work.root,
+      snapshotPath: work.snapshotPath,
+      onKept: () => worktree.commitProposal(work.info, proposal)
+    });
   } catch (err) {
     logErr(`executor failed on ${proposal.file}: ${err.message}`);
     trace(proposal, 'executor', { reasoning: `executor error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
@@ -149,6 +155,17 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   }
   proposal.test_outcome = result;
   session.test_results.push({ proposal_id: proposal.issue_id, ...result });
+  trace(proposal, 'executor', {
+    reasoning: result.reason || `tests ${result.status}${result.commit ? `; committed ${result.commit.slice(0, 12)}` : ''}`,
+    confidence: result.status === 'passed' ? 1 : 0,
+    outcome: result.status,
+    duration_ms: Number((performance.now() - tExec).toFixed(3)),
+    trace_id
+  });
+  if (result.status === 'skipped_no_tests') {
+    saveSession(session);
+    return proposal; // nothing ran: no reward signal, no sample
+  }
 
   // Reward / RL sample
   const sample = collectSample(proposal, absRepo);
@@ -173,14 +190,15 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     if (allowRepair && attemptIdx < reflexion.MAX_RETRIES &&
         ['failed', 'reverted', 'apply_failed'].includes(result.status)) {
       const repaired = await reflexion.repair({
-        proposal, failure: result, tracker, attemptIdx: attemptIdx + 1
+        proposal, failure: result, tracker, attemptIdx: attemptIdx + 1,
+        takenIds: new Set(session.proposals.map(p => p.issue_id))
       });
       if (repaired) {
         logInfo(`reflexion: emitted repair attempt ${repaired.attempt} for ${proposal.file}`);
         session.proposals.push(repaired);
         saveSession(session);
         await processProposal({
-          proposal: repaired, session, tracker, classifier, dryRun, absRepo,
+          proposal: repaired, session, tracker, classifier, dryRun, absRepo, work,
           allowRepair: true, attemptIdx: repaired.attempt
         });
       }
@@ -202,12 +220,19 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   }
   apiCache.setMode(cache);
 
+  // A previous process died mid-edit: put the file back before anything else.
+  const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo));
+  if (crashed) logWarn(`restored in-flight edit from a previous run: ${crashed.files.join(', ')} in ${crashed.repo_root}`);
+
   const session = loadOrInit(absRepo, { resume });
   if (cli) installSignalHandlers(session);
   const tracker = new TokenTracker(session);
   const classifier = loadClassifier();
 
   logInfo(`run_id=${session.run_id} repo=${absRepo} dry_run=${!!dryRun} cache=${cache} hierarchical=${hierarchical}`);
+
+  const work = setupWorkspace({ session, absRepo, dryRun });
+  saveSession(session);
 
   // Optional: start the live dashboard server up-front so refreshes are visible.
   if (serveDashboard) {
@@ -224,28 +249,37 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
     return session;
   }
 
-  let analyzerProposals;
-  try {
-    analyzerProposals = await runAnalyzer({ files, tracker, hierarchical });
-  } catch (err) {
-    logErr(`analyzer failed: ${err.message}`);
+  if (resume && session.proposals.length) {
+    logInfo(`resume: ${session.proposals.length} proposals in session; skipping analyzer`);
+  } else {
+    let analyzerProposals;
+    try {
+      analyzerProposals = await runAnalyzer({ files, tracker, hierarchical, takenIds: session.proposals.map(p => p.issue_id) });
+    } catch (err) {
+      logErr(`analyzer failed: ${err.message}`);
+      saveSession(session);
+      renderDashboard(session);
+      return session;
+    }
+    for (const p of analyzerProposals) {
+      p.decision_trace = p.decision_trace || [];
+      p.run_id = session.run_id;
+      trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed', trace_id: session.run_id });
+      session.proposals.push(p);
+    }
     saveSession(session);
-    renderDashboard(session);
-    return session;
+    logOk(`analyzer produced ${analyzerProposals.length} proposals`);
   }
-  for (const p of analyzerProposals) {
-    p.decision_trace = p.decision_trace || [];
-    p.run_id = session.run_id;
-    trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed', trace_id: session.run_id });
-    session.proposals.push(p);
-  }
-  saveSession(session);
-  logOk(`analyzer produced ${analyzerProposals.length} proposals`);
 
+  // Unfinished proposals, including Reflexion repairs left pending by an
+  // interrupted run. Repairs emitted during this loop are processed by their
+  // parent and are not in this snapshot of the list.
   for (const proposal of [...session.proposals]) {
-    if (proposal.test_outcome) continue; // already processed (resume)
-    if (proposal.parent_issue_id) continue; // repair attempts processed by parent
-    await processProposal({ proposal, session, tracker, classifier, dryRun, absRepo });
+    if (proposal.test_outcome) continue;
+    await processProposal({
+      proposal, session, tracker, classifier, dryRun, absRepo, work,
+      attemptIdx: proposal.parent_issue_id ? (proposal.attempt || 1) : 0
+    });
   }
 
   // Train RL + calibration after the run
@@ -269,8 +303,30 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   const stats = summarizeRun(session);
   logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected} vetoed=${stats.vetoed}`);
+  if (work.info && work.info.mode === 'worktree') {
+    const commits = worktree.commitsSinceBase(work.info);
+    logOk(`branch ${work.info.branch} (${commits.length} commit${commits.length === 1 ? '' : 's'}) in worktree ${work.info.path}`);
+  }
   saveSession(session);
   return session;
+}
+
+// Executor isolation: a git worktree on refactor/<run_id> under the state dir.
+// Dry runs never write, so they validate against the target directly.
+function setupWorkspace({ session, absRepo, dryRun }) {
+  const snapshotPath = inflightPath(absRepo);
+  if (dryRun) return { root: absRepo, info: null, snapshotPath };
+  let info = session.worktree
+    ? worktree.resumeWorktree({ targetRepo: absRepo, info: session.worktree })
+    : null;
+  if (!info) info = worktree.createWorktree({ targetRepo: absRepo, runId: session.run_id, baseDir: worktreesDir(absRepo) });
+  if (info.mode !== 'worktree') {
+    logWarn(`${info.reason}; executor will edit the target in place`);
+  } else {
+    logInfo(`worktree ${info.path} on branch ${info.branch}`);
+  }
+  session.worktree = info;
+  return { root: info.root, info, snapshotPath };
 }
 
 function summarizeRun(session) {
@@ -322,4 +378,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runPipeline, processProposal, REJECT_THRESHOLD, MIN_CRITIC_P, pruneContext, summarizeProposal, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, handleSignal, setupWorkspace, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };

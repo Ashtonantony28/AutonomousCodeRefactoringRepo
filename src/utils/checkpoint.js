@@ -20,6 +20,16 @@ function stateDirFor(targetRepo) {
   return path.join(stateDir(), 'targets', key);
 }
 
+// Pre-edit snapshot of the executor's in-flight file (restored on start-up
+// after a crash, and by the signal handlers).
+function inflightPath(targetRepo) {
+  return path.join(stateDirFor(targetRepo), 'inflight.json');
+}
+
+function worktreesDir(targetRepo) {
+  return path.join(stateDirFor(targetRepo), 'worktrees');
+}
+
 function ensureStateDir(dir = stateDir()) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -62,7 +72,10 @@ function saveSession(session) {
 
 function loadOrInit(targetRepo, { resume = false } = {}) {
   const existing = loadSession();
-  if (resume && existing) return existing;
+  if (resume && existing) {
+    if (!existing.target_repo || path.resolve(existing.target_repo) === path.resolve(targetRepo)) return existing;
+    console.error(`[checkpoint] --resume ignored: session.json belongs to ${existing.target_repo}`);
+  }
   const session = freshSession(targetRepo);
   saveSession(session);
   return session;
@@ -72,6 +85,8 @@ module.exports = {
   DEFAULT_STATE_DIR,
   stateDir,
   stateDirFor,
+  inflightPath,
+  worktreesDir,
   sessionPath,
   ensureStateDir,
   freshSession,

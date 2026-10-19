@@ -1,6 +1,6 @@
 'use strict';
 
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const { callClaude, extractJsonBlock } = require('../utils/claude-client');
 
 // Agentless-style hierarchical localization (Xia et al., arXiv:2407.01489).
@@ -21,6 +21,21 @@ const TARGET_PROPOSALS = 10;
 const FILE_SHORTLIST = 8;
 const FUNCTION_SHORTLIST = 12;
 
+// Deterministic ids keep critic prompts (and so replay-cache keys) stable
+// across runs; model-supplied ids are ignored.
+function proposalId(file, currentCode) {
+  return crypto.createHash('sha256').update(String(file) + '\0' + String(currentCode)).digest('hex').slice(0, 16);
+}
+
+// `taken` is the set of ids already in the session; collisions get -2, -3, ...
+function uniqueProposalId(file, currentCode, taken) {
+  const base = proposalId(file, currentCode);
+  let id = base;
+  for (let n = 2; taken && taken.has(id); n++) id = `${base}-${n}`;
+  if (taken) taken.add(id);
+  return id;
+}
+
 // ---------- Pass 3 (single-batch fallback / per-function edit) ----------
 
 const PROPOSAL_SYSTEM = [
@@ -29,7 +44,6 @@ const PROPOSAL_SYSTEM = [
   'Identify tech debt: high complexity, duplication, poor error handling, maintainability issues.',
   'For each issue, output exactly one JSON object (no prose, no markdown):',
   '{',
-  '  "issue_id": "<uuid>",',
   '  "file": "<relative path>",',
   '  "current_code": "<the problematic snippet, copied verbatim from the file>",',
   '  "proposed_code": "<your refactored version>",',
@@ -141,7 +155,7 @@ function renderBatch(batch, focusHints) {
   return parts.join('\n\n');
 }
 
-function normalizeProposal(raw, allowedFiles) {
+function normalizeProposal(raw, allowedFiles, taken = null) {
   if (!raw || typeof raw !== 'object') return null;
   const file = String(raw.file || '').trim();
   if (!file || !allowedFiles.has(file)) return null;
@@ -150,7 +164,7 @@ function normalizeProposal(raw, allowedFiles) {
   if (!current || !proposed || current === proposed) return null;
   const risk = Number(raw.risk_estimate);
   return {
-    issue_id: raw.issue_id && typeof raw.issue_id === 'string' ? raw.issue_id : uuidv4(),
+    issue_id: uniqueProposalId(file, current, taken),
     file,
     current_code: current,
     proposed_code: proposed,
@@ -179,8 +193,9 @@ async function callAnalyzerOnce(batch, hints) {
 
 // ---------- Orchestration ----------
 
-async function runAnalyzer({ files, tracker, hierarchical = true }) {
+async function runAnalyzer({ files, tracker, hierarchical = true, takenIds = null }) {
   const allowedFiles = new Set(files.map(f => f.relative));
+  const taken = new Set(takenIds || []);
   const proposals = [];
 
   let targetFiles = files;
@@ -221,7 +236,7 @@ async function runAnalyzer({ files, tracker, hierarchical = true }) {
     if (!raw) continue;
 
     for (const item of raw) {
-      const norm = normalizeProposal(item, allowedFiles);
+      const norm = normalizeProposal(item, allowedFiles, taken);
       if (norm) proposals.push(norm);
       if (proposals.length >= TARGET_PROPOSALS) break;
     }
@@ -235,6 +250,8 @@ module.exports = {
   pickFileShortlist,
   pickFunctionShortlist,
   normalizeProposal,
+  proposalId,
+  uniqueProposalId,
   chunkFiles,
   summarizeFile,
   PROPOSAL_SYSTEM,

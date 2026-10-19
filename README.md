@@ -32,7 +32,8 @@ Orchestrator
   │              "what-if" attribution; isotonic-calibrated combined_confidence
   │
   ├── Executor  ─► 4-tier anchor matching (exact → whitespace → indent → fuzzy);
-  │               snapshot revert on test failure; c8 coverage capture
+  │               git worktree per run, one commit per passing edit;
+  │               snapshot revert on failure or signal; c8 coverage capture
   │
   ├── Reflexion loop  ─► up to 2 repair attempts using CRITIC-style
   │                       grounded-in-stderr re-prompting
@@ -56,6 +57,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Standard run with the live SSE dashboard
 node src/orchestrator.js --repo /path/to/target/repo --serve
 
+# Edits land as commits on refactor/<run_id> in a git worktree under the
+# state dir; the target's working tree is never touched (non-git targets
+# fall back to in-place edits with a warning).
+
 # Skip Executor (no file changes)
 node src/orchestrator.js --repo /path/to/target/repo --dry-run
 
@@ -78,7 +83,7 @@ failure clusters, and per-proposal decision traces.
 | flag                | default      | description                                                  |
 |---------------------|--------------|--------------------------------------------------------------|
 | `--repo <path>`     | (required)   | Target Git repo                                              |
-| `--resume`          | off          | Continue from `state/session.json`                            |
+| `--resume`          | off          | Continue from `state/session.json`: skips the Analyzer when proposals exist, finishes unprocessed proposals and pending repairs |
 | `--dry-run`         | off          | Run Analyzer + Critic, skip Executor                         |
 | `--cache <mode>`    | `read-write` | `off` · `read-write` · `replay` (sha256-keyed API responses) |
 | `--no-hierarchical` | off          | Disable file→function shortlisting                            |
@@ -95,7 +100,7 @@ src/
   rl/          features.js · collector.js · classifier.js · reward.js · calibration.js
                counterfactual.js · bug-injector.js
   interpretability/  tracer.js · probe.js · clustering.js · dashboard.js · server.js
-  runner/      anchor-matcher.js · reverter.js · test-runner.js
+  runner/      anchor-matcher.js · reverter.js · test-runner.js · worktree.js
   utils/       file-discovery.js · token-tracker.js · checkpoint.js
                api-cache.js · claude-client.js
 state/         session.json · rl-weights.json · rl-samples.json   (override: REFACTOR_STATE_DIR)

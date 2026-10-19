@@ -54,6 +54,24 @@ function parseCounts(stdout, framework) {
   return { passed, failed };
 }
 
+// Test commands run detached in their own process group so a timeout (or a
+// SIGINT of the orchestrator) can kill the whole tree, grandchildren included.
+const active = new Set();
+
+function killGroup(proc, signal = 'SIGKILL') {
+  if (!proc || proc.pid == null) return;
+  try {
+    if (process.platform === 'win32') proc.kill(signal);
+    else process.kill(-proc.pid, signal);
+  } catch { try { proc.kill(signal); } catch { /* */ } }
+}
+
+function killActive(signal = 'SIGKILL') {
+  let n = 0;
+  for (const proc of active) { killGroup(proc, signal); n++; }
+  return n;
+}
+
 function runCommand({ cmd, args, cwd, env, timeoutMs }) {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -65,23 +83,30 @@ function runCommand({ cmd, args, cwd, env, timeoutMs }) {
         cwd,
         env,
         shell: process.platform === 'win32',
+        detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe']
       });
     } catch (err) {
       return resolve({ exitCode: null, stdout: '', stderr: err.message, durationMs: 0, timedOut: false, spawnError: true });
     }
+    active.add(proc);
     const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill('SIGKILL'); } catch { /* */ }
+      killGroup(proc);
     }, timeoutMs);
     proc.stdout.on('data', d => { stdout += d.toString(); });
     proc.stderr.on('data', d => { stderr += d.toString(); });
     proc.on('error', (err) => {
       clearTimeout(timer);
+      active.delete(proc);
       resolve({ exitCode: null, stdout, stderr: stderr + '\n' + err.message, durationMs: Date.now() - start, timedOut, spawnError: true });
     });
+    // Stragglers left in the group would hold the pipes open; reap them.
+    proc.on('exit', () => killGroup(proc));
     proc.on('close', (code) => {
       clearTimeout(timer);
+      active.delete(proc);
+      if (timedOut) killGroup(proc);
       resolve({ exitCode: code, stdout, stderr, durationMs: Date.now() - start, timedOut, spawnError: false });
     });
   });
@@ -181,4 +206,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, detectCommand, parseCounts, measureCoverage, readCoverageSummary };
+module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, measureCoverage, readCoverageSummary, COVERAGE_DIR };

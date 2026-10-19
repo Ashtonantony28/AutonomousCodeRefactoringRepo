@@ -19,14 +19,17 @@ A self-improving pipeline that points at any Git repo and:
 
 ## Model & token budgets
 
-- **Model**: `claude-sonnet-4-20250514` for all three agents
+- **Model**: `claude-sonnet-4-20250514` for the Analyzer, Critic and Reflexion
+  calls. The Executor makes no Claude call: it applies the edit and runs tests.
 - **Max tokens per agent call**: 4000 (`max_tokens` in API call)
 - **Context window budget**: 80,000 tokens per agent (warn at 70% saturation)
 - **API key**: read from `ANTHROPIC_API_KEY` env var
 
-When any agent's cumulative input tokens cross **70%** of its budget, the
-Orchestrator MUST call `pruneContext(agentName, proposals)` to swap full
-proposal payloads for summaries.
+Token accounting is cumulative per agent: `TokenTracker.record` adds each
+call's input + output tokens to `token_usage[agent]` and sets
+`context_saturation[agent] = tokens / 80,000` (capped at 1). Every call is
+stateless (no conversation history is resent), so nothing is pruned; the
+saturation figures are reported on the dashboard as a spend indicator only.
 
 ---
 
@@ -36,8 +39,29 @@ proposal payloads for summaries.
   each other directly and never share state except through the session JSON.
 - The pipeline runs strictly: Analyzer → Critic (+ AST) → RL gate → Executor.
 - After every agent call, the Orchestrator persists `state/session.json`.
-- On `SIGINT` or crash, state is flushed to disk and the run can be resumed
-  with `--resume`.
+- On `SIGINT`/`SIGTERM` the in-flight edit is reverted (its test process
+  group killed), state is flushed and the process exits 0. The pre-edit
+  snapshot is also persisted (`<state>/targets/<sha256(repo)>/inflight.json`)
+  so after a crash the next start restores it before doing anything else.
+- `--resume` with proposals in the session skips the Analyzer and processes
+  every proposal without a `test_outcome`, including pending Reflexion repairs.
+
+## Executor isolation
+
+- Non-dry runs create a git worktree of the target on branch
+  `refactor/<run_id>` under `<state>/targets/<sha256(repo)>/worktrees/<run_id>`.
+  The Analyzer reads the target; validation, edits, tests and coverage output
+  (`.refactor-coverage`) happen in the worktree. The target's working tree is
+  never modified. Uncommitted target changes are copied into the worktree
+  (uncommitted); the target's `node_modules` is symlinked in.
+- Each passing proposal is one commit (only the edited file is staged; the
+  message carries `issue_id` and `file`). Failing edits are reverted. The
+  branch and worktree path are printed at the end of the run.
+- If the target is not a git repo (or has no commits) the Executor falls back
+  to editing the target in place, with a warning.
+- No test runner detected → `skipped_no_tests`, edit reverted, no RL sample.
+- Test commands run detached in their own process group; the 60 s timeout
+  kills the whole group.
 
 ---
 
@@ -61,7 +85,7 @@ proposal payloads for summaries.
 
 ```json
 {
-  "issue_id": "uuid",
+  "issue_id": "sha256(file + '\0' + current_code)[:16]",  // -2, -3 on collision
   "file": "relative/path.js",
   "current_code": "...",
   "proposed_code": "...",
@@ -140,7 +164,7 @@ classifier and uses it as a pre-Executor gate:
 - Every Claude API call: retry once on rate limit (10 s backoff), then fail
   gracefully — never let one bad proposal crash the pipeline.
 - File ops: wrap in try/catch, log, continue.
-- `SIGINT`: flush state, exit 0.
+- `SIGINT`/`SIGTERM`: revert the in-flight edit, flush state, exit 0.
 
 ---
 
@@ -151,5 +175,6 @@ node src/orchestrator.js --repo <path> [--resume] [--dry-run]
 ```
 
 - `--repo` (required): target Git repo
-- `--resume`: continue from existing `state/session.json`
+- `--resume`: continue from existing `state/session.json` (same target only);
+  no re-analysis when it already has proposals
 - `--dry-run`: run Analyzer + Critic, skip Executor (no file changes)

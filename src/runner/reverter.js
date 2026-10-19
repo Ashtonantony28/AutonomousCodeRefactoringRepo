@@ -4,10 +4,25 @@ const fs = require('fs');
 const path = require('path');
 const { findAnchor, AnchorError, reindentReplacement } = require('./anchor-matcher');
 
+// Snapshots of files about to be edited. With `persistPath` the snapshot is
+// also written to disk (atomically) before any edit so a crash-restart can
+// restore it; live snapshots are tracked so a signal handler can revert them.
+const live = new Set();
+
+function writeJsonAtomic(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, file);
+}
+
 class FileSnapshot {
-  constructor(repoRoot) {
+  constructor(repoRoot, { persistPath = null, meta = null } = {}) {
     this.repoRoot = repoRoot;
+    this.persistPath = persistPath;
+    this.meta = meta;
     this.snapshots = new Map();
+    live.add(this);
   }
 
   capture(relPath) {
@@ -15,10 +30,20 @@ class FileSnapshot {
     if (this.snapshots.has(relPath)) return;
     if (!fs.existsSync(abs)) {
       this.snapshots.set(relPath, { existed: false, content: null });
-      return;
+    } else {
+      this.snapshots.set(relPath, { existed: true, content: fs.readFileSync(abs, 'utf8') });
     }
-    const content = fs.readFileSync(abs, 'utf8');
-    this.snapshots.set(relPath, { existed: true, content });
+    this.persist();
+  }
+
+  persist() {
+    if (!this.persistPath) return;
+    writeJsonAtomic(this.persistPath, {
+      repo_root: this.repoRoot,
+      meta: this.meta,
+      files: Object.fromEntries(this.snapshots),
+      captured_at: new Date().toISOString()
+    });
   }
 
   restore(relPath) {
@@ -38,7 +63,41 @@ class FileSnapshot {
     for (const rel of this.snapshots.keys()) {
       if (this.restore(rel)) count++;
     }
+    this.release();
     return count;
+  }
+
+  // The edit is final (kept or committed): drop the snapshot without restoring.
+  release() {
+    live.delete(this);
+    this.snapshots.clear();
+    if (this.persistPath) {
+      try { fs.unlinkSync(this.persistPath); } catch { /* */ }
+    }
+  }
+
+  static restoreLive() {
+    let count = 0;
+    for (const snap of [...live]) {
+      try { count += snap.restoreAll(); } catch { /* */ }
+    }
+    return count;
+  }
+
+  // Restore a snapshot persisted by a process that died mid-edit.
+  static restoreFromDisk(persistPath) {
+    if (!persistPath || !fs.existsSync(persistPath)) return null;
+    let data;
+    try { data = JSON.parse(fs.readFileSync(persistPath, 'utf8')); } catch { data = null; }
+    if (!data || !data.repo_root || !data.files) {
+      try { fs.unlinkSync(persistPath); } catch { /* */ }
+      return null;
+    }
+    const snap = new FileSnapshot(data.repo_root);
+    for (const [rel, entry] of Object.entries(data.files)) snap.snapshots.set(rel, entry);
+    const restored = snap.restoreAll();
+    try { fs.unlinkSync(persistPath); } catch { /* */ }
+    return { repo_root: data.repo_root, meta: data.meta || null, files: Object.keys(data.files), restored };
   }
 }
 
