@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { learningDir, LABELED_STATUSES } = require('./collector');
+const { learningDir, isLabeled } = require('./collector');
 
 // Isotonic regression via pool-adjacent-violators (PAVA). Non-parametric,
 // monotone, robust to mis-calibrated linear blends. Used to map raw
@@ -137,7 +137,7 @@ function executedPoints(proposals) {
   const out = [];
   for (const p of proposals || []) {
     const s = p.test_outcome && p.test_outcome.status;
-    if (!LABELED_STATUSES.includes(s)) continue;
+    if (!isLabeled(p.test_outcome)) continue;
     if (typeof p.combined_confidence !== 'number') continue;
     out.push({ proposal_id: p.issue_id, x: p.combined_confidence, y: s === 'passed' ? 1 : 0 });
   }

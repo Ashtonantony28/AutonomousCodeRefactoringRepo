@@ -8,6 +8,12 @@ const { extractFeatures } = require('./features');
 // Outcomes that say something about the edit itself. Environment problems,
 // apply failures and untested edits are not labels.
 const LABELED_STATUSES = ['passed', 'failed', 'reverted'];
+// `reverted` because no test ran the edit: the tests never judged it.
+const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool'];
+
+function isLabeled(outcome) {
+  return !!outcome && LABELED_STATUSES.includes(outcome.status) && !UNTESTED_REASONS.includes(outcome.reason);
+}
 
 // Learning state lives per target repo (stateDirFor); without a target the
 // legacy global state dir is used.
@@ -67,8 +73,7 @@ function appendSamples(samples, targetRepo = null) {
 
 // Returns null when the outcome carries no label.
 function collectSample(proposal, targetRepo = null) {
-  const status = proposal.test_outcome && proposal.test_outcome.status;
-  if (!LABELED_STATUSES.includes(status)) return null;
+  if (!isLabeled(proposal.test_outcome)) return null;
   const sample = buildSample(proposal, targetRepo);
   appendSamples([sample], targetRepo);
   return sample;
@@ -76,6 +81,6 @@ function collectSample(proposal, targetRepo = null) {
 
 module.exports = {
   collectSample, buildSample, loadSamples, persistSamples, appendSamples, sampleKey,
-  samplesPath, learningDir, LABELED_STATUSES
+  samplesPath, learningDir, LABELED_STATUSES, UNTESTED_REASONS, isLabeled
 };
 Object.defineProperty(module.exports, 'SAMPLES_PATH', { enumerable: true, get: () => samplesPath() });

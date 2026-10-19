@@ -1,11 +1,17 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { pathToFileURL } = require('url');
+const { spawn, spawnSync } = require('child_process');
 
 const TIMEOUT_MS = 60_000;
-const COVERAGE_DIR = '.refactor-coverage';
+// After the child exits, buffered output gets DRAIN_MS to arrive; a child that
+// survives the timeout kill is abandoned EXIT_GRACE_MS later.
+const DRAIN_MS = 250;
+const EXIT_GRACE_MS = 1500;
+const JS_EXT = new Set(['.js', '.cjs', '.mjs']);
 
 function detectCommand(repoRoot) {
   const pkgPath = path.join(repoRoot, 'package.json');
@@ -72,12 +78,15 @@ function killActive(signal = 'SIGKILL') {
   return n;
 }
 
+// Resolves on the child's `exit` (or the timeout), not on stdio `close`: a
+// descendant that left the process group (setsid) can hold the pipes open
+// for as long as it lives.
 function runCommand({ cmd, args, cwd, env, timeoutMs }) {
   return new Promise((resolve) => {
     const start = Date.now();
     let stdout = '', stderr = '';
-    let timedOut = false;
-    let proc;
+    let timedOut = false, spawnError = false, exitCode = null, durationMs = null, settled = false;
+    let proc, hardTimer, drainTimer;
     try {
       proc = spawn(cmd, args, {
         cwd,
@@ -93,68 +102,156 @@ function runCommand({ cmd, args, cwd, env, timeoutMs }) {
     const timer = setTimeout(() => {
       timedOut = true;
       killGroup(proc);
+      hardTimer = setTimeout(finish, EXIT_GRACE_MS);
     }, timeoutMs);
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(hardTimer);
+      clearTimeout(drainTimer);
+      active.delete(proc);
+      proc.stdout.destroy();
+      proc.stderr.destroy();
+      resolve({ exitCode, stdout, stderr, durationMs: durationMs == null ? Date.now() - start : durationMs, timedOut, spawnError });
+    }
     proc.stdout.on('data', d => { stdout += d.toString(); });
     proc.stderr.on('data', d => { stderr += d.toString(); });
     proc.on('error', (err) => {
-      clearTimeout(timer);
-      active.delete(proc);
-      resolve({ exitCode: null, stdout, stderr: stderr + '\n' + err.message, durationMs: Date.now() - start, timedOut, spawnError: true });
+      spawnError = true;
+      stderr += '\n' + err.message;
+      finish();
     });
-    // Stragglers left in the group would hold the pipes open; reap them.
-    proc.on('exit', () => killGroup(proc));
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      active.delete(proc);
-      if (timedOut) killGroup(proc);
-      resolve({ exitCode: code, stdout, stderr, durationMs: Date.now() - start, timedOut, spawnError: false });
+    proc.on('exit', (code) => {
+      exitCode = code;
+      durationMs = Date.now() - start;
+      killGroup(proc); // stragglers left in the group
+      drainTimer = setTimeout(finish, DRAIN_MS);
     });
+    proc.on('close', finish);
   });
 }
 
-// Coverage of the changed file is opportunistic: we look for c8 / nyc /
-// jest --coverage / pytest-cov in package.json or installed CLIs, and
-// re-run with coverage enabled when a runner is available. If we can't,
-// we return { available: false } and the orchestrator skips this signal.
-async function measureCoverage({ repoRoot, file, command, timeoutMs = TIMEOUT_MS } = {}) {
-  const detected = command || detectCommand(repoRoot);
-  if (!detected) return { available: false, reason: 'no test runner' };
-
-  // Prefer c8 when it's resolvable in the target repo; it overlays nicely
-  // on `npm test` without changing the test script.
-  const c8Bin = path.join(repoRoot, 'node_modules', '.bin', 'c8');
-  if (fs.existsSync(c8Bin) && detected.framework === 'npm') {
-    const result = await runCommand({
-      cmd: c8Bin,
-      args: ['--reporter=json-summary', '--reports-dir', COVERAGE_DIR, '--include', file, 'npm', 'test', '--silent'],
-      cwd: repoRoot,
-      env: { ...process.env, CI: '1' },
-      timeoutMs
-    });
-    const summary = readCoverageSummary(repoRoot, file);
-    return { available: true, ...summary, exit_code: result.exitCode, framework: 'c8' };
-  }
-  return { available: false, reason: 'no c8 in target node_modules' };
+// The minimal changed region of `after` relative to `before`, as character
+// offsets into `after` (empty for a pure deletion).
+function changedSpan(before, after) {
+  const max = Math.min(before.length, after.length);
+  let pre = 0;
+  while (pre < max && before[pre] === after[pre]) pre++;
+  let suf = 0;
+  while (suf < max - pre && before[before.length - 1 - suf] === after[after.length - 1 - suf]) suf++;
+  return { start: pre, end: after.length - suf };
 }
 
-function readCoverageSummary(repoRoot, file) {
-  const p = path.join(repoRoot, COVERAGE_DIR, 'coverage-summary.json');
-  if (!fs.existsSync(p)) return { lines_pct: null, branches_pct: null };
-  try {
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-    const fileKey = Object.keys(j).find(k => k.endsWith(file)) || 'total';
-    const e = j[fileKey] || j.total || {};
-    return {
-      lines_pct: e.lines && typeof e.lines.pct === 'number' ? e.lines.pct / 100 : null,
-      branches_pct: e.branches && typeof e.branches.pct === 'number' ? e.branches.pct / 100 : null,
-      functions_pct: e.functions && typeof e.functions.pct === 'number' ? e.functions.pct / 100 : null
-    };
-  } catch {
-    return { lines_pct: null };
-  }
+function lineOf(src, offset) {
+  let n = 1;
+  for (let i = 0; i < offset && i < src.length; i++) if (src[i] === '\n') n++;
+  return n;
 }
 
-async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS } = {}) {
+// coverage.py has to be importable by the interpreter that runs pytest, so it
+// is looked up through pytest's shebang. Returns that python, or null.
+const pyCoverage = new Map();
+function pytestPythonWithCoverage() {
+  const key = process.env.PATH || '';
+  if (!pyCoverage.has(key)) {
+    let py = null;
+    for (const dir of key.split(path.delimiter).filter(Boolean)) {
+      let head;
+      try { head = fs.readFileSync(path.join(dir, 'pytest'), 'utf8').slice(0, 256); } catch { continue; }
+      const m = head.match(/^#!\s*(\S+)(?:[ \t]+(\S+))?/);
+      if (m) py = path.basename(m[1]) === 'env' ? m[2] : m[1];
+      break;
+    }
+    let ok = false;
+    if (py) {
+      try { ok = spawnSync(py, ['-m', 'coverage', '--version'], { stdio: 'ignore', timeout: 10_000 }).status === 0; } catch { /* */ }
+    }
+    pyCoverage.set(key, ok ? py : null);
+  }
+  return pyCoverage.get(key);
+}
+
+// How execution of the edited file is observed: V8 coverage for plain JS,
+// coverage.py around pytest; anything else has no tool.
+function coverageTool(file, detected) {
+  const ext = path.extname(file).toLowerCase();
+  if (JS_EXT.has(ext)) return 'v8';
+  if (ext === '.py' && detected.cmd === 'pytest' && pytestPythonWithCoverage()) return 'coverage.py';
+  return null;
+}
+
+function summarize(tool, edited, executed, detail) {
+  const out = { available: true, tool, exercised: executed > 0, edited_lines: edited, executed_lines: executed, lines_pct: edited ? executed / edited : 0 };
+  if (!out.exercised) out.reason = 'edit_not_exercised';
+  if (detail) out.detail = detail;
+  return out;
+}
+
+// A character counts as executed when, in some process, the innermost V8
+// range containing it has a non-zero count.
+function v8Exercised(covDir, absFile, src, span) {
+  const urls = new Set([pathToFileURL(absFile).href]);
+  try { urls.add(pathToFileURL(fs.realpathSync(absFile)).href); } catch { /* */ }
+  const shift = src.charCodeAt(0) === 0xFEFF ? 1 : 0; // the CJS loader strips a BOM
+  const probes = [];
+  for (let i = span.start; i < span.end; i++) if (!/\s/.test(src[i])) probes.push(i);
+  if (!probes.length) probes.push(Math.max(0, Math.min(span.start, src.length - 1)));
+  const hit = new Set();
+  let loaded = false;
+  let names = [];
+  try { names = fs.readdirSync(covDir).filter(n => n.endsWith('.json')); } catch { /* */ }
+  for (const name of names) {
+    let data;
+    try {
+      const raw = fs.readFileSync(path.join(covDir, name), 'utf8');
+      if (![...urls].some(u => raw.includes(u))) continue;
+      data = JSON.parse(raw);
+    } catch { continue; }
+    for (const script of data.result || []) {
+      if (!urls.has(script.url)) continue;
+      loaded = true;
+      const ranges = (script.functions || []).flatMap(f => f.ranges || []);
+      for (const off of probes) {
+        if (hit.has(off)) continue;
+        let best = null;
+        for (const r of ranges) {
+          if (r.startOffset <= off - shift && off - shift < r.endOffset &&
+              (!best || r.endOffset - r.startOffset < best.endOffset - best.startOffset)) best = r;
+        }
+        if (best && best.count > 0) hit.add(off);
+      }
+    }
+  }
+  const lines = new Set(probes.map(o => lineOf(src, o)));
+  const executed = new Set([...hit].map(o => lineOf(src, o)));
+  return summarize('v8', lines.size, executed.size, loaded ? null : 'file never loaded by the tests');
+}
+
+// def/class/decorator lines run at import, so they say nothing about the
+// edited body; a header-only edit is judged by the first code line after it.
+const PY_HEADER = /^\s*(?:@|(?:async\s+)?def\b|class\b)/;
+function pyExercised(jsonPath, repoRoot, absFile, src, span) {
+  let files;
+  try { files = JSON.parse(fs.readFileSync(jsonPath, 'utf8')).files || {}; } catch { return summarize('coverage.py', 0, 0, 'no coverage data'); }
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  const key = Object.keys(files).find(k => real(path.resolve(repoRoot, k)) === real(absFile));
+  const executed = new Set(key ? files[key].executed_lines || [] : []);
+  const srcLines = src.split('\n');
+  const isCode = (n) => { const t = (srcLines[n - 1] || '').trim(); return t && !t.startsWith('#'); };
+  const first = lineOf(src, span.start);
+  const last = span.end > span.start ? lineOf(src, span.end - 1) : first;
+  let lines = [];
+  for (let n = first; n <= last; n++) if (isCode(n) && !PY_HEADER.test(srcLines[n - 1])) lines.push(n);
+  if (!lines.length) {
+    for (let n = last + 1; n <= srcLines.length; n++) if (isCode(n)) { lines = [n]; break; }
+  }
+  return summarize('coverage.py', lines.length, lines.filter(n => executed.has(n)).length, key ? null : 'file never imported by the tests');
+}
+
+// `edit` ({ file, start, end }: the changed span of the edited file) turns on
+// execution evidence: result.coverage says whether any test ran the edit.
+async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null } = {}) {
   const detected = command || detectCommand(repoRoot);
   if (!detected) {
     return {
@@ -171,13 +268,36 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS } = {}) {
     };
   }
 
-  const result = await runCommand({
-    cmd: detected.cmd,
-    args: detected.args,
-    cwd: repoRoot,
-    env: { ...process.env, CI: '1' },
-    timeoutMs
-  });
+  const tool = edit ? coverageTool(edit.file, detected) : null;
+  const covDir = tool ? fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-cov-')) : null;
+  const env = { ...process.env, CI: '1' };
+  let cmd = detected.cmd, args = detected.args;
+  if (tool === 'v8') env.NODE_V8_COVERAGE = covDir;
+  if (tool === 'coverage.py') {
+    env.COVERAGE_FILE = path.join(covDir, 'data');
+    cmd = pytestPythonWithCoverage();
+    args = ['-m', 'coverage', 'run', '-m', 'pytest', ...detected.args];
+  }
+
+  let result, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
+  try {
+    result = await runCommand({ cmd, args, cwd: repoRoot, env, timeoutMs });
+    if (tool && !result.timedOut && !result.spawnError) {
+      const absFile = path.resolve(repoRoot, edit.file);
+      const src = fs.readFileSync(absFile, 'utf8');
+      if (tool === 'v8') {
+        coverage = v8Exercised(covDir, absFile, src, edit);
+      } else {
+        const jsonPath = path.join(covDir, 'coverage.json');
+        spawnSync(cmd, ['-m', 'coverage', 'json', '-q', '-o', jsonPath], { cwd: repoRoot, env, stdio: 'ignore', timeout: 30_000 });
+        coverage = pyExercised(jsonPath, repoRoot, absFile, src, edit);
+      }
+    }
+  } catch (err) {
+    coverage = { available: true, tool, exercised: false, reason: 'edit_not_exercised', detail: `coverage unreadable: ${err.message}` };
+  } finally {
+    if (covDir) fs.rmSync(covDir, { recursive: true, force: true });
+  }
 
   let status;
   if (result.timedOut) status = 'timeout';
@@ -186,10 +306,10 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS } = {}) {
   else status = 'failed';
 
   const counts = parseCounts(result.stdout + '\n' + result.stderr, detected.framework);
-  return {
+  const out = {
     status,
     framework: detected.framework,
-    command: `${detected.cmd} ${detected.args.join(' ')}`,
+    command: `${cmd} ${args.join(' ')}`,
     exit_code: result.exitCode,
     passed_tests: counts.passed,
     failed_tests: counts.failed,
@@ -199,6 +319,8 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS } = {}) {
     stderr: truncate(result.stderr, 4000),
     timed_out: result.timedOut
   };
+  if (coverage) out.coverage = coverage;
+  return out;
 }
 
 function truncate(s, n) {
@@ -206,4 +328,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, measureCoverage, readCoverageSummary, COVERAGE_DIR };
+module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, changedSpan, coverageTool, TIMEOUT_MS };

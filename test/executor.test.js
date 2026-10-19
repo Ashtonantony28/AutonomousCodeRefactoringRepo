@@ -15,7 +15,7 @@ const { inflightPath } = require('../src/utils/checkpoint');
 const { assertTestOutcome } = require('../src/contracts');
 const { installStub, resetClient } = require('./helpers/stub-client');
 const { makeProposal } = require('./helpers/factories');
-const { gitInit, treeHash } = require('./helpers/git');
+const { git, gitInit, treeHash } = require('./helpers/git');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -175,4 +175,129 @@ test('SIGINT to the CLI mid-test restores the worktree file, kills the test grou
   assert(!fs.existsSync(snapPath), 'persisted snapshot cleared');
   assert.deepStrictEqual(treeHash(repo), before, 'target untouched');
   await waitFor(() => procsMatching(marker).length === 0, 3000);
+});
+
+// --- revert paths and execution evidence (SG12) ------------------------------
+
+function setTestScript(repo, script) {
+  const pkgPath = path.join(repo, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  pkg.scripts.test = script;
+  fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+}
+
+function withEnv(t, vars) {
+  const prev = {};
+  for (const [k, v] of Object.entries(vars)) { prev[k] = process.env[k]; process.env[k] = v; }
+  const restore = () => { for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  t.after(restore);
+  return restore;
+}
+
+function assertReverted(res, repo, file, before, kept) {
+  assert.strictEqual(res.reverted, true);
+  assert.strictEqual(kept, false, 'onKept must not run');
+  assert.strictEqual(fs.readFileSync(path.join(repo, file), 'utf8'), before, 'edit reverted');
+  assertTestOutcome(res);
+}
+
+test('timeout: edit reverted, not kept, bounded even when a setsid daemon holds the test stdio', { skip: process.platform === 'win32' }, async (t) => {
+  const repo = env.copyFixture('js-basic');
+  const pidFile = path.join(repo, 'daemon.pid');
+  fs.writeFileSync(path.join(repo, 'suite.js'), [
+    "const c = require('child_process').spawn('sleep', ['20'], { detached: true, stdio: 'inherit' });",
+    `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));`,
+    'c.unref(); setInterval(() => {}, 1000);'
+  ].join('\n'));
+  setTestScript(repo, 'node suite.js');
+  t.after(() => { try { process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* */ } env.rm(repo); });
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  let kept = false;
+  const t0 = Date.now();
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo, testTimeoutMs: 300, onKept: () => { kept = true; }
+  }));
+  assert(Date.now() - t0 < 300 + 2000, `took ${Date.now() - t0} ms`);
+  assert.strictEqual(res.status, 'timeout');
+  assert.match(res.reason, /timed out/);
+  assertReverted(res, repo, MATH, before, kept);
+});
+
+test('spawn failure (test binary missing): environment_error with the cause, edit reverted', { skip: process.platform === 'win32' }, async (t) => {
+  const repo = env.copyFixture('py-basic');
+  const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-nobin-'));
+  t.after(() => { env.rm(repo); env.rm(emptyBin); });
+  const [p] = JSON.parse(fs.readFileSync(path.join(repo, 'proposals.json'), 'utf8'));
+  const before = fs.readFileSync(path.join(repo, p.file), 'utf8');
+  let kept = false;
+  const restore = withEnv(t, { PATH: emptyBin });
+  const res = await runExecutor({ proposal: makeProposal(p.file, p.current_code, p.proposed_code), repoRoot: repo, onKept: () => { kept = true; } });
+  restore();
+  assert.strictEqual(res.status, 'environment_error');
+  assert.match(res.reason, /ENOENT/);
+  assertReverted(res, repo, p.file, before, kept);
+});
+
+test('environment error (no usable temp dir for coverage): environment_error, edit reverted', async (t) => {
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  let kept = false;
+  const restore = withEnv(t, { TMPDIR: path.join(repo, 'no-such-dir'), TMP: path.join(repo, 'no-such-dir') });
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo, onKept: () => { kept = true; }
+  }));
+  restore();
+  assert.strictEqual(res.status, 'environment_error');
+  assertReverted(res, repo, MATH, before, kept);
+});
+
+test('commit failure: edit reverted in the tree AND unstaged from the index', async (t) => {
+  const repo = gitInit(env.copyFixture('js-basic'));
+  const { commitProposal } = require('../src/runner/worktree');
+  t.after(() => env.rm(repo));
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  // `git add` succeeds, `git commit` cannot lock the branch ref.
+  fs.writeFileSync(path.join(repo, '.git', 'refs', 'heads', 'main.lock'), '');
+  const snapshotPath = path.join(repo, '..', path.basename(repo) + '-inflight.json');
+  const proposal = makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED);
+  const res = await withoutTestContext(() => runExecutor({
+    proposal, repoRoot: repo, snapshotPath, onKept: () => commitProposal({ mode: 'worktree', path: repo, sub: '' }, proposal)
+  }));
+  assert.strictEqual(res.status, 'environment_error');
+  assert.match(res.reason, /commit failed/);
+  assert.strictEqual(res.reverted, true);
+  assert.strictEqual(fs.readFileSync(path.join(repo, MATH), 'utf8'), before);
+  assert.strictEqual(git(repo, ['diff', '--cached', '--name-only']), '', 'nothing left staged for the next commit');
+  assert.strictEqual(git(repo, ['status', '--porcelain']), '');
+  assert(!fs.existsSync(snapshotPath));
+  assertTestOutcome(res);
+});
+
+test('green suite that never runs the edited code: reverted with reason edit_not_exercised, not kept', async (t) => {
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const file = 'src/extra.js';
+  const cur = 'function triple(x) {\n  const out = x * 3;\n  return out;\n}';
+  fs.writeFileSync(path.join(repo, file), `'use strict';\n${cur}\nmodule.exports = { triple };\n`);
+  const before = fs.readFileSync(path.join(repo, file), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal(file, cur, 'function triple(x) {\n  return x * 3;\n}'), repoRoot: repo, onKept: () => { kept = true; }
+  }));
+  assert.strictEqual(res.status, 'reverted');
+  assert.strictEqual(res.reason, 'edit_not_exercised');
+  assert.strictEqual(res.coverage.exercised, false);
+  assertReverted(res, repo, file, before, kept);
+});
+
+test('a kept edit carries the execution evidence', async (t) => {
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo }));
+  assert.strictEqual(res.status, 'passed', res.stderr_tail);
+  assert.strictEqual(res.coverage.tool, 'v8');
+  assert.strictEqual(res.coverage.exercised, true);
+  assert(res.coverage.executed_lines >= 1);
+  assert(!('reason' in res));
 });

@@ -21,7 +21,7 @@ const { FileSnapshot } = require('./runner/reverter');
 const { killActive } = require('./runner/test-runner');
 const worktree = require('./runner/worktree');
 
-const { collectSample } = require('./rl/collector');
+const { collectSample, isLabeled } = require('./rl/collector');
 const { trainIfReady, loadClassifier, RL_GATE_THRESHOLD } = require('./rl/classifier');
 const { computeReward, rollingWarning, rewardBreakdown } = require('./rl/reward');
 const calibration = require('./rl/calibration');
@@ -162,9 +162,9 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     duration_ms: Number((performance.now() - tExec).toFixed(3)),
     trace_id
   });
-  if (result.status === 'skipped_no_tests') {
+  if (result.status === 'skipped_no_tests' || (result.status === 'reverted' && !isLabeled(result))) {
     saveSession(session);
-    return proposal; // nothing ran: no reward signal, no sample
+    return proposal; // no test judged the edit: no reward signal, no sample, no repair
   }
 
   // Reward / RL sample

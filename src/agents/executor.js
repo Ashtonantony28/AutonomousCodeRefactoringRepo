@@ -1,13 +1,18 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const { FileSnapshot, applyEdit } = require('../runner/reverter');
-const { runTests, measureCoverage } = require('../runner/test-runner');
+const { runTests, changedSpan } = require('../runner/test-runner');
 
 // Applies an approved proposal in `repoRoot` (the run's worktree, or the target
 // itself in the non-git fallback), runs the tests and reverts on anything but
-// a pass. `snapshotPath` persists the pre-edit content so a signal or crash
-// mid-test can be undone. `onKept` runs once an edit is final (the worktree
-// commit) and its return value is reported as `commit`.
+// a pass that executed the edit (otherwise `reverted` with reason
+// `edit_not_exercised` / `no_coverage_tool`). `snapshotPath` persists the
+// pre-edit content so a signal or crash mid-test can be undone. `onKept` runs
+// once an edit is final (the worktree commit) and its return value is
+// reported as `commit`.
 async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = null, testTimeoutMs }) {
   const snap = new FileSnapshot(repoRoot, { persistPath: snapshotPath, meta: { issue_id: proposal.issue_id, file: proposal.file } });
   snap.capture(proposal.file);
@@ -39,10 +44,12 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
 
   const applyDurationMs = Number((performance.now() - tApply).toFixed(3));
 
-  // Test
+  // Test, recording which characters of the change the tests executed
   let testResult;
   try {
-    testResult = await runTests({ repoRoot, timeoutMs: testTimeoutMs });
+    const before = (snap.snapshots.get(proposal.file) || {}).content || '';
+    const span = changedSpan(before, fs.readFileSync(path.join(repoRoot, proposal.file), 'utf8'));
+    testResult = await runTests({ repoRoot, timeoutMs: testTimeoutMs, edit: { file: proposal.file, ...span } });
   } catch (err) {
     snap.restoreAll();
     return {
@@ -58,26 +65,26 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
 
   let status = testResult.status;
   let reverted = false;
+  let reason = null;
+  const coverage = testResult.coverage || { available: false };
 
   if (status === 'failed' || status === 'timeout' || status === 'environment_error') {
     snap.restoreAll();
     reverted = true;
     status = status === 'failed' ? 'reverted' : status;
+    if (status === 'timeout') reason = `tests timed out after ${testResult.execution_time_ms} ms`;
+    if (status === 'environment_error') reason = `test command failed to run: ${testResult.stderr.trim().split('\n').pop()}`;
   } else if (status === 'no_test_runner') {
     // Nothing can validate the edit: revert it.
     snap.restoreAll();
     reverted = true;
     status = 'skipped_no_tests';
-  }
-
-  // Coverage (best-effort, only meaningful when tests actually ran)
-  let coverage = { available: false };
-  if (!reverted && status === 'passed') {
-    try {
-      coverage = await measureCoverage({ repoRoot, file: proposal.file });
-    } catch (err) {
-      coverage = { available: false, reason: err.message };
-    }
+  } else if (status === 'passed' && !coverage.exercised) {
+    // A green suite that never ran the edit says nothing about it.
+    snap.restoreAll();
+    reverted = true;
+    status = 'reverted';
+    reason = coverage.reason || 'edit_not_exercised';
   }
 
   let commit = null;
@@ -85,6 +92,9 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
     try {
       commit = onKept ? await onKept() : null;
     } catch (err) {
+      // A commit that failed after `git add` leaves the edit staged, and the
+      // next proposal's commit would carry it.
+      spawnSync('git', ['reset', '-q', '--', proposal.file], { cwd: repoRoot, stdio: 'ignore' });
       snap.restoreAll();
       return {
         status: 'environment_error',
@@ -118,6 +128,7 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
     match_delta: edit.matchDelta,
     apply_duration_ms: applyDurationMs
   };
+  if (reason) out.reason = reason;
   if (commit) out.commit = commit;
   return out;
 }

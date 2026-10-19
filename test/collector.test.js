@@ -46,3 +46,17 @@ test('collectSample de-dups by proposal and skips unlabeled outcomes', () => {
   appendSamples([{ ...neg, timestamp: new Date(Date.now() + 1000).toISOString() }], repo);
   assert.strictEqual(loadSamples(repo).length, 2);
 });
+
+test('an edit reverted because no test ran it is neither a sample nor a calibration point', () => {
+  const calibration = require('../src/rl/calibration');
+  const repo = path.join(env.root, 'collector-untested');
+  const p = fakeProposals()[1];
+  for (const reason of ['edit_not_exercised', 'no_coverage_tool']) {
+    const q = { ...p, issue_id: reason, combined_confidence: 0.8, test_outcome: { status: 'reverted', reason } };
+    assert.strictEqual(collectSample(q, repo), null);
+    assert.strictEqual(calibration.executedPoints([q]).length, 0);
+  }
+  const failed = { ...p, issue_id: 'tests-failed', combined_confidence: 0.8, test_outcome: { status: 'reverted' } };
+  assert.strictEqual(collectSample(failed, repo).label, 0);
+  assert.strictEqual(calibration.executedPoints([failed]).length, 1);
+});

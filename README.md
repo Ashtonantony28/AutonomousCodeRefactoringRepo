@@ -34,7 +34,8 @@ Orchestrator
   │
   ├── Executor  ─► 4-tier anchor matching (exact → whitespace → indent → fuzzy);
   │               git worktree per run, one commit per passing edit;
-  │               snapshot revert on failure or signal; c8 coverage capture
+  │               snapshot revert on failure or signal; kept only if a
+  │               test executed the edit (V8 coverage / coverage.py)
   │
   ├── Reflexion loop  ─► up to 2 repair attempts using CRITIC-style
   │                       grounded-in-stderr re-prompting
