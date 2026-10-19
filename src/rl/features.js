@@ -1,10 +1,11 @@
 'use strict';
 
+// Gate features. `files_changed` was dropped (always 1); weights persisted
+// with a different FEATURE_NAMES list are ignored, not mis-applied.
 const FEATURE_NAMES = [
-  'critic_confidence',
+  'p_preserves',
   'pattern_score',
   'proposal_complexity',
-  'files_changed',
   'risk_estimate'
 ];
 
@@ -23,9 +24,19 @@ function proposalComplexity(p) {
   );
 }
 
-function extractFeatures(p) {
-  const claudeConf = p.critic_verdict ? p.critic_verdict.claude_confidence : 0;
-  return [num(claudeConf), patternScore(p), proposalComplexity(p), 1, num(p.risk_estimate)];
+// Jury mean P(semantics preserved); the legacy `claude_confidence` alias is not read.
+function pPreserves(p) {
+  const v = p.critic_verdict;
+  return v && typeof v.p_preserves === 'number' ? num(v.p_preserves) : 0;
 }
 
-module.exports = { FEATURE_NAMES, extractFeatures, patternScore, proposalComplexity };
+function extractFeatures(p) {
+  return [pPreserves(p), patternScore(p), proposalComplexity(p), num(p.risk_estimate)];
+}
+
+function sameFeatureNames(names) {
+  return Array.isArray(names) && names.length === FEATURE_NAMES.length &&
+    names.every((n, i) => n === FEATURE_NAMES[i]);
+}
+
+module.exports = { FEATURE_NAMES, extractFeatures, patternScore, proposalComplexity, pPreserves, sameFeatureNames };

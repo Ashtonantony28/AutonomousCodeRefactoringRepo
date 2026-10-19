@@ -26,7 +26,7 @@ test('trace records optional duration_ms', () => {
 
 test('classifyFailure handles each branch', () => {
   assert.strictEqual(classifyFailure({ test_outcome: { status: 'timeout' }, combined_confidence: 0, critic_verdict: {} }), 'environment_issue');
-  assert.strictEqual(classifyFailure({ test_outcome: { status: 'failed' }, combined_confidence: 0.8, critic_verdict: { claude_confidence: 0.85 } }), 'logic_error');
+  assert.strictEqual(classifyFailure({ test_outcome: { status: 'failed' }, combined_confidence: 0.8, critic_verdict: { p_preserves: 0.85 } }), 'logic_error');
 });
 
 test('persistRunSpans writes ndjson under REFACTOR_STATE_DIR', () => {

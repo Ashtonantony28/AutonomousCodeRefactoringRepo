@@ -110,13 +110,13 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   }
 
   // RL gate
-  if (classifier.isTrained()) {
-    const t0 = performance.now();
-    const features = featuresFor(proposal);
-    const pPass = classifier.predict(features);
+  const t0 = performance.now();
+  const gate = classifier.gate(proposal);
+  if (gate.gated) {
+    const pPass = gate.p_pass;
     proposal.rl_prediction = pPass;
     trace(proposal, 'rl', {
-      reasoning: `predicted p_pass=${pPass.toFixed(3)}`,
+      reasoning: `predicted p_pass=${pPass.toFixed(3)} (${gate.source})`,
       confidence: pPass,
       outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved',
       duration_ms: Number((performance.now() - t0).toFixed(3)),
@@ -152,9 +152,9 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   // Reward / RL sample
   const sample = collectSample(proposal, absRepo);
-  session.rl_samples.push(sample);
-  proposal.reward = computeReward(proposal);
-  proposal.reward_breakdown = rewardBreakdown(proposal);
+  if (sample) session.rl_samples.push(sample);
+  proposal.reward = computeReward(proposal, absRepo);
+  proposal.reward_breakdown = rewardBreakdown(proposal, absRepo);
   trace(proposal, 'rl', { reasoning: `reward=${proposal.reward.toFixed(3)}`, confidence: proposal.combined_confidence, outcome: result.status, trace_id });
 
   // Synthetic negatives (CriticGPT-style) when the proposal passed cleanly
@@ -205,7 +205,7 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   const session = loadOrInit(absRepo, { resume });
   if (cli) installSignalHandlers(session);
   const tracker = new TokenTracker(session);
-  const classifier = loadClassifier();
+  const classifier = loadClassifier(absRepo);
 
   logInfo(`run_id=${session.run_id} repo=${absRepo} dry_run=${!!dryRun} cache=${cache} hierarchical=${hierarchical}`);
 
@@ -250,11 +250,11 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   // Train RL + calibration after the run
   try {
-    const trained = trainIfReady(session.rl_samples);
-    if (trained) logOk(`RL classifier retrained on ${session.rl_samples.length} samples`);
+    const trained = trainIfReady(absRepo);
+    if (trained) logOk('RL classifier retrained on all persisted samples for this target');
   } catch (err) { logWarn(`RL training skipped: ${err.message}`); }
   try {
-    const calRes = calibration.fitFromProposals(session.proposals);
+    const calRes = calibration.fitFromProposals(session.proposals, absRepo);
     if (calRes.trained) logOk(`calibration refit (n=${calRes.n} ECE_before=${calRes.ece_before.toFixed(3)})`);
   } catch (err) { logWarn(`calibration skipped: ${err.message}`); }
 

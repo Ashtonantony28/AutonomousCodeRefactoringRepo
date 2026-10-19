@@ -32,7 +32,7 @@ function setup(t) {
   return { repo, session, tracker: new TokenTracker(session) };
 }
 
-const untrained = { isTrained: () => false };
+const untrained = new (require('../src/rl/classifier').Classifier)(null);
 
 async function viaPipeline({ repo, session, tracker }, proposal, critic, { dryRun = true } = {}) {
   installStub({ critic });

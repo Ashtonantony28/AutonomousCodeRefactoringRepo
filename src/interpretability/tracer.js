@@ -94,7 +94,7 @@ function trace(proposal, stage, { reasoning = '', confidence = null, outcome = '
 function classifyFailure(proposal) {
   const status = proposal.test_outcome ? proposal.test_outcome.status : null;
   const conf = proposal.combined_confidence || 0;
-  const claudeConf = proposal.critic_verdict ? (proposal.critic_verdict.claude_confidence || 0) : 0;
+  const claudeConf = proposal.critic_verdict ? (Number(proposal.critic_verdict.p_preserves) || 0) : 0;
   if (status === 'timeout' || status === 'environment_error' || status === 'apply_failed') {
     return 'environment_issue';
   }

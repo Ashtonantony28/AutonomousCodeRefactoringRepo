@@ -8,14 +8,16 @@ const STAGE_SIGNAL_WEIGHT = 0.3;
 const COVERAGE_PENALTY_WEIGHT = 0.5;
 const DISAGREEMENT_PENALTY_WEIGHT = 1.0;
 
-function calibrated(x) {
-  const p = loadPredictor();
+// Diagnostic only: the reward is logged and charted, never trained on.
+// `calibrated` uses the target repo's isotonic calibration when it is trained.
+function calibrated(x, targetRepo = null) {
+  const p = loadPredictor(targetRepo);
   return p.isTrained() ? p.predict(x) : x;
 }
 
-function pCorrect(proposal) {
+function pCorrect(proposal, targetRepo = null) {
   const raw = Number(proposal.combined_confidence) || 0;
-  const conf = calibrated(raw);
+  const conf = calibrated(raw, targetRepo);
   const passed = proposal.test_outcome && proposal.test_outcome.status === 'passed';
   return passed ? conf : 1 - conf;
 }
@@ -68,8 +70,8 @@ function disagreementPenalty(proposal) {
   return Math.min(1, p / 2);
 }
 
-function computeReward(proposal) {
-  const p = pCorrect(proposal);
+function computeReward(proposal, targetRepo = null) {
+  const p = pCorrect(proposal, targetRepo);
   const fp = falsePositive(proposal);
   const stage = stageSignals(proposal);
   const cov = coveragePenalty(proposal);
@@ -84,8 +86,8 @@ function computeReward(proposal) {
 }
 
 // Returns the per-term breakdown for interpretability / dashboard.
-function rewardBreakdown(proposal) {
-  const p = pCorrect(proposal);
+function rewardBreakdown(proposal, targetRepo = null) {
+  const p = pCorrect(proposal, targetRepo);
   const fp = falsePositive(proposal);
   const stage = stageSignals(proposal);
   const cov = coveragePenalty(proposal);
@@ -98,7 +100,7 @@ function rewardBreakdown(proposal) {
     stage_signals: stage.signals,
     coverage_penalty: -COVERAGE_PENALTY_WEIGHT * cov,
     disagreement_penalty: -DISAGREEMENT_PENALTY_WEIGHT * dis,
-    total: computeReward(proposal)
+    total: computeReward(proposal, targetRepo)
   };
 }
 

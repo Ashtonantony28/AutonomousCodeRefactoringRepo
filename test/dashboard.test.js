@@ -102,3 +102,19 @@ test('probe weights are shown when trainable', () => {
   const empty = renderHtml({ proposals: fakeProposals(3) });
   assert(empty.includes('id="probe-empty"'));
 });
+
+test('what-if sliders match FEATURE_NAMES and inline calibration is the target\'s', () => {
+  const { FEATURE_NAMES } = require('../src/rl/features');
+  const calibration = require('../src/rl/calibration');
+  const repo = path.join(env.root, 'dash-target');
+  calibration.fitFromProposals(fakeProposals(), repo);
+  const sess = freshSession(repo);
+  sess.proposals = fakeProposals().slice(0, 3);
+  const html = renderHtml(sess);
+  const sliders = html.match(/id="wi-f\d"/g) || [];
+  assert.strictEqual(sliders.length, FEATURE_NAMES.length);
+  assert(!html.includes('files_changed'));
+  const inline = JSON.parse(/<script type="application\/json" id="inline-data">([\s\S]*?)<\/script>/.exec(html)[1]);
+  assert(inline.calibration && Array.isArray(inline.calibration.xs));
+  assert.strictEqual(JSON.parse(/<script type="application\/json" id="inline-data">([\s\S]*?)<\/script>/.exec(renderHtml(freshSession(path.join(env.root, 'dash-none'))))[1]).calibration, null);
+});

@@ -75,15 +75,15 @@ test('assertDiffTest rejects legacy and inconsistent results', () => {
 });
 
 test('assertSample accepts real and synthetic samples', () => {
-  const s = { proposal_id: 'p', target_repo: '/r', features: [0.9, 1, 3, 1, 0.1], label: 1, synthetic: false, timestamp: new Date().toISOString() };
+  const s = { proposal_id: 'p', target_repo: '/r', features: [0.9, 1, 3, 0.1], label: 1, synthetic: false, timestamp: new Date().toISOString() };
   assert.strictEqual(c.assertSample(s), true);
   assert.strictEqual(c.assertSample({ ...s, label: 0, synthetic: true, mutation: 'drop_return' }), true);
 });
 
 test('assertSample rejects wrong feature length, label, and missing mutation', () => {
   const s = { proposal_id: 'p', target_repo: '/r', features: [1, 2], label: true, synthetic: true, timestamp: 'nope' };
-  rejects(() => c.assertSample(s), /features: expected length 5.*label.*mutation|features: expected length 5.*label/);
-  rejects(() => c.assertSample({ ...s, features: [1, 2, 3, 4, NaN], label: 0 }), /features\[4\]/);
+  rejects(() => c.assertSample(s), /features: expected length 4.*label.*mutation|features: expected length 4.*label/);
+  rejects(() => c.assertSample({ ...s, features: [1, 2, 3, NaN], label: 0 }), /features\[3\]/);
 });
 
 test('assertTestOutcome covers the contract statuses', () => {
