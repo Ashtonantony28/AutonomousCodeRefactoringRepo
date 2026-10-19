@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { callClaude, extractJsonBlock } = require('../utils/claude-client');
+const { isTestFile } = require('../utils/file-discovery');
 
 // Agentless-style hierarchical localization (Xia et al., arXiv:2407.01489).
 // Three Claude passes that hierarchically narrow the search:
@@ -158,7 +159,7 @@ function renderBatch(batch, focusHints) {
 function normalizeProposal(raw, allowedFiles, taken = null) {
   if (!raw || typeof raw !== 'object') return null;
   const file = String(raw.file || '').trim();
-  if (!file || !allowedFiles.has(file)) return null;
+  if (!file || !allowedFiles.has(file) || isTestFile(file)) return null;
   const current = String(raw.current_code || '');
   const proposed = String(raw.proposed_code || '');
   if (!current || !proposed || current === proposed) return null;
@@ -194,6 +195,7 @@ async function callAnalyzerOnce(batch, hints) {
 // ---------- Orchestration ----------
 
 async function runAnalyzer({ files, tracker, hierarchical = true, takenIds = null }) {
+  files = files.filter(f => !isTestFile(f.relative));
   const allowedFiles = new Set(files.map(f => f.relative));
   const taken = new Set(takenIds || []);
   const proposals = [];

@@ -9,7 +9,7 @@ try { chalk = require('chalk'); } catch { chalk = { green: s => s, red: s => s, 
 
 const { loadOrInit, saveSession, inflightPath, worktreesDir } = require('./utils/checkpoint');
 const { TokenTracker } = require('./utils/token-tracker');
-const { discover } = require('./utils/file-discovery');
+const { discover, isTestFile } = require('./utils/file-discovery');
 const apiCache = require('./utils/api-cache');
 
 const { runAnalyzer } = require('./agents/analyzer');
@@ -33,6 +33,7 @@ const { renderDashboard } = require('./interpretability/dashboard');
 
 const REJECT_THRESHOLD = 0.5;
 const MIN_CRITIC_P = 0.5;
+const MIN_PERSONA_P = 0.2;
 
 function logInfo(msg) { console.log(chalk.cyan('[orch] ') + msg); }
 function logWarn(msg) { console.log(chalk.yellow('[orch] ') + msg); }
@@ -62,16 +63,30 @@ function featuresFor(p) {
   return extractFeatures(p);
 }
 
-// Pre-RL gate on contract fields only. -> rejection reason, or null to proceed.
+function testFileReason(proposal) {
+  return isTestFile(proposal.file) ? `test file ${proposal.file}: test code is never edited` : null;
+}
+
+// Pre-RL gate (the commit bar) on contract fields only: every persona
+// approves with p_preserves >= MIN_PERSONA_P and names no behaviour-changing
+// edge case, and the diff test confirms the edit (unconfirmedBlock).
+// -> rejection reason, or null to proceed.
 function criticGate(proposal) {
+  const testFile = testFileReason(proposal);
+  if (testFile) return testFile;
   const jury = proposal.critic_verdict;
   const votes = juryVotes(jury);
   const p = jury && typeof jury.p_preserves === 'number' ? jury.p_preserves : null;
   if (!votes.majority || p === null || p < MIN_CRITIC_P) {
     return `critic jury does not approve (${votes.approve}/${votes.n} preserves_semantics, p_preserves=${p === null ? 'n/a' : p}, need majority and >= ${MIN_CRITIC_P})`;
   }
+  if (!votes.unanimous) return `critic jury ${votes.approve}/${votes.n} approve (need unanimous)`;
+  const low = jury.panel.filter(v => !(v.p_preserves >= MIN_PERSONA_P));
+  if (low.length) return `persona p_preserves below ${MIN_PERSONA_P}: ${low.map(v => `${v.persona}=${v.p_preserves}`).join(', ')}`;
+  const edge = jury.panel.filter(v => Array.isArray(v.edge_cases) && v.edge_cases.length);
+  if (edge.length) return `persona(s) name behaviour-changing edge cases: ${edge.map(v => `${v.persona}: ${v.edge_cases.join('; ')}`).join(' | ').slice(0, 300)}`;
   if (!(proposal.combined_confidence >= REJECT_THRESHOLD)) return `combined_confidence < ${REJECT_THRESHOLD}`;
-  const block = unconfirmedBlock({ jury, checks: proposal.pattern_check_results, dt: proposal.diff_test });
+  const block = unconfirmedBlock({ jury, checks: proposal.pattern_check_results, dt: proposal.diff_test, file: proposal.file });
   return block ? `unconfirmed edit: ${block}` : null;
 }
 
@@ -112,6 +127,13 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   const trace_id = session.run_id;
   if (!work) work = { root: absRepo, info: null, snapshotPath: inflightPath(absRepo) };
   proposal.run_id = session.run_id;
+  const testFile = testFileReason(proposal);
+  if (testFile) {
+    proposal.test_outcome = { status: 'critic_rejected', reason: testFile };
+    trace(proposal, 'critic', { reasoning: `${testFile}; rejecting without review`, confidence: 0, outcome: 'critic_rejected', trace_id });
+    saveSession(session);
+    return proposal;
+  }
   // Hybrid critic + AST + diff-testing, on the region the executor will replace
   const view = regionView(proposal, work.root);
   try {
@@ -442,4 +464,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runPipeline, processProposal, criticGate, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, criticGate, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, MIN_PERSONA_P, featuresFor, summarizeRun };

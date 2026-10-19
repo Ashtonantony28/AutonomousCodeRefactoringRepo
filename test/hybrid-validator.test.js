@@ -277,3 +277,70 @@ test('criticGate derives majority and unanimity from panel[]', () => {
   const rejects = [{ preserves_semantics: false, p_preserves: 0.9 }, { preserves_semantics: false, p_preserves: 0.9 }, APPROVE[0]];
   assert.match(criticGate({ ...mk(rejects), critic_verdict: { ...jury(rejects), preserves_semantics: true } }), /does not approve/);
 });
+
+// ---------- SG14: commit bar ----------
+
+const STRIP_CUR = "function strip(p) {\n  return String(p).replace(/\\.\\.\\//g, '');\n}";
+const STRIP_PROP = "function strip(p) {\n  return String(p).replace('../', '');\n}";
+
+function stripRepo(ctx) {
+  fs.writeFileSync(path.join(ctx.repo, 'paths.js'), `'use strict';\n${STRIP_CUR}\nmodule.exports = { strip };\n`);
+}
+
+test('a 2/3 jury is critic_rejected even when the diff test says equivalent (AUDIT-5 C1)', async (t) => {
+  const ctx = setup(t);
+  stripRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('paths.js', STRIP_CUR, STRIP_PROP),
+    perPersona(persona => persona === 'strict' ? { ...base, preserves_semantics: false, p_preserves: 0.2 } : APPROVE_RAW));
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
+  assert(p.combined_confidence >= 0.5);
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /2\/3 approve \(need unanimous\)/);
+});
+
+test('an approving persona listing a behaviour-changing edge case blocks the edit (AUDIT-5 M2 K2)', async (t) => {
+  const ctx = setup(t);
+  stripRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('paths.js', STRIP_CUR, STRIP_PROP),
+    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ["'../../x' keeps one '../'"] } : APPROVE_RAW));
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /edge cases: security: '\.\.\/\.\.\/x' keeps one/);
+});
+
+test('criticGate: a persona below the p_preserves floor blocks a unanimous approve', () => {
+  const { MIN_PERSONA_P } = require('../src/orchestrator');
+  assert.strictEqual(MIN_PERSONA_P, 0.2);
+  const raws = [APPROVE[0], APPROVE[1], { preserves_semantics: true, p_preserves: 0.15 }];
+  const dt = { applicable: true, verdict: 'equivalent', runs: 40, duration_ms: 1 };
+  const checks = [{ check_name: 'parse', passed: true, detail: '', severity: 'score' }];
+  const p = { file: 'a.js', critic_verdict: jury(raws), pattern_check_results: checks, diff_test: dt, combined_confidence: 0.8 };
+  assert.match(criticGate(p), /below 0\.2: security=0\.15/);
+  assert.strictEqual(criticGate({ ...p, critic_verdict: jury(APPROVE) }), null);
+});
+
+test('a JS edit the diff test cannot run (runs=0) is critic_rejected despite a unanimous approve and clean AST (AUDIT-5 C3/E6)', async (t) => {
+  const ctx = setup(t);
+  const cur = 'module.exports = function (a, b) {\n  return a - b;\n};';
+  fs.writeFileSync(path.join(ctx.repo, 'sub.js'), `'use strict';\n${cur}\n`);
+  const p = await viaPipeline(ctx, makeProposal('sub.js', cur, 'module.exports = function (a, b) {\n  return Math.abs(a - b);\n};'), APPROVE_RAW);
+  assert.strictEqual(p.diff_test.runs, 0);
+  assert(p.pattern_check_results.every(c => c.passed));
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /ran no input on a JS edit/);
+});
+
+test('Python: a removed raise guard is vetoed by the lexical checks despite a unanimous approve (AUDIT-5 C3/E8)', async (t) => {
+  const ctx = setup(t);
+  const cur = 'def safe(p):\n    if ".." in p:\n        raise ValueError("bad path")\n    return os.path.join(ROOT, p)\n';
+  fs.writeFileSync(path.join(ctx.repo, 'paths.py'), `import os\nROOT = "/srv"\n\n\n${cur}`);
+  const p = await viaPipeline(ctx, makeProposal('paths.py', cur, 'def safe(p):\n    return os.path.join(ROOT, p)\n'), APPROVE_RAW);
+  assert.strictEqual(p.test_outcome.status, 'vetoed');
+  const failed = p.pattern_check_results.filter(c => !c.passed).map(c => c.check_name).sort();
+  assert.deepStrictEqual(failed, ['condition_change', 'guard_removal']);
+  assert(p.test_outcome.reasons.some(r => /check_veto\(guard_removal\)/.test(r)));
+});
+
+test('the critic prompt defines edge_cases as behaviour differences', () => {
+  const { systemPromptFor, PERSONAS } = require('../src/agents/critic');
+  assert.match(systemPromptFor(PERSONAS.strict), /edge_cases lists only inputs or situations on which proposed_code behaves\ndifferently/);
+});

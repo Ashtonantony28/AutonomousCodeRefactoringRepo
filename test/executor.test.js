@@ -315,3 +315,116 @@ test('a kept edit carries the execution evidence', async (t) => {
   assert(res.coverage.executed_lines >= 1);
   assert(!('reason' in res));
 });
+
+// ---------- SG14: test-backed commit bar ----------
+
+const { editMutants } = require('../src/rl/bug-injector');
+const { isLabeled } = require('../src/rl/collector');
+
+function nodeRepo(t, files, script = 'node --test') {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-sg14-'));
+  t.after(() => env.rm(repo));
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'sg14', version: '0.0.0', private: true, scripts: { test: script } }));
+  for (const [rel, src] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), src);
+  }
+  return repo;
+}
+const nodeTest = (body) => `'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n${body}\n`;
+
+test('kept edit: a mutant of the edited lines fails the suite, and the edited text is what gets committed', async (t) => {
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  let keptWith = null;
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo,
+    onKept: () => { keptWith = fs.readFileSync(path.join(repo, MATH), 'utf8'); return 'c1'; }
+  }));
+  assert.strictEqual(res.status, 'passed', res.stderr_tail);
+  assert(res.mutation && res.mutation.killed, JSON.stringify(res.mutation));
+  assert(res.mutation.run >= 1 && res.mutation.run <= 3);
+  assert(keptWith.includes(ADD_PROPOSED), 'mutants are undone before the commit');
+  assert.strictEqual(fs.readFileSync(path.join(repo, MATH), 'utf8'), keptWith);
+});
+
+test('green suite that runs the edit but cannot tell a mutant of it: reverted tests_insensitive, untested', async (t) => {
+  const cur = 'function scale(x) {\n  const k = x * 3;\n  return k;\n}';
+  const repo = nodeRepo(t, {
+    'src/scale.js': `'use strict';\n${cur}\nmodule.exports = { scale };\n`,
+    'test/scale.test.js': nodeTest("const { scale } = require('../src/scale');\ntest('runs', () => { scale(2); });")
+  });
+  const before = fs.readFileSync(path.join(repo, 'src/scale.js'), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal('src/scale.js', cur, 'function scale(x) {\n  return x * 3;\n}'), repoRoot: repo, onKept: () => { kept = true; }
+  }));
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.coverage.exercised, true);
+  assert(res.mutation.mutants >= 1 && res.mutation.run === res.mutation.mutants && !res.mutation.killed, JSON.stringify(res.mutation));
+  assert(!isLabeled(res), 'no label from an insensitive suite');
+  assertReverted(res, repo, 'src/scale.js', before, kept);
+});
+
+test('mutant runs share the test budget: none fits -> tests_insensitive with budget_exhausted', async (t) => {
+  const cur = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
+  const repo = nodeRepo(t, {
+    'src/inc.js': `'use strict';\n${cur}\nmodule.exports = { inc };\n`,
+    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/inc').inc(1), 2);\n"
+  }, 'node check.js');
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal('src/inc.js', cur, 'function inc(x) {\n  return x + 1;\n}'), repoRoot: repo, testTimeoutMs: 2500
+  }));
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.run, 0);
+  assert.strictEqual(res.mutation.budget_exhausted, true);
+});
+
+test('red suite that never ran the edit: reverted edit_not_exercised, not a label', async (t) => {
+  const cur = 'function twice(x) {\n  const r = x * 2;\n  return r;\n}';
+  const repo = nodeRepo(t, {
+    'src/twice.js': `'use strict';\n${cur}\nmodule.exports = { twice };\n`,
+    'test/other.test.js': nodeTest("test('known broken', () => assert.strictEqual(1, 2));")
+  });
+  const before = fs.readFileSync(path.join(repo, 'src/twice.js'), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal('src/twice.js', cur, 'function twice(x) {\n  return x * 2;\n}'), repoRoot: repo, onKept: () => { kept = true; }
+  }));
+  assert.strictEqual(res.status, 'reverted');
+  assert.strictEqual(res.reason, 'edit_not_exercised');
+  assert(!isLabeled(res));
+  assertReverted(res, repo, 'src/twice.js', before, kept);
+});
+
+test('a doc comment edit is no evidence: the changed function no test calls is reverted (AUDIT-5 C2)', async (t) => {
+  const cur = "/** Strip parent segments. */\nfunction strip(p) {\n  return String(p).split('../').join('');\n}";
+  const repo = nodeRepo(t, {
+    'src/util.js': `'use strict';\n${cur}\nfunction size(s) {\n  return s.length;\n}\nmodule.exports = { strip, size };\n`,
+    'test/util.test.js': nodeTest("const m = require('../src/util');\ntest('size', () => { assert.strictEqual(m.size('abc'), 3); });")
+  });
+  const res = await withoutTestContext(() => runExecutor({
+    proposal: makeProposal('src/util.js', cur, "/** Remove parent segments. */\nfunction strip(p) {\n  return String(p).replace('../', '');\n}"), repoRoot: repo
+  }));
+  assert.strictEqual(res.status, 'reverted');
+  assert.strictEqual(res.reason, 'edit_not_exercised');
+  assert.strictEqual(res.coverage.exercised, false);
+});
+
+test('editMutants: parse-valid mutants of the changed characters, else of the edited lines', () => {
+  const src = "'use strict';\nconst x = require('./y');\nfunction g(s) {\n  if (s.length > 255) throw new RangeError('too long');\n  return s;\n}\n";
+  const at = (needle) => ({ start: src.indexOf(needle), end: src.indexOf(needle) + needle.length, file: 'g.js' });
+  const changed = editMutants(src, at('255'));
+  assert.deepStrictEqual(changed.map(m => m.mutation), ['numeric_off_by_one']);
+  assert(changed[0].src.includes('s.length > 256'));
+  const lines = editMutants(src, at('throw'));
+  assert(lines.length >= 2 && lines.length <= 3, JSON.stringify(lines.map(m => m.mutation)));
+  assert(lines.every(m => m.line === 4));
+  assert.deepStrictEqual(editMutants(src, at("require('./y')")), [], 'module specifiers are not mutated');
+  const py = 'def f(x):\n    if x > 3:\n        return x + 1\n    return 0\n';
+  const pm = editMutants(py, { start: py.indexOf('    if'), end: py.indexOf('    return 0'), file: 'f.py' });
+  assert(pm.length >= 1 && pm.every(m => !m.src.includes('===')), JSON.stringify(pm));
+  assert.deepStrictEqual(editMutants('a = 1\n', { start: 0, end: 5, file: 'a.go' }), []);
+});

@@ -40,6 +40,9 @@ function systemPromptFor(persona) {
     'effects) for every input. It is NOT your confidence in your own verdict:',
     'a clear behaviour change is p_preserves near 0. Keep it consistent with',
     'preserves_semantics: true means p_preserves > 0.5, false means p_preserves <= 0.5.',
+    'edge_cases lists only inputs or situations on which proposed_code behaves',
+    'differently from current_code; leave it empty when you know of none. Any',
+    'entry blocks the edit.',
     'Nothing else.'
   ].join('\n');
 }

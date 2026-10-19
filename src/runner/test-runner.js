@@ -181,23 +181,73 @@ function coverageTool(file, detected) {
   return null;
 }
 
-function summarize(tool, edited, executed, detail) {
-  const out = { available: true, tool, exercised: executed > 0, edited_lines: edited, executed_lines: executed, lines_pct: edited ? executed / edited : 0 };
-  if (!out.exercised) out.reason = 'edit_not_exercised';
+// Coverage evidence is grouped by the innermost function holding the changed
+// code: the edit counts as exercised only when every group executed (a call of
+// one edited function says nothing about another). `functions_missed` counts
+// the groups that never ran.
+function summarize(tool, edited, executed, { detail = null, groups = [] } = {}) {
+  const missed = groups.filter(g => !g.hit).map(g => g.line);
+  const out = {
+    available: true, tool, exercised: groups.length > 0 && missed.length === 0,
+    edited_lines: edited, executed_lines: executed, lines_pct: edited ? executed / edited : 0,
+    functions: groups.length, functions_missed: missed.length
+  };
+  if (!out.exercised) {
+    out.reason = 'edit_not_exercised';
+    if (!detail) {
+      detail = groups.length
+        ? `changed code in ${missed.length} of ${groups.length} function(s) never executed (line ${missed.join(', ')})`
+        : 'only comments or whitespace changed';
+    }
+  }
   if (detail) out.detail = detail;
   return out;
 }
 
+// Offsets of `src` inside comments (babel for JS, lexical fallback).
+function commentMask(src, file) {
+  const mask = new Uint8Array(src.length);
+  const { ast } = require('../validation/ast-checker').parseJs(src, file);
+  if (ast && Array.isArray(ast.comments)) {
+    for (const c of ast.comments) mask.fill(1, c.start, c.end);
+  } else {
+    const kept = require('../validation/polyglot-ast').stripCode(src, 'javascript', { keepStrings: true });
+    for (let i = 0; i < src.length; i++) if (kept[i] !== src[i]) mask[i] = 1;
+  }
+  return mask;
+}
+
+// Code characters of the changed span (comments and whitespace are not
+// evidence); a pure deletion is judged at the first code character after it.
+function codeProbes(src, span, isComment) {
+  const isCode = (i) => !/\s/.test(src[i]) && !isComment[i];
+  const probes = [];
+  for (let i = span.start; i < span.end; i++) if (isCode(i)) probes.push(i);
+  if (!probes.length && span.end <= span.start) {
+    for (let i = span.start; i < src.length; i++) if (isCode(i)) { probes.push(i); break; }
+  }
+  return probes;
+}
+
+function smallest(ranges, off) {
+  let best = null;
+  for (const r of ranges) {
+    if (r.startOffset <= off && off < r.endOffset &&
+        (!best || r.endOffset - r.startOffset < best.endOffset - best.startOffset)) best = r;
+  }
+  return best;
+}
+
 // A character counts as executed when, in some process, the innermost V8
-// range containing it has a non-zero count.
+// range containing it has a non-zero count; its group is the innermost V8
+// function containing it.
 function v8Exercised(covDir, absFile, src, span) {
   const urls = new Set([pathToFileURL(absFile).href]);
   try { urls.add(pathToFileURL(fs.realpathSync(absFile)).href); } catch { /* */ }
   const shift = src.charCodeAt(0) === 0xFEFF ? 1 : 0; // the CJS loader strips a BOM
-  const probes = [];
-  for (let i = span.start; i < span.end; i++) if (!/\s/.test(src[i])) probes.push(i);
-  if (!probes.length) probes.push(Math.max(0, Math.min(span.start, src.length - 1)));
+  const probes = codeProbes(src, span, commentMask(src, absFile));
   const hit = new Set();
+  const groupOf = new Map();
   let loaded = false;
   let names = [];
   try { names = fs.readdirSync(covDir).filter(n => n.endsWith('.json')); } catch { /* */ }
@@ -211,42 +261,72 @@ function v8Exercised(covDir, absFile, src, span) {
     for (const script of data.result || []) {
       if (!urls.has(script.url)) continue;
       loaded = true;
-      const ranges = (script.functions || []).flatMap(f => f.ranges || []);
+      const fns = (script.functions || []).filter(f => f.ranges && f.ranges.length);
+      const ranges = fns.flatMap(f => f.ranges);
+      const extents = fns.map(f => f.ranges[0]);
       for (const off of probes) {
-        if (hit.has(off)) continue;
-        let best = null;
-        for (const r of ranges) {
-          if (r.startOffset <= off - shift && off - shift < r.endOffset &&
-              (!best || r.endOffset - r.startOffset < best.endOffset - best.startOffset)) best = r;
+        if (!groupOf.has(off)) {
+          const fn = smallest(extents, off - shift);
+          groupOf.set(off, fn ? `${fn.startOffset}:${fn.endOffset}` : 'script');
         }
+        if (hit.has(off)) continue;
+        const best = smallest(ranges, off - shift);
         if (best && best.count > 0) hit.add(off);
       }
     }
   }
+  const groups = new Map();
+  for (const off of probes) {
+    const k = groupOf.get(off) || 'unloaded';
+    const g = groups.get(k) || { line: lineOf(src, off), hit: false };
+    g.hit = g.hit || hit.has(off);
+    groups.set(k, g);
+  }
   const lines = new Set(probes.map(o => lineOf(src, o)));
   const executed = new Set([...hit].map(o => lineOf(src, o)));
-  return summarize('v8', lines.size, executed.size, loaded ? null : 'file never loaded by the tests');
+  return summarize('v8', lines.size, executed.size, { detail: loaded ? null : 'file never loaded by the tests', groups: [...groups.values()] });
 }
 
 // def/class/decorator lines run at import, so they say nothing about the
-// edited body; a header-only edit is judged by the first code line after it.
+// edited body; a header-only edit is judged by the first statement after it.
+// Only statements count (coverage.py's executed + missing lines: no comments,
+// docstrings or continuation lines); each is grouped by its innermost def.
 const PY_HEADER = /^\s*(?:@|(?:async\s+)?def\b|class\b)/;
 function pyExercised(jsonPath, repoRoot, absFile, src, span) {
   let files;
-  try { files = JSON.parse(fs.readFileSync(jsonPath, 'utf8')).files || {}; } catch { return summarize('coverage.py', 0, 0, 'no coverage data'); }
+  try { files = JSON.parse(fs.readFileSync(jsonPath, 'utf8')).files || {}; } catch { return summarize('coverage.py', 0, 0, { detail: 'no coverage data' }); }
   const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
   const key = Object.keys(files).find(k => real(path.resolve(repoRoot, k)) === real(absFile));
   const executed = new Set(key ? files[key].executed_lines || [] : []);
+  const statements = key ? new Set([...executed, ...(files[key].missing_lines || [])]) : null;
   const srcLines = src.split('\n');
-  const isCode = (n) => { const t = (srcLines[n - 1] || '').trim(); return t && !t.startsWith('#'); };
+  const isStmt = (n) => {
+    if (PY_HEADER.test(srcLines[n - 1] || '')) return false;
+    if (statements) return statements.has(n);
+    const t = (srcLines[n - 1] || '').trim();
+    return !!t && !t.startsWith('#');
+  };
   const first = lineOf(src, span.start);
   const last = span.end > span.start ? lineOf(src, span.end - 1) : first;
   let lines = [];
-  for (let n = first; n <= last; n++) if (isCode(n) && !PY_HEADER.test(srcLines[n - 1])) lines.push(n);
+  for (let n = first; n <= last; n++) if (isStmt(n)) lines.push(n);
   if (!lines.length) {
-    for (let n = last + 1; n <= srcLines.length; n++) if (isCode(n)) { lines = [n]; break; }
+    for (let n = last + 1; n <= srcLines.length; n++) if (isStmt(n)) { lines = [n]; break; }
   }
-  return summarize('coverage.py', lines.length, lines.filter(n => executed.has(n)).length, key ? null : 'file never imported by the tests');
+  const lineStart = [0];
+  for (let i = 0; i < src.length; i++) if (src[i] === '\n') lineStart.push(i + 1);
+  const defs = require('../validation/polyglot-ast').parsePython(src).functions;
+  const groups = new Map();
+  for (const n of lines) {
+    const off = lineStart[n - 1] + (srcLines[n - 1].length - srcLines[n - 1].trimStart().length);
+    let fn = null;
+    for (const f of defs) if (f.start <= off && off < f.end && (!fn || f.end - f.start < fn.end - fn.start)) fn = f;
+    const k = fn ? fn.start : 'module';
+    const g = groups.get(k) || { line: n, hit: false };
+    g.hit = g.hit || executed.has(n);
+    groups.set(k, g);
+  }
+  return summarize('coverage.py', lines.length, lines.filter(n => executed.has(n)).length, { detail: key ? null : 'file never imported by the tests', groups: [...groups.values()] });
 }
 
 // `edit` ({ file, start, end }: the changed span of the edited file) turns on
@@ -270,7 +350,10 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
 
   const tool = edit ? coverageTool(edit.file, detected) : null;
   const covDir = tool ? fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-cov-')) : null;
-  const env = { ...process.env, CI: '1' };
+  // A fresh bytecode cache per run: a same-size rewrite within the same second
+  // (an edit, a mutant) must not be served a stale .pyc.
+  const pycDir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-pyc-'));
+  const env = { ...process.env, CI: '1', PYTHONPYCACHEPREFIX: pycDir };
   let cmd = detected.cmd, args = detected.args;
   if (tool === 'v8') env.NODE_V8_COVERAGE = covDir;
   if (tool === 'coverage.py') {
@@ -297,6 +380,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     coverage = { available: true, tool, exercised: false, reason: 'edit_not_exercised', detail: `coverage unreadable: ${err.message}` };
   } finally {
     if (covDir) fs.rmSync(covDir, { recursive: true, force: true });
+    fs.rmSync(pycDir, { recursive: true, force: true });
   }
 
   let status;

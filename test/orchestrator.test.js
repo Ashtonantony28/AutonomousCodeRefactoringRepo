@@ -162,3 +162,61 @@ test('a reflowed anchor is validated on the file text it maps to, current_code k
   assert.strictEqual(proposal.test_outcome.status, 'dry_run', JSON.stringify(proposal.test_outcome));
   assert.strictEqual(proposal.current_code, cur);
 });
+
+// ---------- SG14 ----------
+
+test('a proposal to a test file is critic_rejected by the gate without a critic call (AUDIT-5 H6)', async (t) => {
+  const path = require('path');
+  const { criticGate } = require('../src/orchestrator');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => { resetClient(); env.rm(repo); });
+  const file = 'test/math.test.js';
+  const src = fs.readFileSync(path.join(repo, file), 'utf8');
+  const prompts = [];
+  const proposal = await gateOnly(repo, file, '  assert.strictEqual(add(2, 3), 5);', "  assert.ok(typeof add(2, 3) === 'number');", prompts);
+  assert.strictEqual(proposal.test_outcome.status, 'critic_rejected');
+  assert.match(proposal.test_outcome.reason, /test file test\/math\.test\.js/);
+  assert.strictEqual(prompts.length, 0, 'no critic call');
+  assert.strictEqual(fs.readFileSync(path.join(repo, file), 'utf8'), src);
+  for (const f of ['src/__tests__/a.js', 'lib/a.spec.ts', 'tests/test_paths.py', 'app/paths_test.py']) {
+    assert.match(criticGate({ file: f, critic_verdict: null }), /test file/, f);
+  }
+});
+
+test('the analyzer never proposes edits to test files and does not send them', async (t) => {
+  const { runAnalyzer } = require('../src/agents/analyzer');
+  const { TokenTracker } = require('../src/utils/token-tracker');
+  const { freshSession } = require('../src/utils/checkpoint');
+  const users = [];
+  const mk = (file) => ({ file, current_code: 'a', proposed_code: 'b', reasoning: 'r', risk_estimate: 0.1 });
+  installStub({ 'analyzer-propose': ({ user }) => { users.push(user); return [mk('src/a.js'), mk('test/a.test.js'), mk('lib/b.spec.js')]; } });
+  t.after(() => resetClient());
+  const files = ['src/a.js', 'test/a.test.js', 'lib/b.spec.js'].map(relative => ({ relative, path: '/x/' + relative, size: 1, content: 'a\n' }));
+  const out = await runAnalyzer({ files, tracker: new TokenTracker(freshSession('/x')), hierarchical: false });
+  assert.deepStrictEqual(out.map(p => p.file), ['src/a.js']);
+  assert(users.length && users.every(u => !u.includes('test/a.test.js') && !u.includes('lib/b.spec.js')));
+});
+
+test('a red suite that never ran the edit gives no sample, no reward and no Reflexion repair (AUDIT-7 H2)', async (t) => {
+  const path = require('path');
+  const { loadSamples } = require('../src/rl/collector');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => { resetClient(); env.rm(repo); });
+  const cur = 'function twice(x) {\n  const r = x * 2;\n  return r;\n}';
+  fs.writeFileSync(path.join(repo, 'src', 'twice.js'), `'use strict';\n${cur}\nmodule.exports = { twice };\n`);
+  fs.appendFileSync(path.join(repo, 'test', 'math.test.js'), "test('known broken', () => assert.strictEqual(1, 2));\n");
+  gitInit(repo);
+  const stub = installStub({
+    'analyzer-propose': [{ file: 'src/twice.js', current_code: cur, proposed_code: 'function twice(x) {\n  return x * 2;\n}', reasoning: 'inline', risk_estimate: 0.1 }],
+    critic: { preserves_semantics: true, p_preserves: 0.9, edge_cases: [], hallucination_flags: [], reasoning: 'same' },
+    reflexion: 'not json'
+  });
+  const session = await withoutTestContext(() => runPipeline({ repo, cache: 'off' }));
+  const p = session.proposals[0];
+  assert.strictEqual(p.test_outcome.status, 'reverted', JSON.stringify(p.test_outcome));
+  assert.strictEqual(p.test_outcome.reason, 'edit_not_exercised');
+  assert(p.test_outcome.failed_tests >= 1 || /known broken/.test(p.test_outcome.stdout_tail));
+  assert.strictEqual(p.reward, undefined);
+  assert.strictEqual(stub.count('reflexion'), 0);
+  assert.deepStrictEqual(loadSamples(repo).filter(s => s.proposal_id === p.issue_id), []);
+});

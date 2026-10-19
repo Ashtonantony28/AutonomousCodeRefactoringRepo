@@ -60,3 +60,11 @@ test('an edit reverted because no test ran it is neither a sample nor a calibrat
   assert.strictEqual(collectSample(failed, repo).label, 0);
   assert.strictEqual(calibration.executedPoints([failed]).length, 1);
 });
+
+test('an edit reverted because no mutant of it failed the suite (tests_insensitive) is not a label', () => {
+  const calibration = require('../src/rl/calibration');
+  const repo = path.join(env.root, 'collector-insensitive');
+  const q = { ...fakeProposals()[1], issue_id: 'insensitive', combined_confidence: 0.8, test_outcome: { status: 'reverted', reason: 'tests_insensitive' } };
+  assert.strictEqual(collectSample(q, repo), null);
+  assert.strictEqual(calibration.executedPoints([q]).length, 0);
+});

@@ -55,13 +55,26 @@ saturation figures are reported on the dashboard as a spend indicator only.
 
 - Non-dry runs create a git worktree of the target on branch
   `refactor/<run_id>` under `<state>/targets/<sha256(repo)>/worktrees/<run_id>`.
-  The Analyzer reads the target; validation, edits, tests and coverage output
-  (`.refactor-coverage`) happen in the worktree. The target's working tree is
+  The Analyzer reads the target; validation, edits and tests happen in the
+  worktree (coverage data goes to a removed temp dir). The target's working tree is
   never modified. Uncommitted target changes are copied into the worktree
   (uncommitted); the target's `node_modules` is symlinked in.
 - Each passing proposal is one commit (only the edited file is staged; the
   message carries `issue_id` and `file`). Failing edits are reverted. The
   branch and worktree path are printed at the end of the run.
+- An edit is kept only when the suite passes, executed every changed
+  function (V8 coverage / coverage.py, grouped by innermost function;
+  comments, whitespace and docstrings are no evidence), and fails on at least
+  one of up to 3 bug-injected mutants of the changed characters (or, when no
+  operator applies to them, of the edited lines; `bug-injector.editMutants`,
+  parse-valid only). Mutant runs re-run the whole suite and share the main
+  run's 60 s budget: each gets at most 2× the main run's time + 1 s, none
+  starts with less than the main run's time + 0.5 s left; a run that fails,
+  or times out on its full slice, kills the mutant. Otherwise `reverted` with
+  reason `edit_not_exercised` / `no_coverage_tool` (no test ran the edit,
+  whether the suite passed or failed) or `tests_insensitive` (no mutant
+  failed). These three reasons are untested outcomes: no sample, calibration
+  point, reward or Reflexion repair.
 - If the target is not a git repo (or has no commits) the Executor falls back
   to editing the target in place, with a warning.
 - No test runner detected → `skipped_no_tests`, edit reverted, no RL sample.
@@ -127,22 +140,36 @@ combined_confidence = 0.6 * jury.p_preserves + 0.4 * pattern_score
 combined_confidence = 0.5 * jury.p_preserves + 0.3 * pattern_score + 0.2 * diff_score
 ```
 
-Proposals are rejected before Executor (`critic_rejected`) when
-`combined_confidence < 0.5`, OR the jury does not approve on its own: a
-majority of `panel[]` says `preserves_semantics: true` AND `jury.p_preserves >= 0.5`
-(`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic.
-Without an `equivalent` diff test the gate fails closed: an `inconclusive`
-diff test that ran inputs (`runs > 0`) is rejected, and any other
-inconclusive/inapplicable one (non-JS, nothing executed) proceeds only with a
-unanimous jury approve and every AST check passed. The gate and fusion read
-only contract fields (`panel`, `p_preserves`, `agreement`; `applicable`,
-`verdict`, `runs`); the diff score is derived from `verdict`. Independently of
-the score, a proposal is **vetoed**
+Python adds two lexical checks (`polyglot-ast`, edited region only, veto on
+failure): `guard_removal` (fewer `raise` / `assert` / `if …: return|raise|
+continue|break` guards, or an `except` type gone) and `condition_change` (a
+comparison operator or compared number gone anywhere, an operator or literal
+gone from an `if`/`elif`/`while`/`assert` condition, or a changed default
+parameter value).
+
+Proposals to test files (`test/`, `tests/`, `__tests__/`, `spec/`,
+`*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, `*_test.go`) are never
+proposed by the Analyzer and are `critic_rejected` before any critic call.
+Other proposals are rejected before Executor (`critic_rejected`) unless they
+clear the commit bar: `combined_confidence >= 0.5`; a majority of `panel[]`
+says `preserves_semantics: true` AND `jury.p_preserves >= 0.5`
+(`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic; the
+approval is unanimous; every persona has `p_preserves >= 0.2`
+(`MIN_PERSONA_P`); and no persona lists an `edge_cases` entry (the prompt
+defines them as inputs on which the edit behaves differently). Without an
+`equivalent` diff test the gate fails closed: an `inconclusive` diff test
+that ran inputs (`runs > 0`) is rejected, so is a JS edit the diff test ran
+no input on (unlocatable shapes: the AST checks only catch their four
+anti-patterns), and a non-JS edit (`runs = 0`) proceeds only with every
+check passed (for Python including the lexical checks). The gate and fusion
+read only contract fields (`panel`, `p_preserves`, `agreement`, verdict
+`edge_cases`; `applicable`, `verdict`, `runs`); the diff score is derived
+from `verdict`. Independently of the score, a proposal is **vetoed**
 (`test_outcome.status = 'vetoed'`, never reaches the RL gate or Executor) when
 the differential test is `divergent`, any check has `severity: 'veto'` (any
-failed anti-pattern check above, or parse errors introduced by the proposal),
-or every persona says `preserves_semantics: false` (malformed verdicts count
-as false).
+failed anti-pattern or Python lexical check above, or parse errors
+introduced by the proposal), or every persona says
+`preserves_semantics: false` (malformed verdicts count as false).
 
 `signature_drift` scans only repo files that name the function on a word
 boundary, parses at most 200 of them (over the cap the check passes with a
@@ -180,7 +207,8 @@ runs (de-duplicated by proposal id / mutant); training always uses all of them.
 
 - **Samples**: one per executed proposal with a label (`passed` = 1,
   `reverted`/`failed` = 0; environment errors, apply failures and untested
-  edits are not samples).
+  edits, i.e. `reverted` with `edit_not_exercised` / `no_coverage_tool` /
+  `tests_insensitive`, are not samples).
 - **Features** (`FEATURE_NAMES` in `src/rl/features.js`):
   `[p_preserves, pattern_score, proposal_complexity, risk_estimate]`
   (`p_preserves` = jury mean). Weights saved under a different feature list

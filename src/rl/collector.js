@@ -8,8 +8,9 @@ const { extractFeatures } = require('./features');
 // Outcomes that say something about the edit itself. Environment problems,
 // apply failures and untested edits are not labels.
 const LABELED_STATUSES = ['passed', 'failed', 'reverted'];
-// `reverted` because no test ran the edit: the tests never judged it.
-const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool'];
+// `reverted` because no test ran the edit, or no mutant of it failed the
+// suite: the tests never judged it.
+const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool', 'tests_insensitive'];
 
 function isLabeled(outcome) {
   return !!outcome && LABELED_STATUSES.includes(outcome.status) && !UNTESTED_REASONS.includes(outcome.reason);

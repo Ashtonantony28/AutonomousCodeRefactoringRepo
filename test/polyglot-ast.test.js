@@ -106,3 +106,56 @@ test('Go return check uses body returns vs declared results', () => {
   const g = polyglot.parseGo('package x\nfunc (s *S) Do(f func(int) (int, error), n int) (int, error) {\n\treturn f(n)\n}\n');
   assert.deepStrictEqual([g.functions[0].name, g.functions[0].params, g.functions[0].resultCount], ['Do', 2, 2]);
 });
+
+// ---------- SG14: Python lexical semantics checks ----------
+
+function pyLex(cur, prop) {
+  const out = {};
+  for (const c of polyglot.runChecks({ file: 'm.py', currentSrc: cur, proposedSrc: prop }).checks) { assertCheckResult(c); out[c.check_name] = c; }
+  return out;
+}
+
+test('Python lexical checks veto a removed raise / early-exit guard / narrowed except', () => {
+  const g = pyLex('def safe(p):\n    if ".." in p:\n        raise ValueError("bad")\n    return p\n', 'def safe(p):\n    return p\n').guard_removal;
+  assert.strictEqual(g.passed, false);
+  assert.strictEqual(g.severity, 'veto');
+  assert.match(g.detail, /raise 1 → 0, guard 1 → 0/);
+  assert.strictEqual(pyLex('def f(x):\n    if x is None:\n        return 0\n    return x\n', 'def f(x):\n    return x or 0\n').guard_removal.passed, false);
+  assert.strictEqual(pyLex('def f(x):\n    assert x > 0\n    return x\n', 'def f(x):\n    return x\n').guard_removal.passed, false);
+  const ex = pyLex('def f(d, k):\n    try:\n        return d[k]\n    except KeyError:\n        return None\n', 'def f(d, k):\n    try:\n        return d[k]\n    except Exception as e:\n        return None\n').guard_removal;
+  assert.match(ex.detail, /except KeyError changed/);
+  assert.strictEqual(pyLex('def f(x):\n    if not x:\n        raise E()\n    return x\n', 'def f(x):\n    if not x: raise E()\n    return x\n').guard_removal.passed, true);
+});
+
+test('Python lexical checks veto changed comparison operators, condition literals and defaults', () => {
+  const lost = (cur, prop) => { const c = pyLex(cur, prop).condition_change; return c.passed ? null : c.detail; };
+  assert.match(lost('def f(s):\n    if len(s) > 255:\n        raise E()\n    return s\n', 'def f(s):\n    if len(s) > 256:\n        raise E()\n    return s\n'), /condition literal 255/);
+  assert.match(lost('def f(s):\n    if s == "a":\n        return 1\n    return 2\n', 'def f(s):\n    if s == "b":\n        return 1\n    return 2\n'), /condition literal "a"/);
+  assert.match(lost('def f(age):\n    return age >= 18\n', 'def f(age):\n    return age > 18\n'), /comparison >=/);
+  assert.match(lost('def f(x):\n    return x == 0\n', 'def f(x):\n    return not x\n'), /comparison ==, compared literal 0/);
+  assert.match(lost('def page(items, size=10):\n    return items[:size]\n', 'def page(items, size=20):\n    return items[:size]\n'), /default size 10/);
+  assert.match(lost('def f(p):\n    if ".." in p:\n        return 1\n    return 0\n', 'def f(p):\n    if "." in p:\n        return 1\n    return 0\n'), /condition literal ".."/);
+  // benign: loop -> builtin, comprehension, f-string, comments, renames
+  assert.strictEqual(lost('def total(v):\n    r = 0\n    for x in v:\n        r = r + x\n    return r\n', 'def total(v):\n    return sum(v)\n'), null);
+  assert.strictEqual(lost('def sq(xs):\n    out = []\n    for x in xs:\n        out.append(x * x)\n    return out\n', 'def sq(xs):\n    return [x * x for x in xs]\n'), null);
+  assert.strictEqual(lost('def label(a, b):\n    return "{}: {}".format(a, b)\n', 'def label(a, b):\n    return f"{a}: {b}"\n'), null);
+  assert.strictEqual(lost('def f(n):\n    if n > 3:  # > 4\n        return 1\n    return 0\n', 'def f(count):\n    if count > 3:\n        return 1\n    return 0\n'), null);
+});
+
+test('Python lexical checks judge only the edited region of the file, and only Python', () => {
+  const file = 'def a(x):\n    if x > 1:\n        raise E()\n    return x\n\n\ndef b(y):\n    r = y + 1\n    return r\n';
+  const cur = 'def b(y):\n    r = y + 1\n    return r\n';
+  const start = file.indexOf(cur);
+  const prop = 'def b(y):\n    return y + 1\n';
+  const proposedSrc = file.slice(0, start) + prop;
+  const checks = polyglot.runChecks({ file: 'm.py', currentSrc: file, proposedSrc, region: { start, endCurrent: start + cur.length, endProposed: start + prop.length } }).checks;
+  assert(checks.every(c => c.passed), JSON.stringify(checks));
+  assert.deepStrictEqual(checks.map(c => c.check_name).slice(-2), ['guard_removal', 'condition_change']);
+  const go = polyglot.runChecks({ file: 'm.go', currentSrc: 'package x\nfunc A() int {\n\treturn 1\n}\n', proposedSrc: 'package x\nfunc A() int {\n\treturn 2\n}\n' }).checks;
+  assert(!go.some(c => c.check_name === 'guard_removal' || c.check_name === 'condition_change'));
+});
+
+test('stripCode keepStrings blanks comments only', () => {
+  assert.strictEqual(polyglot.stripCode('x = "a#b"  # c\n', 'python', { keepStrings: true }), 'x = "a#b"     \n');
+  assert.strictEqual(polyglot.stripCode("a('//x') // y", 'javascript', { keepStrings: true }), "a('//x')     ");
+});

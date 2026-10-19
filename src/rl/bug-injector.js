@@ -20,7 +20,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { extractFeatures } = require('./features');
+const polyglot = require('../validation/polyglot-ast');
 const { appendSamples } = require('./collector');
 const { runChecks } = require('../validation/ast-checker');
 const diffTesting = require('../validation/diff-testing');
@@ -149,4 +151,127 @@ function syntheticNegatives(proposal, targetRepo = null, opts = {}) {
   return out;
 }
 
-module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, MUTATIONS, MAX_MUTANTS };
+// ---------- Mutants of an applied edit (executor's test-sensitivity bar) ----------
+// Operators run on the comment/string-blanked source, only inside the edited
+// lines, and every mutant must still parse: a mutant that breaks the file is
+// "killed" by any suite that loads it, which proves nothing.
+
+const swapper = (map) => (m) => map[m];
+const EDIT_OPS = {
+  javascript: [
+    { name: 'negate_condition', re: /\b(?:if|while)\s*\(/g, wrap: ['!(', ')'] },
+    { name: 'negate_equality', re: /===|!==|==|!=/g, to: swapper({ '===': '!==', '!==': '===', '==': '!=', '!=': '==' }) },
+    { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
+    { name: 'numeric_off_by_one', re: /(?<![\w.$])\d+(?:\.\d+)?(?![\w.$])/g, to: (n) => String(Number(n) + 1) },
+    { name: 'swap_logical', re: /&&|\|\|/g, to: swapper({ '&&': '||', '||': '&&' }) },
+    { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
+    { name: 'flip_boolean', re: /\b(?:true|false)\b/g, to: swapper({ true: 'false', false: 'true' }) },
+    { name: 'drop_return', re: /\breturn[ \t]+(?=[^\s;}])/g, to: () => '' },
+    { name: 'string_literal', re: /(['"]) *\1/g, string: true }
+  ],
+  python: [
+    { name: 'negate_condition', re: /^[ \t]*(?:if|elif|while)[ \t]+/gm, pyCond: true },
+    { name: 'negate_equality', re: /==|!=/g, to: swapper({ '==': '!=', '!=': '==' }) },
+    { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
+    { name: 'numeric_off_by_one', re: /(?<![\w.])\d+(?:\.\d+)?(?![\w.])/g, to: (n) => String(Number(n) + 1) },
+    { name: 'swap_logical', re: /\b(?:and|or)\b/g, to: swapper({ and: 'or', or: 'and' }) },
+    { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
+    { name: 'flip_boolean', re: /\b(?:True|False)\b/g, to: swapper({ True: 'False', False: 'True' }) },
+    { name: 'drop_return', re: /\breturn[ \t]+(?=\S)/g, to: () => '' },
+    { name: 'string_literal', re: /(['"]) *\1/g, string: true }
+  ]
+};
+const IMPORT_BEFORE = /(?:require\s*\(|\bimport\s*\(?|\bfrom|\bimport)\s*$/;
+
+function editLang(file) {
+  if (/\.(js|cjs|mjs|jsx)$/i.test(file || '')) return 'javascript';
+  if (/\.py$/i.test(file || '')) return 'python';
+  return null;
+}
+
+// One mutant per operator match inside [lo, hi) -> { mutation, src, at } or null.
+function mutateAt(src, code, op, m, lang) {
+  const at = m.index;
+  if (op.wrap) {
+    const open = at + m[0].length - 1;
+    const close = polyglot.matchBracket(code, open);
+    if (close < 0) return null;
+    return src.slice(0, open + 1) + op.wrap[0] + src.slice(open + 1, close) + op.wrap[1] + src.slice(close);
+  }
+  if (op.pyCond) {
+    const from = at + m[0].length;
+    let depth = 0;
+    let j = from;
+    for (; j < code.length; j++) {
+      const c = code[j];
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (depth <= 0 && (c === ':' || c === '\n')) break;
+    }
+    if (code[j] !== ':' || j === from) return null;
+    return src.slice(0, from) + 'not (' + src.slice(from, j).trimEnd() + ')' + src.slice(j);
+  }
+  if (op.string) {
+    if (IMPORT_BEFORE.test(code.slice(Math.max(0, at - 24), at))) return null;
+    const end = at + m[0].length;
+    if (lang === 'python' && (code[at - 1] === m[1] || code[end] === m[1])) return null; // triple quote
+    return src.slice(0, end - 1) + 'x' + src.slice(end - 1);
+  }
+  return src.slice(0, at) + op.to(m[0]) + src.slice(at + m[0].length);
+}
+
+function parsesJs(src, file, baseErrors) {
+  const { parseJs } = require('../validation/ast-checker');
+  const r = parseJs(src, file);
+  return !!r.ast && r.errors.length <= baseErrors;
+}
+
+function parsesPython(srcs) {
+  const script = 'import ast, json, sys\nout = []\nfor s in json.load(sys.stdin):\n    try:\n        ast.parse(s)\n        out.append(True)\n    except Exception:\n        out.append(False)\nprint(json.dumps(out))';
+  const r = spawnSync('python3', ['-c', script], { input: JSON.stringify(srcs), encoding: 'utf8', timeout: 10_000 });
+  try { return JSON.parse(r.stdout); } catch { return srcs.map(() => false); }
+}
+
+// Up to `max` parse-valid mutants of the changed characters [start, end) of
+// `src` (the edited file) or, when no operator applies to them, of the rest of
+// the lines holding them; operators taken round-robin.
+// -> [{ mutation, src, line }]
+function editMutants(src, { start, end, file, max = MAX_MUTANTS }) {
+  const lang = editLang(file);
+  if (!lang || typeof src !== 'string') return [];
+  const lo = src.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+  let hi = src.indexOf('\n', Math.max(start, end - 1));
+  if (hi < 0) hi = src.length;
+  const code = polyglot.stripCode(src, lang);
+  const inSpan = [];
+  const onLines = [];
+  for (const op of EDIT_OPS[lang]) {
+    const span = [];
+    const lines = [];
+    const re = new RegExp(op.re.source, op.re.flags);
+    let m;
+    while ((m = re.exec(code)) && m.index < hi) {
+      if (m.index < lo) continue;
+      const mutated = mutateAt(src, code, op, m, lang);
+      if (!mutated || mutated === src) continue;
+      const mutant = { mutation: op.name, src: mutated, line: src.slice(0, m.index).split('\n').length };
+      (m.index < end && m.index + m[0].length > start ? span : lines).push(mutant);
+    }
+    inSpan.push(span);
+    onLines.push(lines);
+  }
+  const perOp = inSpan.some(l => l.length) ? inSpan : onLines;
+  const order = [];
+  for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
+  const candidates = order.slice(0, max * 4);
+  let ok;
+  if (lang === 'python') ok = parsesPython(candidates.map(c => c.src));
+  else {
+    const { parseJs } = require('../validation/ast-checker');
+    const base = parseJs(src, file).errors.length;
+    ok = candidates.map(c => parsesJs(c.src, file, base));
+  }
+  return candidates.filter((c, i) => ok[i]).slice(0, max);
+}
+
+module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, MUTATIONS, MAX_MUTANTS };

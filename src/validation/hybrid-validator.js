@@ -20,6 +20,7 @@ const PATTERN_WEIGHT_DEFAULT = 0.4;
 const CRITIC_WEIGHT_WITH_DT  = 0.5;
 const PATTERN_WEIGHT_WITH_DT = 0.3;
 const DT_WEIGHT              = 0.2;
+const JS_FILE = /\.(js|cjs|mjs)$/i;
 
 function readFileSrc(repoRoot, file) {
   if (!repoRoot || !file) return undefined;
@@ -43,12 +44,17 @@ function juryVotes(jury) {
 
 // Without an `equivalent` diff test nothing deterministic confirms the edit, so
 // it fails closed: a diff test that exercised the code (runs > 0) but could not
-// confirm equivalence blocks; otherwise every persona must approve and every
-// AST check must pass. -> reason string, or null when the edit may proceed.
-function unconfirmedBlock({ jury, checks, dt }) {
+// confirm equivalence blocks, and so does a JS edit (`file`) the diff test could
+// not run on (the AST checks only catch their four anti-patterns); otherwise
+// (non-JS) every persona must approve and every check, including the Python
+// lexical ones, must pass. -> reason string, or null when the edit may proceed.
+function unconfirmedBlock({ jury, checks, dt, file = null }) {
   if (dt && dt.applicable && dt.verdict === 'equivalent') return null;
   if (dt && dt.verdict === 'inconclusive' && dt.runs > 0) {
     return `diff test ran ${dt.runs} input(s) but could not confirm equivalence (${dt.reason || 'inconclusive'})`;
+  }
+  if (file && JS_FILE.test(file)) {
+    return `diff test ran no input on a JS edit (${(dt && dt.reason) || 'missing'}); no deterministic check covers it`;
   }
   const votes = juryVotes(jury);
   const failed = (checks || []).filter(c => !c.passed).map(c => c.check_name);
@@ -95,7 +101,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
   // Differential testing oracle (JS only), evaluated against the whole file.
   let dt;
   t0 = performance.now();
-  if (/\.(js|cjs|mjs)$/i.test(proposal.file)) {
+  if (JS_FILE.test(proposal.file)) {
     try {
       dt = diffTesting.run({
         currentSrc: proposal.current_code,
@@ -147,7 +153,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
     duration_ms: astMs,
     trace_id: traceId
   });
-  if (/\.(js|cjs|mjs)$/i.test(proposal.file)) {
+  if (JS_FILE.test(proposal.file)) {
     trace(proposal, 'ast', {
       reasoning: dt.applicable
         ? `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, verdict ${dt.verdict}`

@@ -238,3 +238,87 @@ test('coverage.py: a tested body line is exercised, an untested function is not'
   assert.strictEqual(miss.coverage.exercised, false, JSON.stringify(miss.coverage));
   assert.strictEqual(miss.coverage.reason, 'edit_not_exercised');
 });
+
+// ---------- SG14: comments are no evidence; every changed function must run ----------
+
+const DOC_SRC = [
+  "'use strict';",
+  '/** Adds one. */',
+  'function used(a) {',
+  '  return a + 1;',
+  '}',
+  '/** Doubles. */',
+  'function unused(p) {',
+  '  return p * 2;',
+  '}',
+  'module.exports = { used, unused };',
+  ''
+].join('\n');
+
+function docRepo(t) {
+  const dir = tmp(t, 'refactor-v8doc-');
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'm.js'), DOC_SRC);
+  fs.writeFileSync(path.join(dir, 'check.js'), "require('assert').strictEqual(require('./src/m').used(1), 2);\n");
+  return { dir, command: { cmd: process.execPath, args: ['check.js'], framework: 'npm' } };
+}
+const docSpan = (from, to) => ({ file: 'src/m.js', start: DOC_SRC.indexOf(from), end: DOC_SRC.indexOf(to) + to.length });
+
+test('V8 coverage: a doc comment in the changed span is no evidence for an uncalled function', async (t) => {
+  const { dir, command } = docRepo(t);
+  const r = await runTests({ repoRoot: dir, command, edit: docSpan('/** Doubles. */', '  return p * 2;') });
+  assert.strictEqual(r.status, 'passed', r.stderr);
+  assert.strictEqual(r.coverage.exercised, false, JSON.stringify(r.coverage));
+  assert.strictEqual(r.coverage.reason, 'edit_not_exercised');
+});
+
+test('V8 coverage: a comment-only change is not exercised', async (t) => {
+  const { dir, command } = docRepo(t);
+  const r = await runTests({ repoRoot: dir, command, edit: docSpan('/** Adds one. */', '/** Adds one. */') });
+  assert.strictEqual(r.coverage.exercised, false, JSON.stringify(r.coverage));
+  assert.match(r.coverage.detail, /only comments or whitespace/);
+});
+
+test('V8 coverage: every changed function must run, not just one of them', async (t) => {
+  const { dir, command } = docRepo(t);
+  const r = await runTests({ repoRoot: dir, command, edit: docSpan('  return a + 1;', '  return p * 2;') });
+  assert.strictEqual(r.coverage.exercised, false, JSON.stringify(r.coverage));
+  assert.strictEqual(r.coverage.functions_missed, 1);
+  assert.match(r.coverage.detail, /1 of \d+ function\(s\) never executed \(line 7\)/);
+  const ok = await runTests({ repoRoot: dir, command, edit: docSpan('/** Adds one. */', '  return a + 1;') });
+  assert.strictEqual(ok.coverage.exercised, true, JSON.stringify(ok.coverage));
+});
+
+test('coverage.py: a span over a tested and an untested function is not exercised', { skip: hasPyCoverage ? false : 'coverage.py/pytest not installed' }, async (t) => {
+  const repo = copyFixture('py-basic');
+  t.after(() => rm(repo));
+  const src = 'def total(values):\n    """Sum."""\n    return sum(values)\n\n\ndef unused(x):\n    # triple\n    return x * 3\n';
+  fs.writeFileSync(path.join(repo, 'calc', 'ops.py'), src);
+  const span = (from, to) => ({ file: 'calc/ops.py', start: src.indexOf(from), end: src.indexOf(to) + to.length });
+  const both = await runTests({ repoRoot: repo, edit: span('    return sum(values)', '    return x * 3') });
+  assert.strictEqual(both.status, 'passed', both.stdout + both.stderr);
+  assert.strictEqual(both.coverage.exercised, false, JSON.stringify(both.coverage));
+  assert.strictEqual(both.coverage.functions_missed, 1);
+  const docOnly = await runTests({ repoRoot: repo, edit: span('    """Sum."""', '    return sum(values)') });
+  assert.strictEqual(docOnly.coverage.exercised, true, JSON.stringify(docOnly.coverage));
+  assert.strictEqual(docOnly.coverage.edited_lines, 1, 'the docstring is not a statement');
+});
+
+test('pytest never runs a stale .pyc: a same-size, same-mtime rewrite is what gets tested', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-pyc-test-');
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'mod.py'), 'def f():\n    return 1\n');
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'tests', 'test_mod.py'),
+    'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))\nfrom mod import f\n\n\ndef test_f():\n    assert f() == 1\n');
+  const command = { cmd: 'pytest', args: ['-q', '-p', 'no:cacheprovider'], framework: 'pytest' };
+  const stat = fs.statSync(path.join(dir, 'mod.py'));
+  const first = await runTests({ repoRoot: dir, command });
+  assert.strictEqual(first.status, 'passed', first.stdout + first.stderr);
+  // A plain interpreter run caches the original bytecode next to the source.
+  spawnSync('python3', ['-c', 'import sys; sys.path.insert(0, "."); import mod'], { cwd: dir });
+  fs.writeFileSync(path.join(dir, 'mod.py'), 'def f():\n    return 2\n');
+  fs.utimesSync(path.join(dir, 'mod.py'), stat.atime, stat.mtime);
+  const second = await runTests({ repoRoot: dir, command });
+  assert.strictEqual(second.status, 'failed', 'the rewritten source is tested, not the cached bytecode');
+});

@@ -17,7 +17,8 @@ function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 // Blank out the contents of comments and string literals (keeping quotes,
 // newlines and length) so offsets still line up with the original source.
-function stripCode(src, lang) {
+// `keepStrings` blanks comments only.
+function stripCode(src, lang, { keepStrings = false } = {}) {
   if (!src) return '';
   const out = src.split('');
   const n = src.length;
@@ -47,7 +48,7 @@ function stripCode(src, lang) {
       const q = src.slice(i, i + 3);
       let j = i + 3;
       while (j < n && !src.startsWith(q, j)) j += src[j] === '\\' ? 2 : 1;
-      blank(i + 3, j);
+      if (!keepStrings) blank(i + 3, j);
       i = Math.min(n, j + 3);
     } else if (quotes.includes(ch)) {
       let j = i + 1;
@@ -58,7 +59,7 @@ function stripCode(src, lang) {
         else if (!multiline && src[j] === '\n') break;
         j++;
       }
-      blank(i + 1, j);
+      if (!keepStrings) blank(i + 1, j);
       i = j + 1;
     } else {
       i++;
@@ -558,6 +559,135 @@ function checkReturnTypeChange(before, after, ctx = {}) {
   return { check_name: 'return_type_change', passed: false, severity: 'veto', detail: `missing return in: ${regressed.join(', ')}` };
 }
 
+// ---------- Python lexical semantics checks ----------
+// No Python parser here, so guards and conditions are compared lexically on
+// the edited region: a lost `raise`/`assert`/early-exit guard, or a comparison
+// operator or literal that disappears from an if/elif/while/assert condition.
+
+function pyRegion(src, region, side) {
+  const code = stripCode(src, 'python');
+  const lits = stripCode(src, 'python', { keepStrings: true });
+  if (!region) return { code, lits };
+  const end = side === 'current' ? region.endCurrent : region.endProposed;
+  return { code: code.slice(region.start, end), lits: lits.slice(region.start, end) };
+}
+
+// -> [{ kw, code, lits, colon }]: each condition's text (strings blanked /
+// kept) and the offset just past it.
+function pyConditions({ code, lits }) {
+  const out = [];
+  const re = /^[ \t]*(if|elif|while|assert)\b/gm;
+  let m;
+  while ((m = re.exec(code))) {
+    const from = m.index + m[0].length;
+    let depth = 0;
+    let j = from;
+    for (; j < code.length; j++) {
+      const c = code[j];
+      if (OPEN[c]) depth++;
+      else if (c === ')' || c === ']' || c === '}') depth--;
+      else if (depth <= 0 && c === '\n' && code[j - 1] !== '\\') break;
+      else if (depth <= 0 && c === ':' && m[1] !== 'assert') break;
+    }
+    out.push({ kw: m[1], code: code.slice(from, j), lits: lits.slice(from, j), colon: j });
+  }
+  return out;
+}
+
+const PY_CMP = /\bnot\s+in\b|\bis\s+not\b|==|!=|<=|>=|<|>|\bin\b|\bis\b/g;
+const PY_NUM = /(?<![\w.])\d+(?:\.\d+)?(?![\w.])/g;
+// Outside conditions (`in` there is also a for-loop keyword): comparison
+// operators, the numbers they compare, and default parameter values.
+const PY_CMP_ANY = /(?<![<>=!-])(?:==|!=|<=|>=|<|>)(?![<>=])|\bis\s+not\b|\bis\b/g;
+const PY_CMP_NUM = /(?:==|!=|<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)(?![\w.])|(?<![\w.])(\d+(?:\.\d+)?)\s*(?:==|!=|<=|>=|<|>)/g;
+
+function literals(code, lits, label) {
+  const toks = [];
+  for (const n of code.match(PY_NUM) || []) toks.push(`${label} ${n}`);
+  const strRe = /(["'])[^"'\n]*\1/g;
+  let m;
+  while ((m = strRe.exec(code))) toks.push(`${label} ${lits.slice(m.index, m.index + m[0].length)}`);
+  return toks;
+}
+
+function conditionTokens(r) {
+  const toks = [];
+  for (const c of pyConditions(r)) {
+    for (const op of c.code.match(PY_CMP) || []) toks.push(`condition operator ${op.replace(/\s+/g, ' ')}`);
+    toks.push(...literals(c.code, c.lits, 'condition literal'));
+  }
+  for (const op of r.code.match(PY_CMP_ANY) || []) toks.push(`comparison ${op.replace(/\s+/g, ' ')}`);
+  let m;
+  const numRe = new RegExp(PY_CMP_NUM.source, 'g');
+  while ((m = numRe.exec(r.code))) toks.push(`compared literal ${m[1] || m[2]}`);
+  const defRe = /^[ \t]*(?:async[ \t]+)?def[ \t]+\w+[ \t]*\(/gm;
+  while ((m = defRe.exec(r.code))) {
+    const open = m.index + m[0].length - 1;
+    const close = matchBracket(r.code, open);
+    if (close < 0) continue;
+    for (const p of splitTopLevel(r.code.slice(open + 1, close))) {
+      const eq = p.indexOf('=');
+      if (eq < 0) continue;
+      const at = open + 1 + r.code.slice(open + 1, close).indexOf(p);
+      toks.push(...literals(r.code.slice(at + eq, at + p.length), r.lits.slice(at + eq, at + p.length), `default ${p.slice(0, eq).trim()}`));
+    }
+  }
+  return toks;
+}
+
+// Elements of the `before` multiset missing from `after`.
+function lostTokens(before, after) {
+  const left = new Map();
+  for (const t of after) left.set(t, (left.get(t) || 0) + 1);
+  return before.filter((t) => {
+    if (!left.get(t)) return true;
+    left.set(t, left.get(t) - 1);
+    return false;
+  });
+}
+
+function pyGuards(r) {
+  const count = (re) => (r.code.match(re) || []).length;
+  const exits = pyConditions(r).filter(c => (c.kw === 'if' || c.kw === 'elif') &&
+    /^:[ \t]*(?:\n[ \t]*)*(?:return|raise|continue|break)\b/.test(r.code.slice(c.colon)));
+  return {
+    raise: count(/(?:^|[:;])[ \t]*raise\b/gm),
+    assert: count(/(?:^|[:;])[ \t]*assert\b/gm),
+    guard: exits.length
+  };
+}
+
+// The exception types each `except` clause names (a bare `except:` is `*`).
+function pyExcepts(r) {
+  const out = [];
+  const re = /^[ \t]*except\b([^:\n]*):/gm;
+  let m;
+  while ((m = re.exec(r.code))) out.push(m[1].replace(/\s+as\s+\w+\s*$/, '').replace(/\s+/g, '') || '*');
+  return out;
+}
+
+function checkPyGuardRemoval(curR, propR) {
+  const b = pyGuards(curR);
+  const a = pyGuards(propR);
+  const drops = Object.keys(b).filter(k => a[k] < b[k]).map(k => `${k} ${b[k]} → ${a[k]}`);
+  const excepts = lostTokens(pyExcepts(curR), pyExcepts(propR));
+  if (excepts.length) drops.push(`except ${excepts.join(', ')} changed`);
+  if (drops.length) return { check_name: 'guard_removal', passed: false, severity: 'veto', detail: `guards removed: ${drops.join(', ')}` };
+  return { check_name: 'guard_removal', passed: true, severity: 'score', detail: `raise=${b.raise} assert=${b.assert} guard=${b.guard} kept` };
+}
+
+function checkPyConditionChange(curR, propR) {
+  const gone = lostTokens(conditionTokens(curR), conditionTokens(propR));
+  if (gone.length) return { check_name: 'condition_change', passed: false, severity: 'veto', detail: `lost: ${gone.join(', ')}` };
+  return { check_name: 'condition_change', passed: true, severity: 'score', detail: 'comparisons, condition literals and defaults kept' };
+}
+
+function pyLexicalChecks(currentSrc, proposedSrc, region) {
+  const curR = pyRegion(currentSrc, region, 'current');
+  const propR = pyRegion(proposedSrc, region, 'proposed');
+  return [checkPyGuardRemoval(curR, propR), checkPyConditionChange(curR, propR)];
+}
+
 function runChecks({ file, currentSrc, proposedSrc, repoRoot, region }) {
   const before = parse(file, currentSrc);
   const after = parse(file, proposedSrc);
@@ -569,7 +699,8 @@ function runChecks({ file, currentSrc, proposedSrc, repoRoot, region }) {
       checkSignatureDrift(before, after, ctx),
       checkErrorHandlingRemoval(before, after),
       checkNewDependency(before, after, ctx),
-      checkReturnTypeChange(before, after, ctx)
+      checkReturnTypeChange(before, after, ctx),
+      ...(before.lang === 'python' ? pyLexicalChecks(currentSrc, proposedSrc, ctx.region) : [])
     ]
   };
 }
@@ -611,6 +742,7 @@ module.exports = {
   checkErrorHandlingRemoval,
   checkNewDependency,
   checkReturnTypeChange,
+  pyLexicalChecks,
   stripCode,
   matchBracket,
   splitTopLevel,

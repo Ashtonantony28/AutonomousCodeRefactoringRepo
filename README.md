@@ -18,20 +18,26 @@ Orchestrator
   │                   four anti-patterns: signature drift, error-handling
   │                   removal, new-dep, return-path regression (each a veto
   │                   when it fails; the call-site scan parses at most 200
-  │                   files that name the function, cached per run)
+  │                   files that name the function, cached per run); Python
+  │                   adds lexical vetoes for a removed raise/assert/guard
+  │                   or except type and lost comparisons/condition literals
   │
   ├── Differential testing ─► fast-check + vm isolation: input-equivalence
   │                           oracle for JS function refactors
   │
   ├── Hybrid validator  ─► adaptive weights: p_preserves 0.5 + ast 0.3 + diff 0.2
   │                       when differential testing is applicable,
-  │                       p_preserves 0.6 + ast 0.4 otherwise; gate needs
-  │                       combined >= 0.5 AND jury majority approve with
-  │                       p_preserves >= 0.5; without an `equivalent` diff
-  │                       test it fails closed (inconclusive after running
-  │                       inputs → rejected; otherwise unanimous approve and
-  │                       every AST check passed); hard vetoes (divergent diff
-  │                       test, failed anti-pattern or parse check, unanimous reject)
+  │                       p_preserves 0.6 + ast 0.4 otherwise; gate (commit
+  │                       bar) needs combined >= 0.5, a unanimous approve,
+  │                       every persona p_preserves >= 0.2 and no listed
+  │                       behaviour-changing edge case, and an `equivalent`
+  │                       diff test; a JS edit it could not run, or one it
+  │                       ran without confirming, is rejected; non-JS edits
+  │                       (runs=0) need every check passed, incl. Python
+  │                       lexical guard/condition checks; test files are
+  │                       never edited; hard vetoes (divergent diff test,
+  │                       failed anti-pattern, Python lexical or parse check,
+  │                       unanimous reject)
   │
   ├── Learned gate ("RL gate") ─► supervised logistic regression on test
   │              outcomes, per target repo, plus isotonic-calibrated
@@ -39,8 +45,10 @@ Orchestrator
   │
   ├── Executor  ─► 4-tier anchor matching (exact → whitespace → indent → fuzzy);
   │               git worktree per run, one commit per passing edit;
-  │               snapshot revert on failure or signal; kept only if a
-  │               test executed the edit (V8 coverage / coverage.py)
+  │               snapshot revert on failure or signal; kept only if the
+  │               tests executed every changed function (V8 coverage /
+  │               coverage.py; comments are no evidence) and fail on at
+  │               least one of up to 3 bug-injected mutants of the edit
   │
   ├── Reflexion loop  ─► up to 2 repair attempts using CRITIC-style
   │                       grounded-in-stderr re-prompting
@@ -204,4 +212,6 @@ bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
 - **Hierarchical Analyzer** (`src/agents/analyzer.js`): Agentless-style
   three-pass localization — repo summary → file shortlist → function
   shortlist → proposal generation. Cuts token usage and grounds proposals
-  in pre-identified hotspots.
+  in pre-identified hotspots. Test files (`test/`, `tests/`, `__tests__/`,
+  `spec/`, `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, `*_test.go`) are
+  neither sent nor proposed, and the gate rejects edits to them.
