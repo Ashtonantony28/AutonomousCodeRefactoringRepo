@@ -322,9 +322,8 @@ test('both sides throwing on every input is inconclusive, never equivalent', () 
 
 test('too few non-throwing runs is inconclusive', () => {
   const r = run({
-    currentSrc: 'function f(x) { if (typeof x === "number") return x; throw new TypeError("bad"); }',
-    proposedSrc: 'function f(x) { if (typeof x === "number") return x; throw new TypeError("bad"); /* same */ }',
-    minValueRuns: 1000
+    currentSrc: 'function f(x) { if (x === 7) return x; throw new TypeError("bad"); }',
+    proposedSrc: 'function f(x) { if (x === 7) return x; throw new TypeError("bad"); /* same */ }'
   });
   assert.strictEqual(r.verdict, 'inconclusive');
   assert.match(r.reason, /only \d+ of \d+ runs returned/);
@@ -458,4 +457,180 @@ test('snippet mode: proposed-only ReferenceError for a name absent from the file
   assert.strictEqual(r.verdict, 'divergent', r.reason);
   const known = run({ currentSrc: cur, proposedSrc: prop, fileSrc: fileSrc + 'function normalizeSlug(s) { return s; }\n' });
   assert.strictEqual(known.verdict, 'inconclusive');
+});
+
+// --- SG15: diff-test reach, round 2 -------------------------------------------
+
+// Splices `cur` into `pre` + `cur` + `exp` (exp defaults to exporting `name`
+// or the first declared function/class).
+const edit = (cur, prop, { pre = '', exp, name } = {}) => run({
+  currentSrc: cur,
+  proposedSrc: prop,
+  fileSrc: `'use strict';\n${pre}\n${cur}\n${exp !== undefined ? exp : `module.exports = { ${name || /(?:function|class)\s+(\w+)/.exec(cur)[1]} };`}\n`
+});
+
+test('module-scope bindings are compared after every call and after load', () => {
+  const log = edit('function record(evt) {\n  history.push(evt);\n  return evt;\n}', 'function record(evt) {\n  return evt;\n}',
+    { pre: 'const history = [];\nfunction getHistory() { return history.slice(); }', exp: 'module.exports = { record, getHistory };' });
+  assert.strictEqual(log.verdict, 'divergent', log.reason);
+  assert.match(log.reason, /side effects differ/);
+  const reg = edit("use({ name: 'core' });\nuse({ name: 'auth' });", "use({ name: 'core' });",
+    { pre: 'const plugins = [];\nfunction use(p) { plugins.push(p); }\nfunction names() { return plugins.map((p) => p.name); }', exp: 'module.exports = { names };' });
+  assert.strictEqual(reg.verdict, 'divergent', reg.reason);
+  assert.strictEqual(reg.counterexample.phase, 'load');
+});
+
+test('a changed callable writing different module-scope state is at best inconclusive', () => {
+  const r = edit('function set(k, v) {\n  db[k] = v;\n  delete cache[k];\n  return v;\n}', 'function set(k, v) {\n  db[k] = v;\n  return v;\n}',
+    { pre: 'const db = {};\nconst cache = {};\nfunction get(k) { if (!(k in cache)) cache[k] = db[k]; return cache[k]; }', exp: 'module.exports = { get, set };' });
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /set writes different module-scope state \(cache\)/);
+  assert(r.runs > 0);
+});
+
+test('a dropped top-level statement next to a tidied function is never equivalent', () => {
+  const r = edit('app.use(function limit(req) { return req; });\nfunction handler(req) {\n  const id = req.id;\n  return id;\n}',
+    'function handler(req) {\n  const userId = req.id;\n  return userId;\n}', { pre: "const app = require('./app');", exp: 'module.exports = { handler, app };' });
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /top-level statement changed outside a located callable/);
+  assert.match(r.reason, /load-time interactions with dependencies differ/);
+  assert(r.runs > 0);
+});
+
+test('an object returned again by a later call is compared by identity', () => {
+  const r = edit('function pool() {\n  if (!instance) instance = { conns: [] };\n  return instance;\n}', 'function pool() {\n  instance = { conns: [] };\n  return instance;\n}',
+    { pre: 'let instance = null;' });
+  assert.strictEqual(r.verdict, 'divergent', r.reason);
+});
+
+test('returned functions get shaped arguments, nested probes and their owner as this', () => {
+  const cases = [
+    ['function minAge(n) {\n  return (user) => user.age >= n;\n}', 'function minAge(n) {\n  return (user) => user.age > n;\n}'],
+    ['function makeCart() {\n  return {\n    items: [],\n    add(item) {\n      this.items.push(item);\n      return this.items.length;\n    }\n  };\n}',
+      'function makeCart() {\n  return {\n    items: [],\n    add(item) {\n      this.items.unshift(item);\n      return this.items.length;\n    }\n  };\n}'],
+    ['function makeStats() {\n  return {\n    mean(xs) {\n      return xs.reduce((a, b) => a + b, 0) / xs.length;\n    }\n  };\n}',
+      'function makeStats() {\n  return {\n    mean(xs) {\n      return xs.reduce((a, b) => a + b, 0) / (xs.length - 1);\n    }\n  };\n}'],
+    ['function rgb(r) {\n  return (g) => (b) => (r << 16) | (g << 8) | b;\n}', 'function rgb(r) {\n  return (g) => (b) => (r << 16) | (g << 8) | (b & 0x7f);\n}'],
+    ['function memo(fn) {\n  const cache = new Map();\n  return (...args) => {\n    const k = JSON.stringify(args);\n    if (!cache.has(k)) cache.set(k, fn(...args));\n    return cache.get(k);\n  };\n}',
+      'function memo(fn) {\n  const cache = new Map();\n  return (...args) => {\n    const k = String(args[0]);\n    if (!cache.has(k)) cache.set(k, fn(...args));\n    return cache.get(k);\n  };\n}'],
+    ['const k = (() => (x) => x * 2)();', 'const k = (() => (x) => x * 3)();']
+  ];
+  for (const [c, p] of cases) {
+    const r = edit(c, p, { name: /(?:function|const)\s+(\w+)/.exec(c)[1] });
+    assert.strictEqual(r.verdict, 'divergent', `${p}: ${r.reason}`);
+  }
+});
+
+test('callables are located in prototype, assigned, defineProperty, field, anonymous-export, ESM-default, if-block and IIFE shapes', () => {
+  const cases = [
+    { pre: 'function Stack() { this.items = []; }', cur: 'Stack.prototype.peek = function () {\n  return this.items[this.items.length - 1];\n};',
+      prop: 'Stack.prototype.peek = function () {\n  return this.items[0];\n};', exp: 'module.exports = { Stack };', label: 'Stack.peek' },
+    { pre: 'const api = {};', cur: 'api.discount = function (price) {\n  return price > 100 ? price * 0.9 : price;\n};',
+      prop: 'api.discount = function (price) {\n  return price >= 100 ? price * 0.9 : price;\n};', exp: 'module.exports = api;', label: 'api.discount' },
+    { pre: 'let hits = 0;\nfunction hit() { hits++; }', cur: "Object.defineProperty(module.exports, 'hitCount', {\n  get() {\n    return hits;\n  }\n});",
+      prop: "Object.defineProperty(module.exports, 'hitCount', {\n  get() {\n    return hits + 1;\n  }\n});", exp: 'module.exports.hit = hit;', label: 'module.exports.hitCount' },
+    { cur: "class Fmt {\n  pct = (x) => Math.round(x * 100) + '%';\n}", prop: "class Fmt {\n  pct = (x) => Math.floor(x * 100) + '%';\n}", exp: 'module.exports = { Fmt };', label: 'Fmt.pct' },
+    { cur: 'class Retry {\n  limit = 3;\n  shouldRetry(n) {\n    return n < this.limit;\n  }\n}', prop: 'class Retry {\n  limit = 5;\n  shouldRetry(n) {\n    return n < this.limit;\n  }\n}', exp: 'module.exports = { Retry };' },
+    { cur: 'module.exports = function (a, b) {\n  return a - b;\n};', prop: 'module.exports = function (a, b) {\n  return b - a;\n};', exp: '', label: 'module.exports' },
+    { cur: 'module.exports = class {\n  constructor(n) { this.n = n; }\n  half() {\n    return Math.floor(this.n / 2);\n  }\n};',
+      prop: 'module.exports = class {\n  constructor(n) { this.n = n; }\n  half() {\n    return Math.ceil(this.n / 2);\n  }\n};', exp: '', label: 'module.exports.half' },
+    { cur: 'module.exports = {\n  num: {\n    clamp(x, lo, hi) {\n      return Math.min(Math.max(x, lo), hi);\n    }\n  }\n};',
+      prop: 'module.exports = {\n  num: {\n    clamp(x, lo, hi) {\n      return Math.min(Math.max(x, lo), hi - 1);\n    }\n  }\n};', exp: '' },
+    { pre: 'const exp = {};', cur: "if (typeof exp === 'object') {\n  exp.double = function (x) {\n    return x * 2;\n  };\n}",
+      prop: "if (typeof exp === 'object') {\n  exp.double = function (x) {\n    return x + x + 1;\n  };\n}", exp: 'module.exports = exp;', label: 'exp.double' },
+    { cur: '(function () {\n  function inc(x) {\n    return x + 1;\n  }\n  module.exports = { inc };\n})();', prop: '(function () {\n  function inc(x) {\n    return x + 2;\n  }\n  module.exports = { inc };\n})();', exp: '' },
+    { cur: 'class Range {\n  constructor(n) { this.n = n; }\n  *[Symbol.iterator]() {\n    for (let i = 0; i < this.n; i++) yield i;\n  }\n}',
+      prop: 'class Range {\n  constructor(n) { this.n = n; }\n  *[Symbol.iterator]() {\n    for (let i = 0; i <= this.n; i++) yield i;\n  }\n}', exp: 'module.exports = { Range };', label: 'Range.[Symbol.iterator]' }
+  ];
+  for (const c of cases) {
+    const r = edit(c.cur, c.prop, c);
+    assert.strictEqual(r.verdict, 'divergent', `${c.prop}: ${r.reason}`);
+    if (c.label) assert.strictEqual(r.function_name, c.label);
+  }
+  const esm = run({ currentSrc: 'export default function (x) {\n  return x * 2;\n}', proposedSrc: 'export default function (x) {\n  return x * 3;\n}', fileSrc: 'export default function (x) {\n  return x * 2;\n}\n' });
+  assert.strictEqual(esm.verdict, 'divergent', esm.reason);
+  assert.strictEqual(esm.function_name, 'module.exports.default');
+});
+
+test('targets beyond the cap and an exhausted time budget are inconclusive, never equivalent', () => {
+  const fns = (changed) => Array.from({ length: 9 }, (_, i) => `function f${i + 1}(x) {\n  const ${changed ? 'result' : 'r'} = x * ${changed && i === 8 ? 10 : i + 1};\n  return ${changed ? 'result' : 'r'};\n}`).join('\n');
+  const capped = run({ currentSrc: fns(false), proposedSrc: fns(true), fileSrc: `${fns(false)}\nmodule.exports = { ${Array.from({ length: 9 }, (_, i) => `f${i + 1}`).join(', ')} };\n` });
+  assert.strictEqual(capped.verdict, 'inconclusive');
+  assert.match(capped.reason, /1 changed callable\(s\) beyond the 8-target cap/);
+  const slow = 'function score(n) {\n  let s = 0;\n  for (let i = 0; i < 2e5; i++) s = (s + i) % 7;\n  return n === 18 ? s + 1 : s;\n}';
+  const budget = run({ currentSrc: slow, proposedSrc: slow.replace('n === 18', 'n === 19'), budgetMs: 40 });
+  assert.strictEqual(budget.verdict, 'inconclusive', budget.reason);
+  assert.match(budget.reason, /time budget reached after \d+ of \d+ inputs/);
+});
+
+test('equivalent needs a minimum of value-returning runs per target', () => {
+  const cur = 'function a(x) {\n  return String(x);\n}\nfunction b(x) {\n  if (x === 1 || x === 2 || x === 3) return x;\n  throw new Error("no");\n}';
+  const prop = 'function a(x) {\n  return `${x}`;\n}\nfunction b(x) {\n  if (x === 1 || x === 2 || x === 3) return x;\n  throw new Error("no");\n  // same\n}';
+  const r = inFile(cur, prop, 'a, b');
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /b: only \d+ of \d+ runs returned comparable values/);
+});
+
+test('boundary inputs from mined literals and regexes separate the versions', () => {
+  const cases = [
+    ['function isZip(s) {\n  return /^\\d{5}$/.test(s);\n}', 'function isZip(s) {\n  return /^\\d{5,}$/.test(s);\n}'],
+    ['function isYes(s) {\n  return /^(y|yes)$/i.test(s);\n}', 'function isYes(s) {\n  return /^(y|yes)$/.test(s);\n}'],
+    ["function slug(s) {\n  return String(s).trim().toLowerCase().replace(/\\s+/g, '-');\n}", "function slug(s) {\n  return String(s).trim().toLowerCase().replace(/\\s/g, '-');\n}"],
+    ["function strip(p) {\n  return String(p).replace(/\\.\\.\\//g, '');\n}", "function strip(p) {\n  return String(p).replace('../', '');\n}"],
+    ['function trusted(host) {\n  return /^api\\.example\\.com$/.test(host);\n}', 'function trusted(host) {\n  return /^api.example.com$/.test(host);\n}'],
+    ['function clean(s) {\n  return String(s).trim();\n}', 'function clean(s) {\n  return String(s).trimEnd();\n}'],
+    ['function toInt(s) {\n  return parseInt(s);\n}', 'function toInt(s) {\n  return parseInt(s, 10);\n}'],
+    ["function head(s) {\n  return s.split(':', 2);\n}", "function head(s) {\n  return s.split(':');\n}"],
+    ["function checkName(s) {\n  if (s.length > 255) throw new RangeError('name too long');\n  return s;\n}", "function checkName(s) {\n  if (s.length > 256) throw new RangeError('name too long');\n  return s;\n}"],
+    ["function port(n) {\n  if (n < 1 || n > 65535) throw new RangeError('bad port');\n  return n;\n}", "function port(n) {\n  if (n < 1 || n > 65536) throw new RangeError('bad port');\n  return n;\n}"],
+    ["function accept(payload) {\n  if (payload.items.length > 100) throw new RangeError('too many items');\n  return payload.items.length;\n}",
+      "function accept(payload) {\n  if (payload.items.length > 1000) throw new RangeError('too many items');\n  return payload.items.length;\n}"],
+    ['class Age {\n  constructor(n) { this.n = n; }\n  adult() {\n    return this.n >= 18;\n  }\n}', 'class Age {\n  constructor(n) { this.n = n; }\n  adult() {\n    return this.n > 18;\n  }\n}']
+  ];
+  for (const [c, p] of cases) {
+    const r = edit(c, p);
+    assert.strictEqual(r.verdict, 'divergent', `${p}: ${r.reason}`);
+  }
+});
+
+test('dependency stubs return varied values so branches on their results are taken', () => {
+  const size = edit("function sizeClass(p) {\n  const st = store.stat(p);\n  if (st.size > 1048576) return 'large';\n  return 'small';\n}",
+    "function sizeClass(p) {\n  const st = store.stat(p);\n  if (st.size > 10485760) return 'large';\n  return 'small';\n}", { pre: "const store = require('./store');" });
+  assert.strictEqual(size.verdict, 'divergent', size.reason);
+  const status = edit("function exists(id) {\n  const res = client.head('/items/' + id);\n  if (res.status === 404) return false;\n  return true;\n}",
+    "function exists(id) {\n  const res = client.head('/items/' + id);\n  if (res.status === 410) return false;\n  return true;\n}", { pre: "const client = require('./client');" });
+  assert.strictEqual(status.verdict, 'divergent', status.reason);
+});
+
+test('an edit that changes references to host globals is inconclusive; Date is fixed', () => {
+  const cases = [
+    ["function cacheDir(home) {\n  return home + '/.cache';\n}", "function cacheDir(home) {\n  if (typeof process === 'object') return '/tmp/.cache';\n  return home + '/.cache';\n}", 'process'],
+    ['function delayMs(n) {\n  return n * 1000;\n}', "function delayMs(n) {\n  if (typeof setTimeout === 'function') return n * 100;\n  return n * 1000;\n}", 'setTimeout'],
+    ['function b64(s) {\n  return String(s);\n}', "function b64(s) {\n  if (typeof Buffer === 'function') return Buffer.from(String(s)).toString('base64');\n  return String(s);\n}", 'Buffer']
+  ];
+  for (const [c, p, g] of cases) {
+    const r = edit(c, p);
+    assert.strictEqual(r.verdict, 'inconclusive', p);
+    assert.match(r.reason, new RegExp(`host globals the sandbox does not provide \\(${g}\\)`));
+    assert(r.runs > 0);
+  }
+  const now = edit('function age(t) {\n  return Date.now() - t;\n}', 'function age(t) {\n  const n = Date.now();\n  return n - t;\n}', { pre: 'const START = new Date();' });
+  assert.strictEqual(now.verdict, 'equivalent', now.reason);
+});
+
+test('inputs outside the original\'s evident domain are not generated; differences only there are inconclusive', () => {
+  const benign = [
+    ['function sum(xs) {\n  let s = 0;\n  for (let i = 0; i < xs.length; i++) s += xs[i];\n  return s;\n}', 'function sum(xs) {\n  let s = 0;\n  for (const x of xs) s += x;\n  return s;\n}'],
+    ['function tail(s) {\n  return s.substr(1);\n}', 'function tail(s) {\n  return s.slice(1);\n}'],
+    ['function total(xs) {\n  return xs.reduce((a, b) => a + b, 0);\n}', 'function total(xs) {\n  let t = 0;\n  for (const x of xs) t = t + x;\n  return t;\n}'],
+    ['function keys(m) {\n  return Array.from(m.keys());\n}', 'function keys(m) {\n  return [...m.keys()];\n}'],
+    ['class Box {\n  constructor(w) { this.w = w; }\n  area() {\n    return this.w * this.w;\n  }\n}', 'class Box {\n  constructor(w) { this.w = w; }\n  side() {\n    return this.w;\n  }\n  area() {\n    return this.side() * this.side();\n  }\n}']
+  ];
+  for (const [c, p] of benign) {
+    const r = edit(c, p);
+    assert.strictEqual(r.verdict, 'equivalent', `${p}: ${r.reason} ${JSON.stringify(r.counterexample || '')}`);
+  }
+  const ood = edit('function inner(o) {\n  return o.a.b;\n}', 'function inner(o) {\n  return o.a && o.a.b;\n}');
+  assert.strictEqual(ood.verdict, 'inconclusive', ood.reason);
+  assert.match(ood.reason, /current version rejects with a TypeError/);
 });
