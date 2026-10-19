@@ -78,7 +78,7 @@ failure clusters, and per-proposal decision traces.
 | `--dry-run`         | off          | Run Analyzer + Critic, skip Executor                         |
 | `--cache <mode>`    | `read-write` | `off` · `read-write` · `replay` (sha256-keyed API responses) |
 | `--no-hierarchical` | off          | Disable file→function shortlisting                            |
-| `--serve`           | off          | Start the live SSE dashboard                                  |
+| `--serve`           | off          | Serve the live SSE dashboard while the run is in progress; it stops when the run ends (`node src/interpretability/server.js` serves it standalone) |
 | `--port <n>`        | `4173`       | Dashboard server port                                         |
 
 ## Layout

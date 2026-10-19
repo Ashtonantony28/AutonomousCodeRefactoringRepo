@@ -7,6 +7,8 @@
 
 const { trainGradientDescent, sampleToFeatures } = require('../rl/classifier');
 
+const PROBE_FEATURE_NAMES = ['reasoning_kchars', 'edge_cases', 'hallucination_flags', 'combined_confidence', 'risk_estimate'];
+
 function probeFeatures(proposal) {
   const verdict = proposal.critic_verdict || {};
   return [
@@ -29,4 +31,4 @@ function trainProbe(proposals) {
   return trainGradientDescent(X, y);
 }
 
-module.exports = { trainProbe, probeFeatures };
+module.exports = { trainProbe, probeFeatures, PROBE_FEATURE_NAMES };

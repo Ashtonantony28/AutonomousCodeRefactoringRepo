@@ -12,6 +12,7 @@ try { Matrix = require('ml-matrix').Matrix; } catch { Matrix = null; }
 function weightsPath() { return path.join(stateDir(), 'rl-weights.json'); }
 const FEATURE_COUNT = FEATURE_NAMES.length;
 const MIN_TRAIN_SAMPLES = 10;
+const RL_GATE_THRESHOLD = 0.4;
 
 function ensureStateDir() {
   const dir = stateDir();
@@ -158,6 +159,7 @@ module.exports = {
   sampleLabel,
   trainGradientDescent,
   MIN_TRAIN_SAMPLES,
+  RL_GATE_THRESHOLD,
   FEATURE_COUNT,
   weightsPath
 };
