@@ -86,11 +86,11 @@ function freshProposal(p) {
   };
 }
 
-const stubCritic = async ({ proposal }) => ({
-  proposal_id: proposal.issue_id, persona: 'strict', preserves_semantics: true,
-  edge_cases: [], hallucination_flags: [], claude_confidence: 0.8, reasoning: 'bench stub',
-  panel: [], agreement: { mean_confidence: 0.8, std_confidence: 0, unanimous_approval: true, approval_rate: 1, verbal_entropy: 0 }
-});
+const stubCritic = async ({ proposal }) => {
+  const v = { persona: 'strict', preserves_semantics: true, p_preserves: 0.8, edge_cases: [], hallucination_flags: [], reasoning: 'bench stub' };
+  return { proposal_id: proposal.issue_id, panel: [v], p_preserves: 0.8, claude_confidence: 0.8, preserves_semantics: true,
+    agreement: { std: 0, unanimous: true, approval_rate: 1, verbal_entropy: 0 } };
+};
 
 const RUNNERS = {
   ast: { filter: (c) => !c.applyOnly, run: (c) => runChecks({ proposal: freshProposal(c.proposal), repoRoot: c.repo }) },

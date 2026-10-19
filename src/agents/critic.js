@@ -30,11 +30,16 @@ function systemPromptFor(persona) {
     '{',
     '  "proposal_id": "<issue_id from the proposal>",',
     '  "preserves_semantics": <true|false>,',
+    '  "p_preserves": <0.0-1.0>,',
     '  "edge_cases": ["<description>", ...],',
     '  "hallucination_flags": ["<any claims not supported by the code>", ...],',
-    '  "claude_confidence": <0.0-1.0>,',
     '  "reasoning": "<your evaluation>"',
     '}',
+    'p_preserves is your probability (0.0-1.0) that proposed_code preserves the',
+    'observable behaviour of current_code (return values, thrown errors, side',
+    'effects) for every input. It is NOT your confidence in your own verdict:',
+    'a clear behaviour change is p_preserves near 0. Keep it consistent with',
+    'preserves_semantics: true means p_preserves > 0.5, false means p_preserves <= 0.5.',
     'Nothing else.'
   ].join('\n');
 }
@@ -54,28 +59,46 @@ function renderProposal(p) {
   ].join('\n');
 }
 
-function normalizeVerdict(raw, fallbackId, persona) {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      proposal_id: fallbackId,
-      persona,
-      preserves_semantics: false,
-      edge_cases: [],
-      hallucination_flags: ['critic returned no parseable verdict'],
-      claude_confidence: 0,
-      reasoning: 'malformed critic output'
-    };
-  }
-  const conf = Number(raw.claude_confidence);
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+
+function malformedVerdict(fallbackId, persona, reason) {
   return {
+    proposal_id: fallbackId,
+    persona,
+    preserves_semantics: false,
+    p_preserves: 0,
+    edge_cases: [],
+    hallucination_flags: ['critic returned no parseable verdict'],
+    reasoning: reason || 'malformed critic output',
+    malformed: true
+  };
+}
+
+// Output is a contract Verdict (src/contracts.js). Legacy outputs that only
+// carry `claude_confidence` (confidence in the stated verdict) are mapped to
+// P(preserved): c when preserves_semantics is true, 1 - c when false. A
+// verdict that says "changes semantics" never contributes more than 0.5.
+function normalizeVerdict(raw, fallbackId, persona) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return malformedVerdict(fallbackId, persona);
+  const preserves = raw.preserves_semantics === true || raw.preserves_semantics === 'true';
+  const pRaw = raw.p_preserves == null ? NaN : Number(raw.p_preserves);
+  const legacy = raw.claude_confidence == null ? NaN : Number(raw.claude_confidence);
+  let p;
+  if (Number.isFinite(pRaw)) p = clamp01(pRaw);
+  else if (Number.isFinite(legacy)) p = preserves ? clamp01(legacy) : 1 - clamp01(legacy);
+  else return malformedVerdict(raw.proposal_id || fallbackId, persona, 'critic verdict has no p_preserves');
+  if (!preserves) p = Math.min(p, 0.5);
+  const v = {
     proposal_id: raw.proposal_id || fallbackId,
     persona,
-    preserves_semantics: !!raw.preserves_semantics,
+    preserves_semantics: preserves,
+    p_preserves: p,
     edge_cases: Array.isArray(raw.edge_cases) ? raw.edge_cases.map(String) : [],
     hallucination_flags: Array.isArray(raw.hallucination_flags) ? raw.hallucination_flags.map(String) : [],
-    claude_confidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0,
     reasoning: String(raw.reasoning || '')
   };
+  if (!Number.isFinite(pRaw)) v.legacy_schema = true;
+  return v;
 }
 
 async function singleCritic({ proposal, tracker, persona }) {
@@ -96,44 +119,48 @@ async function singleCritic({ proposal, tracker, persona }) {
       parsed = extractJsonBlock(retry.text);
     }
   } catch (err) {
-    return normalizeVerdict({ preserves_semantics: false, claude_confidence: 0, reasoning: `critic ${persona.label} error: ${err.message}` }, proposal.issue_id, persona.label);
+    return malformedVerdict(proposal.issue_id, persona.label, `critic ${persona.label} error: ${err.message}`);
   }
   return normalizeVerdict(parsed, proposal.issue_id, persona.label);
 }
 
-// Returns a SINGLE composite verdict shaped like the original critic
-// (so callers and the orchestrator don't need to change), but with an
-// extra `panel` array of per-persona verdicts and an `agreement` block.
+function uniq(xs) { return [...new Set(xs)]; }
+
+// Aggregates per-persona Verdicts into a contract JuryVerdict.
+// p_preserves is the panel mean. Legacy aliases for consumers not yet
+// migrated: claude_confidence (= p_preserves), preserves_semantics
+// (strict majority vote), reasoning/edge_cases/hallucination_flags (merged).
+function aggregateJury(verdicts, proposalId) {
+  const ps = verdicts.map(v => v.p_preserves);
+  const approvals = verdicts.map(v => v.preserves_semantics ? 1 : 0);
+  const mean = ps.reduce((a, b) => a + b, 0) / ps.length;
+  const std = Math.sqrt(ps.reduce((a, b) => a + (b - mean) ** 2, 0) / ps.length);
+  const approvalRate = approvals.reduce((a, b) => a + b, 0) / approvals.length;
+  const pPreserves = Number(mean.toFixed(4));
+  return {
+    proposal_id: proposalId,
+    persona: 'jury',
+    panel: verdicts,
+    p_preserves: pPreserves,
+    agreement: {
+      std: Number(std.toFixed(4)),
+      unanimous: approvals.every(a => a === approvals[0]),
+      approval_rate: approvalRate,
+      verbal_entropy: entropy(verdicts.map(v => v.reasoning.slice(0, 120)))
+    },
+    claude_confidence: pPreserves,
+    preserves_semantics: approvalRate > 0.5,
+    edge_cases: uniq(verdicts.flatMap(v => v.edge_cases)),
+    hallucination_flags: uniq(verdicts.flatMap(v => v.hallucination_flags)),
+    reasoning: verdicts.map(v => `[${v.persona}] ${v.reasoning}`).join(' ')
+  };
+}
+
 async function runCritic({ proposal, tracker, panel = ['strict', 'permissive', 'security'] }) {
   const personas = panel.map(k => PERSONAS[k]).filter(Boolean);
+  if (!personas.length) throw new Error(`runCritic: empty panel (${panel.join(',')})`);
   const verdicts = await Promise.all(personas.map(p => singleCritic({ proposal, tracker, persona: p })));
-
-  const confidences = verdicts.map(v => v.claude_confidence);
-  const approvals = verdicts.map(v => v.preserves_semantics ? 1 : 0);
-  const meanConf = confidences.reduce((a, b) => a + b, 0) / confidences.length;
-  const stdConf = Math.sqrt(confidences.reduce((a, b) => a + (b - meanConf) ** 2, 0) / confidences.length);
-  const approvalAgreement = approvals.every(a => a === approvals[0]); // unanimous?
-  const approvalRate = approvals.reduce((a, b) => a + b, 0) / approvals.length;
-  const verbalEntropy = entropy(verdicts.map(v => v.reasoning.slice(0, 120)));
-
-  // Pick the "decisive" verdict to surface as the primary one: the
-  // persona whose confidence is closest to the mean. This keeps the
-  // contract with downstream code unchanged.
-  const primary = verdicts
-    .map(v => ({ v, delta: Math.abs(v.claude_confidence - meanConf) }))
-    .sort((a, b) => a.delta - b.delta)[0].v;
-
-  return {
-    ...primary,
-    panel: verdicts,
-    agreement: {
-      mean_confidence: meanConf,
-      std_confidence: stdConf,
-      unanimous_approval: approvalAgreement,
-      approval_rate: approvalRate,
-      verbal_entropy: verbalEntropy
-    }
-  };
+  return aggregateJury(verdicts, proposal.issue_id);
 }
 
 // Cheap "is the panel saying the same thing in different words" probe.
@@ -170,4 +197,4 @@ function trigramBag(s) {
   return out;
 }
 
-module.exports = { runCritic, singleCritic, normalizeVerdict, systemPromptFor, PERSONAS, entropy };
+module.exports = { runCritic, singleCritic, normalizeVerdict, aggregateJury, malformedVerdict, systemPromptFor, PERSONAS, entropy };

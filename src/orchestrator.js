@@ -19,7 +19,7 @@ const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
 
 const { collectSample } = require('./rl/collector');
-const { trainIfReady, loadClassifier } = require('./rl/classifier');
+const { trainIfReady, loadClassifier, RL_GATE_THRESHOLD } = require('./rl/classifier');
 const { computeReward, rollingWarning, rewardBreakdown } = require('./rl/reward');
 const calibration = require('./rl/calibration');
 const bugInjector = require('./rl/bug-injector');
@@ -28,7 +28,6 @@ const { extractFeatures } = require('./rl/features');
 const { trace, classifyFailure, persistRunSpans } = require('./interpretability/tracer');
 const { renderDashboard } = require('./interpretability/dashboard');
 
-const RL_GATE_THRESHOLD = 0.4;
 const REJECT_THRESHOLD = 0.5;
 
 function logInfo(msg) { console.log(chalk.cyan('[orch] ') + msg); }
@@ -67,22 +66,38 @@ function featuresFor(p) {
 }
 
 async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, allowRepair = true, attemptIdx = 0 }) {
+  const trace_id = session.run_id;
+  proposal.run_id = session.run_id;
   // Hybrid critic + AST + diff-testing
   try {
-    await runHybridValidator({ proposal, tracker, repoRoot: absRepo, runCritic });
+    await runHybridValidator({ proposal, tracker, repoRoot: absRepo, runCritic, runId: session.run_id });
   } catch (err) {
     logErr(`hybrid validator error on ${proposal.file}: ${err.message}`);
-    trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error' });
+    trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
     proposal.combined_confidence = 0;
+    proposal.veto = null;
   }
   saveSession(session);
+
+  if (proposal.veto && proposal.veto.vetoed) {
+    proposal.test_outcome = { status: 'vetoed', reasons: proposal.veto.reasons };
+    trace(proposal, 'critic', {
+      reasoning: `vetoed: ${proposal.veto.reasons.join('; ')}`,
+      confidence: proposal.combined_confidence,
+      outcome: 'vetoed',
+      trace_id
+    });
+    saveSession(session);
+    return proposal;
+  }
 
   if ((proposal.combined_confidence || 0) < REJECT_THRESHOLD) {
     proposal.test_outcome = { status: 'critic_rejected', reason: 'combined_confidence below threshold' };
     trace(proposal, 'critic', {
-      reasoning: 'combined_confidence < 0.5; rejecting',
+      reasoning: `combined_confidence < ${REJECT_THRESHOLD}; rejecting`,
       confidence: proposal.combined_confidence,
-      outcome: 'critic_rejected'
+      outcome: 'critic_rejected',
+      trace_id
     });
     saveSession(session);
     return proposal;
@@ -98,7 +113,8 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
       reasoning: `predicted p_pass=${pPass.toFixed(3)}`,
       confidence: pPass,
       outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved',
-      duration_ms: Number((performance.now() - t0).toFixed(3))
+      duration_ms: Number((performance.now() - t0).toFixed(3)),
+      trace_id
     });
     if (pPass < RL_GATE_THRESHOLD) {
       proposal.test_outcome = { status: 'rl_rejected', p_pass: pPass };
@@ -109,7 +125,7 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   if (dryRun) {
     proposal.test_outcome = { status: 'dry_run' };
-    trace(proposal, 'executor', { reasoning: 'dry-run; skipping executor', confidence: 0, outcome: 'dry_run' });
+    trace(proposal, 'executor', { reasoning: 'dry-run; skipping executor', confidence: 0, outcome: 'dry_run', trace_id });
     saveSession(session);
     return proposal;
   }
@@ -120,7 +136,7 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     result = await runExecutor({ proposal, tracker, repoRoot: absRepo });
   } catch (err) {
     logErr(`executor failed on ${proposal.file}: ${err.message}`);
-    trace(proposal, 'executor', { reasoning: `executor error: ${err.message}`, confidence: 0, outcome: 'error' });
+    trace(proposal, 'executor', { reasoning: `executor error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
     proposal.test_outcome = { status: 'error', error: err.message };
     saveSession(session);
     return proposal;
@@ -133,7 +149,7 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   session.rl_samples.push(sample);
   proposal.reward = computeReward(proposal);
   proposal.reward_breakdown = rewardBreakdown(proposal);
-  trace(proposal, 'rl', { reasoning: `reward=${proposal.reward.toFixed(3)}`, confidence: proposal.combined_confidence, outcome: result.status });
+  trace(proposal, 'rl', { reasoning: `reward=${proposal.reward.toFixed(3)}`, confidence: proposal.combined_confidence, outcome: result.status, trace_id });
 
   // Synthetic negatives (CriticGPT-style) when the proposal passed cleanly
   if (result.status === 'passed') {
@@ -213,7 +229,8 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   }
   for (const p of analyzerProposals) {
     p.decision_trace = p.decision_trace || [];
-    trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed' });
+    p.run_id = session.run_id;
+    trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed', trace_id: session.run_id });
     session.proposals.push(p);
   }
   saveSession(session);
@@ -245,19 +262,20 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   logOk(`dashboard written: ${path.relative(process.cwd(), dashFile) || dashFile}`);
 
   const stats = summarizeRun(session);
-  logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected}`);
+  logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected} vetoed=${stats.vetoed}`);
   saveSession(session);
   return session;
 }
 
 function summarizeRun(session) {
-  const out = { total: session.proposals.length, passed: 0, failed: 0, rl_rejected: 0, critic_rejected: 0, dry_run: 0, error: 0 };
+  const out = { total: session.proposals.length, passed: 0, failed: 0, rl_rejected: 0, critic_rejected: 0, vetoed: 0, dry_run: 0, error: 0 };
   for (const p of session.proposals) {
     const s = p.test_outcome ? p.test_outcome.status : null;
     if (s === 'passed') out.passed++;
     else if (s === 'failed' || s === 'reverted') out.failed++;
     else if (s === 'rl_rejected') out.rl_rejected++;
     else if (s === 'critic_rejected') out.critic_rejected++;
+    else if (s === 'vetoed') out.vetoed++;
     else if (s === 'dry_run') out.dry_run++;
     else if (s === 'error') out.error++;
   }

@@ -11,7 +11,8 @@ Orchestrator
   ├── Analyzer  ─► (hierarchical: file shortlist → function shortlist → edit window)
   │
   ├── Critic JURY  ─► three personas (strict / permissive / security)
-  │                   produce verdicts + agreement / disagreement signal
+  │                   each give p_preserves = P(behaviour preserved);
+  │                   jury score = panel mean, plus agreement signal
   │
   ├── AST checker  ─► Babel (JS/TS) + polyglot regex (Python / Go / Ruby)
   │                   four anti-patterns: signature drift, error-handling
@@ -20,9 +21,10 @@ Orchestrator
   ├── Differential testing ─► fast-check + vm isolation: input-equivalence
   │                           oracle for JS function refactors
   │
-  ├── Hybrid validator  ─► adaptive weights: claude 0.5 + ast 0.3 + diff 0.2
+  ├── Hybrid validator  ─► adaptive weights: p_preserves 0.5 + ast 0.3 + diff 0.2
   │                       when differential testing is applicable,
-  │                       claude 0.6 + ast 0.4 otherwise
+  │                       p_preserves 0.6 + ast 0.4 otherwise; hard vetoes
+  │                       (divergent diff test, parse veto, unanimous reject)
   │
   ├── RL gate  ─► dependency-free logistic regression with counterfactual
   │              "what-if" attribution; isotonic-calibrated combined_confidence
@@ -118,9 +120,12 @@ bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
   `@babel/parser` doesn't apply.
 
 - **Multi-persona Critic jury** (`src/agents/critic.js`): three Claude calls
-  per proposal — strict / permissive / security — producing per-persona
-  confidences plus an `agreement` summary (std-dev, unanimous-approval flag,
-  verbal entropy via char-trigram cosine). DiverseAgentEntropy (EMNLP 2025);
+  per proposal — strict / permissive / security — each returning
+  `p_preserves` (probability the edit preserves observable behaviour; a
+  reject is capped at 0.5, legacy `claude_confidence` is mapped to
+  `1 - c` for rejects). The jury score is the panel mean, with an
+  `agreement` summary (std-dev, unanimous flag, approval rate, verbal
+  entropy via char-trigram cosine). A unanimous reject is a hard veto. DiverseAgentEntropy (EMNLP 2025);
   SE-Jury (2025).
 
 - **Reflexion repair loop** (`src/agents/reflexion.js`): on test failure, feed

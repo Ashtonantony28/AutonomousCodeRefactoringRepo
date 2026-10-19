@@ -15,6 +15,6 @@
     "proposed_code": "function safeParse(text) {\n  return JSON.parse(text);\n}",
     "reasoning": "Simplify by removing the try/catch.",
     "risk_estimate": 0.6,
-    "expected_status": "critic_rejected"
+    "expected_status": "vetoed"
   }
 ]

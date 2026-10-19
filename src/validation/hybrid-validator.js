@@ -1,98 +1,139 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { runChecks } = require('./ast-checker');
 const diffTesting = require('./diff-testing');
+const { assertJuryVerdict, assertCheckResult, assertDiffTest } = require('../contracts');
+const { trace } = require('../interpretability/tracer');
 
+// combined = w_c * jury.p_preserves + w_a * pattern_score (+ w_d * diff score)
 // Weights are adaptive:
-//   - if differential testing is applicable, claude=0.5 / ast=0.3 / diff=0.2
-//   - otherwise, claude=0.6 / ast=0.4 (original spec)
+//   - if differential testing is applicable, critic=0.5 / ast=0.3 / diff=0.2
+//   - otherwise, critic=0.6 / ast=0.4 (original spec)
+// Vetoes (proposal.veto) override the score: see vetoReasons().
 const CRITIC_WEIGHT_DEFAULT  = 0.6;
 const PATTERN_WEIGHT_DEFAULT = 0.4;
 const CRITIC_WEIGHT_WITH_DT  = 0.5;
 const PATTERN_WEIGHT_WITH_DT = 0.3;
 const DT_WEIGHT              = 0.2;
 
-async function runHybridValidator({ proposal, tracker, repoRoot, runCritic }) {
+function readFileSrc(repoRoot, file) {
+  if (!repoRoot || !file) return undefined;
+  try { return fs.readFileSync(path.resolve(repoRoot, file), 'utf8'); } catch { return undefined; }
+}
+
+function inconclusive(reason, extra = {}) {
+  return { applicable: false, verdict: 'inconclusive', runs: 0, reason, duration_ms: 0, score: 0.5, ...extra };
+}
+
+function vetoReasons({ jury, checks, dt }) {
+  const reasons = [];
+  if (dt && dt.verdict === 'divergent') {
+    const args = dt.counterexample && dt.counterexample.args !== undefined ? JSON.stringify(dt.counterexample.args) : 'n/a';
+    reasons.push(`diff_test_divergent: ${dt.function_name || 'function'} differs on input ${String(args).slice(0, 200)}`);
+  }
+  for (const c of checks) {
+    if (c.severity === 'veto' && !c.passed) reasons.push(`check_veto(${c.check_name}): ${c.detail}`);
+  }
+  // Malformed verdicts (API error / unparseable) count as rejects: with no usable
+  // critic the AST + diff-test terms alone can reach the 0.5 threshold.
+  if (jury.panel.length && jury.panel.every(v => v.preserves_semantics === false)) {
+    const who = jury.panel.map(v => v.malformed ? `${v.persona}(malformed)` : v.persona).join(', ');
+    reasons.push(`unanimous_reject: ${who} say preserves_semantics=false`);
+  }
+  return reasons;
+}
+
+async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runId }) {
+  const traceId = runId || proposal.run_id || undefined;
   const elapsed = (t0) => Number((performance.now() - t0).toFixed(3));
   let t0 = performance.now();
-  const verdict = await runCritic({ proposal, tracker });
+  const jury = await runCritic({ proposal, tracker });
   const criticMs = elapsed(t0);
-  proposal.critic_verdict = verdict;
+  assertJuryVerdict(jury);
+  proposal.critic_verdict = jury;
 
   t0 = performance.now();
   const ast = runChecks({ proposal, repoRoot });
   const astMs = elapsed(t0);
+  ast.checks.forEach(assertCheckResult);
   proposal.pattern_check_results = ast.checks;
 
-  // Differential testing oracle (JS only and only when we can isolate a fn).
-  let dt = null;
+  // Differential testing oracle (JS only), evaluated against the whole file.
+  let dt;
   t0 = performance.now();
   if (/\.(js|cjs|mjs)$/i.test(proposal.file)) {
     try {
       dt = diffTesting.run({
         currentSrc: proposal.current_code,
-        proposedSrc: proposal.proposed_code
+        proposedSrc: proposal.proposed_code,
+        fileSrc: readFileSrc(repoRoot, proposal.file)
       });
-      proposal.diff_test = dt;
     } catch (err) {
-      proposal.diff_test = { applicable: false, reason: `diff-test error: ${err.message}`, score: 0.5 };
-      dt = proposal.diff_test;
+      dt = inconclusive(`diff-test error: ${err.message}`, { duration_ms: elapsed(t0) });
     }
   } else {
-    proposal.diff_test = { applicable: false, reason: 'non-JS file', score: null };
+    dt = inconclusive('non-JS file', { score: null });
   }
   const dtMs = elapsed(t0);
+  assertDiffTest(dt);
+  proposal.diff_test = dt;
 
-  const claudeConf = verdict.claude_confidence || 0;
+  const pPreserves = jury.p_preserves;
   const patternScore = ast.score;
   let combined;
   let weights;
-  if (dt && dt.applicable) {
-    combined = CRITIC_WEIGHT_WITH_DT * claudeConf
+  if (dt.applicable) {
+    combined = CRITIC_WEIGHT_WITH_DT * pPreserves
              + PATTERN_WEIGHT_WITH_DT * patternScore
              + DT_WEIGHT * dt.score;
     weights = { critic: CRITIC_WEIGHT_WITH_DT, ast: PATTERN_WEIGHT_WITH_DT, diff_test: DT_WEIGHT };
   } else {
-    combined = CRITIC_WEIGHT_DEFAULT * claudeConf + PATTERN_WEIGHT_DEFAULT * patternScore;
+    combined = CRITIC_WEIGHT_DEFAULT * pPreserves + PATTERN_WEIGHT_DEFAULT * patternScore;
     weights = { critic: CRITIC_WEIGHT_DEFAULT, ast: PATTERN_WEIGHT_DEFAULT };
   }
   proposal.combined_confidence = Number(combined.toFixed(4));
   proposal.confidence_weights = weights;
 
-  if (proposal.decision_trace) {
-    proposal.decision_trace.push({
-      stage: 'critic',
-      timestamp: new Date().toISOString(),
-      reasoning: verdict.reasoning,
-      confidence: claudeConf,
-      outcome: verdict.preserves_semantics ? 'preserves_semantics' : 'semantics_change_or_unsure',
-      duration_ms: criticMs
+  const reasons = vetoReasons({ jury, checks: ast.checks, dt });
+  proposal.veto = reasons.length ? { vetoed: true, reasons } : null;
+
+  const a = jury.agreement;
+  trace(proposal, 'critic', {
+    reasoning: jury.panel.map(v => `[${v.persona}] ${v.preserves_semantics ? 'preserves' : 'changes'} p=${v.p_preserves.toFixed(2)}: ${v.reasoning}`).join(' '),
+    confidence: pPreserves,
+    outcome: `p_preserves=${pPreserves.toFixed(3)} approval_rate=${a.approval_rate.toFixed(2)} unanimous=${a.unanimous}`,
+    duration_ms: criticMs,
+    trace_id: traceId
+  });
+  trace(proposal, 'ast', {
+    reasoning: ast.checks.map(c => `${c.check_name}:${c.passed ? 'pass' : 'fail'}${c.severity === 'veto' ? '(veto)' : ''}`).join(', '),
+    confidence: patternScore,
+    outcome: `pattern_score=${patternScore.toFixed(3)} lang=${ast.lang || 'unknown'}`,
+    duration_ms: astMs,
+    trace_id: traceId
+  });
+  if (/\.(js|cjs|mjs)$/i.test(proposal.file)) {
+    trace(proposal, 'ast', {
+      reasoning: dt.applicable
+        ? `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, verdict ${dt.verdict}`
+        : `differential testing inconclusive: ${dt.reason || 'n/a'}`,
+      confidence: dt.applicable ? dt.score : null,
+      outcome: dt.verdict === 'divergent'
+        ? `divergent: ${JSON.stringify(dt.counterexample && dt.counterexample.args)}`
+        : dt.verdict,
+      duration_ms: dtMs,
+      trace_id: traceId
     });
-    proposal.decision_trace.push({
-      stage: 'ast',
-      timestamp: new Date().toISOString(),
-      reasoning: ast.checks.map(c => `${c.check_name}:${c.passed ? 'pass' : 'fail'}`).join(', '),
-      confidence: patternScore,
-      outcome: `pattern_score=${patternScore.toFixed(3)} lang=${ast.lang || 'unknown'}`,
-      duration_ms: astMs
-    });
-    if (dt && dt.applicable) {
-      proposal.decision_trace.push({
-        stage: 'ast',
-        timestamp: new Date().toISOString(),
-        reasoning: `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, ${dt.mismatches} mismatches`,
-        confidence: dt.score,
-        outcome: dt.mismatches === 0 ? 'equivalent_under_inputs' : `divergent: ${JSON.stringify(dt.counterexample && dt.counterexample.args)}`,
-        duration_ms: dtMs
-      });
-    }
   }
 
-  return { verdict, ast, diff_test: dt, combined: proposal.combined_confidence };
+  return { verdict: jury, ast, diff_test: dt, combined: proposal.combined_confidence, veto: proposal.veto };
 }
 
 module.exports = {
   runHybridValidator,
+  vetoReasons,
   CRITIC_WEIGHT_DEFAULT,
   PATTERN_WEIGHT_DEFAULT,
   CRITIC_WEIGHT_WITH_DT,

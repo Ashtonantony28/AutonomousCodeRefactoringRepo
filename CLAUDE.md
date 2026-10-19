@@ -88,14 +88,22 @@ proposal payloads for summaries.
 4. **Return-type change** — current function always returns a value; proposed
    version has at least one missing return path.
 
-`pattern_score = (checks passed) / (checks run)`. Combined with the Critic's
-own confidence:
+`pattern_score = (checks passed) / (checks run)`. Each Critic persona returns
+`p_preserves` = P(proposed code preserves the current code's observable
+behaviour); `jury.p_preserves` is the panel mean. Combined:
 
 ```
-combined_confidence = 0.6 * claude_confidence + 0.4 * pattern_score
+combined_confidence = 0.6 * jury.p_preserves + 0.4 * pattern_score
+# when the differential test is applicable (verdict equivalent|divergent):
+combined_confidence = 0.5 * jury.p_preserves + 0.3 * pattern_score + 0.2 * diff_score
 ```
 
-Proposals with `combined_confidence < 0.5` are rejected before Executor.
+Proposals with `combined_confidence < 0.5` are rejected before Executor
+(`critic_rejected`). Independently of the score, a proposal is **vetoed**
+(`test_outcome.status = 'vetoed'`, never reaches the RL gate or Executor) when
+the differential test is `divergent`, any check has `severity: 'veto'` (parse
+errors introduced by the proposal), or every persona says
+`preserves_semantics: false` (malformed verdicts count as false).
 
 ---
 

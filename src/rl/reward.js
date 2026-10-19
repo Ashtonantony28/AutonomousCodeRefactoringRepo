@@ -61,8 +61,9 @@ function disagreementPenalty(proposal) {
   if (!a) return 0;
   // Higher std + non-unanimous + verbal entropy = more disagreement = more penalty.
   let p = 0;
-  if (typeof a.std_confidence === 'number') p += Math.min(1, a.std_confidence * 2);
-  if (a.unanimous_approval === false) p += 0.5;
+  const std = typeof a.std === 'number' ? a.std : a.std_confidence;
+  if (typeof std === 'number') p += Math.min(1, std * 2);
+  if (a.unanimous === false || a.unanimous_approval === false) p += 0.5;
   if (typeof a.verbal_entropy === 'number') p += a.verbal_entropy * 0.3;
   return Math.min(1, p / 2);
 }

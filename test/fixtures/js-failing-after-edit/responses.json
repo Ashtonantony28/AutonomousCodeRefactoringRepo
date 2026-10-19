@@ -1,6 +1,6 @@
 {
   "critic": [
-    { "response": { "preserves_semantics": true, "edge_cases": [], "hallucination_flags": [], "claude_confidence": 0.9, "reasoning": "Looks like a harmless constant change." } }
+    { "response": { "preserves_semantics": true, "edge_cases": [], "hallucination_flags": [], "p_preserves": 0.9, "reasoning": "Looks like a harmless constant change." } }
   ],
   "executor": { "files_to_modify": ["src/greet.js"], "apply_instructions": "replace current_code with proposed_code", "test_command": "npm test", "predicted_outcome": "pass", "predicted_reasoning": "stub plan" },
   "reflexion": "not json"
