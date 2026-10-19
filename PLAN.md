@@ -181,7 +181,7 @@ Audit round 1 fixes: (SG11 ∥ SG12) → (SG9 ∥ SG13) → SG10 → audit round
 - Resume reconciles the session with `refactor/<run_id>` commits (proposal ids in commit trailers) before acting.
 - **Accept:** `node audit/3/resume-scope.js`, `node audit/4/worktree-dirty-sync.js`, `node audit/3/resume-after-commit-crash.js` all pass; dashboard server watches the per-target session.
 - **Verify:** `node --test test/state-dir.test.js test/worktree.test.js test/orchestrator.test.js` (`worktree.test.js` new)
-- **Verify (all):** `npm test && npm test`
+- **Verify (all):** `npm test`
 
 ## Audits (after SG8)
 
