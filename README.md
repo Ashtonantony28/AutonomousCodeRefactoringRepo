@@ -85,19 +85,20 @@ failure clusters, and per-proposal decision traces.
 
 ```
 src/
-  orchestrator.js
+  orchestrator.js · contracts.js
   agents/      analyzer.js · critic.js · executor.js · reflexion.js
   validation/  ast-checker.js · polyglot-ast.js · hybrid-validator.js · diff-testing.js
-  rl/          collector.js · classifier.js · reward.js · calibration.js
+  rl/          features.js · collector.js · classifier.js · reward.js · calibration.js
                counterfactual.js · bug-injector.js
   interpretability/  tracer.js · probe.js · clustering.js · dashboard.js · server.js
   runner/      anchor-matcher.js · reverter.js · test-runner.js
   utils/       file-discovery.js · token-tracker.js · checkpoint.js
                api-cache.js · claude-client.js
-state/         session.json · rl-weights.json · rl-samples.json
+state/         session.json · rl-weights.json · rl-samples.json   (override: REFACTOR_STATE_DIR)
                calibration.json · cache/<hash>.json · runs/<run_id>/spans.ndjson
-dashboard/     dashboard.html
-test/          smoke.js (50 module-level checks, no API calls)
+dashboard/     dashboard.html   (override: REFACTOR_DASHBOARD_DIR)
+test/          *.test.js (node:test, stub Claude client, no API calls) · fixtures/ · helpers/
+bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
 ```
 
 ## Features in detail

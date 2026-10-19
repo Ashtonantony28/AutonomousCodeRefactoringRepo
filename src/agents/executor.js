@@ -60,12 +60,14 @@ async function planExecution({ proposal, tracker, repoRoot }) {
 }
 
 async function runExecutor({ proposal, tracker, repoRoot }) {
+  const tPlan = performance.now();
   const plan = await planExecution({ proposal, tracker, repoRoot });
   proposal.executor_plan = plan;
   trace(proposal, 'executor', {
     reasoning: plan.predicted_reasoning,
     confidence: plan.predicted_outcome === 'pass' ? 0.7 : 0.3,
-    outcome: `predicted_${plan.predicted_outcome}`
+    outcome: `predicted_${plan.predicted_outcome}`,
+    duration_ms: Number((performance.now() - tPlan).toFixed(3))
   });
 
   const snap = new FileSnapshot(repoRoot);
@@ -73,6 +75,7 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
 
   // Apply (uses 4-tier anchor matching internally)
   let edit;
+  const tApply = performance.now();
   try {
     edit = applyEdit({
       repoRoot,
@@ -93,6 +96,8 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
       plan
     };
   }
+
+  const applyDurationMs = Number((performance.now() - tApply).toFixed(3));
 
   // Test
   let testResult;
@@ -151,6 +156,7 @@ async function runExecutor({ proposal, tracker, repoRoot }) {
     match_tier: edit.matchTier,
     match_score: edit.matchScore,
     match_delta: edit.matchDelta,
+    apply_duration_ms: applyDurationMs,
     plan
   };
 }

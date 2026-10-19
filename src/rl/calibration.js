@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_DIR } = require('../utils/checkpoint');
+const { stateDir } = require('../utils/checkpoint');
 
 // Isotonic regression via pool-adjacent-violators (PAVA). Non-parametric,
 // monotone, robust to mis-calibrated linear blends. Used to map raw
@@ -11,12 +11,13 @@ const { STATE_DIR } = require('../utils/checkpoint');
 // Also exposes reliability-diagram bin computation and Expected Calibration
 // Error (ECE) so the dashboard can show the calibration plot.
 
-const MODEL_PATH = path.join(STATE_DIR, 'calibration.json');
+function modelPath() { return path.join(stateDir(), 'calibration.json'); }
 const MIN_SAMPLES = 20;
 const N_BINS = 10;
 
 function ensureDir() {
-  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+  const dir = stateDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 // Sort (x,y) by x, then run PAVA on y. Returns sorted xs and isotonized ys.
@@ -68,14 +69,15 @@ function buildPredictor(fit) {
 
 function save(fit) {
   ensureDir();
-  fs.writeFileSync(MODEL_PATH, JSON.stringify({
+  fs.writeFileSync(modelPath(), JSON.stringify({
     xs: fit.xs, ys: fit.ys, fitted_at: new Date().toISOString(), n: fit.xs.length
   }, null, 2));
 }
 
 function load() {
-  if (!fs.existsSync(MODEL_PATH)) return null;
-  try { return JSON.parse(fs.readFileSync(MODEL_PATH, 'utf8')); } catch { return null; }
+  const p = modelPath();
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
 function loadPredictor() {
@@ -140,6 +142,7 @@ module.exports = {
   fitFromProposals,
   reliabilityBins,
   expectedCalibrationError,
-  MODEL_PATH,
+  modelPath,
   MIN_SAMPLES
 };
+Object.defineProperty(module.exports, 'MODEL_PATH', { enumerable: true, get: modelPath });

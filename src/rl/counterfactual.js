@@ -1,6 +1,7 @@
 'use strict';
 
-const { loadClassifier, sampleToFeatures } = require('./classifier');
+const { loadClassifier } = require('./classifier');
+const { FEATURE_NAMES, extractFeatures } = require('./features');
 
 // Counterfactual feature attribution: for each feature, compute what value
 // it would need to take (within the feature's empirical range) to flip the
@@ -10,26 +11,8 @@ const { loadClassifier, sampleToFeatures } = require('./classifier');
 // Cheap and exact for logistic regression with linear weights — no MC
 // sampling needed. Surfaced on the dashboard as "what-if" sliders.
 
-const FEATURE_NAMES = [
-  'critic_confidence',
-  'pattern_score',
-  'proposal_complexity',
-  'files_changed',
-  'risk_estimate'
-];
-
 function featuresOf(proposal) {
-  // Same shape as the orchestrator's featuresFor (kept in lockstep here so
-  // the counterfactual matches what the gate actually sees).
-  const ast = proposal.pattern_check_results || [];
-  const passed = ast.filter(c => c.passed).length;
-  const patternScore = ast.length ? passed / ast.length : 0.5;
-  const claudeConf = proposal.critic_verdict ? (proposal.critic_verdict.claude_confidence || 0) : 0;
-  const complexity = Math.max(
-    (proposal.proposed_code || '').split('\n').length,
-    (proposal.current_code || '').split('\n').length
-  );
-  return [claudeConf, patternScore, complexity, 1, proposal.risk_estimate || 0];
+  return extractFeatures(proposal);
 }
 
 // Direct contribution = w_j * (x_j - mean_j) / std_j, expressed back in

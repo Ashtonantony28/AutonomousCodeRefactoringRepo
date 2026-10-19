@@ -1,0 +1,11 @@
+[
+  {
+    "issue_id": "js-failing-greeting",
+    "file": "src/greet.js",
+    "current_code": "const GREETING = 'hello';",
+    "proposed_code": "const GREETING = 'hi';",
+    "reasoning": "Shorter greeting.",
+    "risk_estimate": 0.2,
+    "expected_status": "reverted"
+  }
+]

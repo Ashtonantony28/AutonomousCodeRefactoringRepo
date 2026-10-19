@@ -17,6 +17,8 @@
 //
 // Each mutation runs only when it actually changes the source.
 
+const { extractFeatures } = require('./features');
+
 const MUTATIONS = [
   {
     name: 'numeric_off_by_one',
@@ -74,20 +76,22 @@ function injectInto(source) {
 }
 
 // Given a passing proposal, emit synthetic "should-reject" samples.
-function syntheticNegatives(proposal) {
+function syntheticNegatives(proposal, targetRepo = null) {
   if (!proposal || !proposal.test_outcome || proposal.test_outcome.status !== 'passed') return [];
   const muts = injectInto(proposal.proposed_code || '');
+  const parentConf = proposal.critic_verdict ? proposal.critic_verdict.claude_confidence : 0.7;
+  const features = extractFeatures({
+    critic_verdict: { claude_confidence: Math.min(0.99, parentConf + 0.1) },
+    pattern_check_results: [],
+    current_code: '',
+    proposed_code: proposal.proposed_code || '',
+    risk_estimate: proposal.risk_estimate || 0.3
+  });
   return muts.map(m => ({
     proposal_id: `${proposal.issue_id}::${m.mutation}`,
-    file: proposal.file,
-    critic_confidence: Math.min(0.99, (proposal.critic_verdict ? proposal.critic_verdict.claude_confidence : 0.7) + 0.1),
-    pattern_score: 0.5,
-    combined_confidence: 0.7,
-    proposal_complexity: (proposal.proposed_code || '').split('\n').length,
-    files_changed: 1,
-    risk_estimate: proposal.risk_estimate || 0.3,
-    test_passed: false,
-    outcome: 'synthetic_injected_bug',
+    target_repo: targetRepo,
+    features: features.slice(),
+    label: 0,
     synthetic: true,
     mutation: m.mutation,
     timestamp: new Date().toISOString()

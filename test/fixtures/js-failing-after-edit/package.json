@@ -1,0 +1,8 @@
+{
+  "name": "fixture-js-failing-after-edit",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/greet.test.js"
+  }
+}

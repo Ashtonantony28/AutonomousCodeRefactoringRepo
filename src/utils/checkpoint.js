@@ -2,13 +2,27 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 
-const STATE_DIR = path.resolve(__dirname, '..', '..', 'state');
-const SESSION_PATH = path.join(STATE_DIR, 'session.json');
+const DEFAULT_STATE_DIR = path.resolve(__dirname, '..', '..', 'state');
 
-function ensureStateDir() {
-  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+function stateDir() {
+  return process.env.REFACTOR_STATE_DIR ? path.resolve(process.env.REFACTOR_STATE_DIR) : DEFAULT_STATE_DIR;
+}
+
+function sessionPath() {
+  return path.join(stateDir(), 'session.json');
+}
+
+function stateDirFor(targetRepo) {
+  const key = crypto.createHash('sha256').update(path.resolve(targetRepo)).digest('hex');
+  return path.join(stateDir(), 'targets', key);
+}
+
+function ensureStateDir(dir = stateDir()) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function freshSession(targetRepo) {
@@ -27,9 +41,10 @@ function freshSession(targetRepo) {
 
 function loadSession() {
   ensureStateDir();
-  if (!fs.existsSync(SESSION_PATH)) return null;
+  const p = sessionPath();
+  if (!fs.existsSync(p)) return null;
   try {
-    return JSON.parse(fs.readFileSync(SESSION_PATH, 'utf8'));
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch (err) {
     console.error(`[checkpoint] failed to parse session.json: ${err.message}`);
     return null;
@@ -39,9 +54,10 @@ function loadSession() {
 function saveSession(session) {
   ensureStateDir();
   session.updated_at = new Date().toISOString();
-  const tmp = SESSION_PATH + '.tmp';
+  const p = sessionPath();
+  const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(session, null, 2));
-  fs.renameSync(tmp, SESSION_PATH);
+  fs.renameSync(tmp, p);
 }
 
 function loadOrInit(targetRepo, { resume = false } = {}) {
@@ -53,11 +69,15 @@ function loadOrInit(targetRepo, { resume = false } = {}) {
 }
 
 module.exports = {
-  STATE_DIR,
-  SESSION_PATH,
+  DEFAULT_STATE_DIR,
+  stateDir,
+  stateDirFor,
+  sessionPath,
   ensureStateDir,
   freshSession,
   loadSession,
   saveSession,
   loadOrInit
 };
+Object.defineProperty(module.exports, 'STATE_DIR', { enumerable: true, get: stateDir });
+Object.defineProperty(module.exports, 'SESSION_PATH', { enumerable: true, get: sessionPath });

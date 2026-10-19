@@ -1,0 +1,11 @@
+[
+  {
+    "issue_id": "py-basic-total",
+    "file": "calc/ops.py",
+    "current_code": "def total(values):\n    result = 0\n    for v in values:\n        result = result + v\n    return result",
+    "proposed_code": "def total(values):\n    return sum(values)",
+    "reasoning": "Use the builtin sum.",
+    "risk_estimate": 0.1,
+    "expected_status": "passed"
+  }
+]

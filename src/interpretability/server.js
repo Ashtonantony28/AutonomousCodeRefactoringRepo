@@ -16,11 +16,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const SESSION_PATH = path.join(ROOT, 'state', 'session.json');
-const DASHBOARD_HTML = path.join(ROOT, 'dashboard', 'dashboard.html');
-const CALIB_PATH = path.join(ROOT, 'state', 'calibration.json');
-const RL_WEIGHTS_PATH = path.join(ROOT, 'state', 'rl-weights.json');
+const { stateDir, sessionPath } = require('../utils/checkpoint');
+const { dashboardPath } = require('./dashboard');
 
 function sendJSON(res, body, code = 200) {
   const buf = Buffer.from(JSON.stringify(body));
@@ -76,6 +73,7 @@ function broadcast(state, event, data) {
 }
 
 function watchSession(state) {
+  const SESSION_PATH = sessionPath();
   if (!fs.existsSync(path.dirname(SESSION_PATH))) return;
   let lastMtime = 0;
   const tick = () => {
@@ -94,6 +92,10 @@ function watchSession(state) {
 
 function start({ port = 4173, open = false } = {}) {
   const state = {};
+  const SESSION_PATH = sessionPath();
+  const DASHBOARD_HTML = dashboardPath();
+  const CALIB_PATH = path.join(stateDir(), 'calibration.json');
+  const RL_WEIGHTS_PATH = path.join(stateDir(), 'rl-weights.json');
   const server = http.createServer((req, res) => {
     const url = req.url.split('?')[0];
     if (url === '/' || url === '/index.html') return sendFile(res, DASHBOARD_HTML, 'text/html; charset=utf-8');

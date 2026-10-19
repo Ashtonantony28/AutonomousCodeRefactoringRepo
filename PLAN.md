@@ -54,7 +54,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 
 | id | title | depends on | owner | status |
 |---|---|---|---|---|
-| SG0 | Contracts, test harness, fixtures, bench | — | thread worker | proposed |
+| SG0 | Contracts, test harness, fixtures, bench | — | thread worker | done |
 | SG1 | Sound score fusion and vetoes | SG0 | thread worker | proposed |
 | SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | proposed |
 | SG3 | AST and polyglot check precision | SG0 | thread worker | proposed |
@@ -152,3 +152,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | date | SG | result | notes |
 |---|---|---|---|
 | 2026-10-19 | — | plan drafted | awaiting approval |
+| 2026-10-19 | SG0 | green | `npm test` 91/91 (50 smoke assertions migrated), bench all stages within budget, `state/` untouched. Open: RL samples/weights still at the global state dir (`stateDirFor` exists, SG6 switches); `no-tests` fixture's `expected_status` is the SG5 target `skipped_no_tests` (executor still returns `applied_no_tests`). |

@@ -1,0 +1,20 @@
+[
+  {
+    "issue_id": "js-basic-add",
+    "file": "src/math.js",
+    "current_code": "function add(a, b) {\n  const result = a + b;\n  return result;\n}",
+    "proposed_code": "function add(a, b) {\n  return a + b;\n}",
+    "reasoning": "Inline the temporary variable.",
+    "risk_estimate": 0.1,
+    "expected_status": "passed"
+  },
+  {
+    "issue_id": "js-basic-safeparse",
+    "file": "src/math.js",
+    "current_code": "function safeParse(text) {\n  try {\n    return JSON.parse(text);\n  } catch (e) {\n    return null;\n  }\n}",
+    "proposed_code": "function safeParse(text) {\n  return JSON.parse(text);\n}",
+    "reasoning": "Simplify by removing the try/catch.",
+    "risk_estimate": 0.6,
+    "expected_status": "critic_rejected"
+  }
+]

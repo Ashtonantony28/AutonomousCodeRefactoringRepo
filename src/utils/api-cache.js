@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const CACHE_DIR = path.resolve(__dirname, '..', '..', 'state', 'cache');
+const { stateDir } = require('./checkpoint');
+
+function cacheDir() { return path.join(stateDir(), 'cache'); }
 
 let mode = 'off'; // 'off' | 'read-write' | 'replay'
 
@@ -17,7 +19,8 @@ function setMode(m) {
 function getMode() { return mode; }
 
 function ensureDir() {
-  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const dir = cacheDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function hashOf(payload) {
@@ -27,7 +30,7 @@ function hashOf(payload) {
 }
 
 function pathOf(key) {
-  return path.join(CACHE_DIR, key + '.json');
+  return path.join(cacheDir(), key + '.json');
 }
 
 function read(key) {
@@ -59,11 +62,13 @@ async function wrap(payload, liveFn) {
 }
 
 function stats() {
-  if (!fs.existsSync(CACHE_DIR)) return { entries: 0, bytes: 0 };
-  const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json'));
+  const dir = cacheDir();
+  if (!fs.existsSync(dir)) return { entries: 0, bytes: 0 };
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
   let bytes = 0;
-  for (const f of files) bytes += fs.statSync(path.join(CACHE_DIR, f)).size;
+  for (const f of files) bytes += fs.statSync(path.join(dir, f)).size;
   return { entries: files.length, bytes };
 }
 
-module.exports = { setMode, getMode, hashOf, wrap, stats, CACHE_DIR };
+module.exports = { setMode, getMode, hashOf, wrap, stats, cacheDir };
+Object.defineProperty(module.exports, 'CACHE_DIR', { enumerable: true, get: cacheDir });

@@ -2,21 +2,24 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_DIR } = require('../utils/checkpoint');
+const { stateDir } = require('../utils/checkpoint');
+const { FEATURE_NAMES } = require('./features');
 
 let MLLogReg, Matrix;
 try { MLLogReg = require('ml-logistic-regression'); } catch { MLLogReg = null; }
 try { Matrix = require('ml-matrix').Matrix; } catch { Matrix = null; }
 
-const WEIGHTS_PATH = path.join(STATE_DIR, 'rl-weights.json');
-const FEATURE_COUNT = 5;
+function weightsPath() { return path.join(stateDir(), 'rl-weights.json'); }
+const FEATURE_COUNT = FEATURE_NAMES.length;
 const MIN_TRAIN_SAMPLES = 10;
 
 function ensureStateDir() {
-  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+  const dir = stateDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function sampleToFeatures(s) {
+  if (Array.isArray(s.features)) return s.features.map(v => Number(v) || 0);
   return [
     Number(s.critic_confidence) || 0,
     Number(s.pattern_score) || 0,
@@ -24,6 +27,11 @@ function sampleToFeatures(s) {
     Number(s.files_changed) || 1,
     Number(s.risk_estimate) || 0
   ];
+}
+
+function sampleLabel(s) {
+  if (s.label === 0 || s.label === 1) return s.label;
+  return s.test_passed ? 1 : 0;
 }
 
 function sigmoid(z) {
@@ -94,13 +102,14 @@ class Classifier {
 
 function loadWeights() {
   ensureStateDir();
-  if (!fs.existsSync(WEIGHTS_PATH)) return null;
-  try { return JSON.parse(fs.readFileSync(WEIGHTS_PATH, 'utf8')); } catch { return null; }
+  const p = weightsPath();
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
 function saveWeights(weights) {
   ensureStateDir();
-  fs.writeFileSync(WEIGHTS_PATH, JSON.stringify(weights, null, 2));
+  fs.writeFileSync(weightsPath(), JSON.stringify(weights, null, 2));
 }
 
 function loadClassifier() {
@@ -110,7 +119,7 @@ function loadClassifier() {
 function trainIfReady(samples) {
   if (!samples || samples.length < MIN_TRAIN_SAMPLES) return false;
   // Need at least one positive AND one negative example
-  const labels = samples.map(s => s.test_passed ? 1 : 0);
+  const labels = samples.map(sampleLabel);
   const hasPos = labels.includes(1);
   const hasNeg = labels.includes(0);
   if (!hasPos || !hasNeg) return false;
@@ -119,7 +128,7 @@ function trainIfReady(samples) {
   const weights = trainGradientDescent(X, labels);
   weights.trained_at = new Date().toISOString();
   weights.sample_count = samples.length;
-  weights.feature_names = ['critic_confidence', 'pattern_score', 'proposal_complexity', 'files_changed', 'risk_estimate'];
+  weights.feature_names = FEATURE_NAMES.slice();
 
   // Optional: fit ml-logistic-regression as a sanity-check (not persisted as weights)
   if (MLLogReg && Matrix) {
@@ -146,8 +155,10 @@ module.exports = {
   saveWeights,
   trainIfReady,
   sampleToFeatures,
+  sampleLabel,
   trainGradientDescent,
   MIN_TRAIN_SAMPLES,
   FEATURE_COUNT,
-  WEIGHTS_PATH
+  weightsPath
 };
+Object.defineProperty(module.exports, 'WEIGHTS_PATH', { enumerable: true, get: weightsPath });

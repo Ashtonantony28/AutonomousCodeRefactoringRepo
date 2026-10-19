@@ -158,6 +158,7 @@ function normalizeProposal(raw, allowedFiles) {
     risk_estimate: Number.isFinite(risk) ? Math.max(0, Math.min(1, risk)) : 0.5,
     critic_verdict: null,
     pattern_check_results: [],
+    diff_test: null,
     combined_confidence: null,
     test_outcome: null,
     decision_trace: []

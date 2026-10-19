@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { STATE_DIR } = require('../utils/checkpoint');
+const { stateDir } = require('../utils/checkpoint');
 
 const VALID_STAGES = new Set(['analyzer', 'critic', 'ast', 'rl', 'executor']);
 
@@ -46,7 +46,7 @@ function emitSpan(stage, attrs = {}) {
   };
 }
 
-function trace(proposal, stage, { reasoning = '', confidence = null, outcome = '', tokens, model } = {}) {
+function trace(proposal, stage, { reasoning = '', confidence = null, outcome = '', tokens, model, duration_ms } = {}) {
   if (!proposal.decision_trace) proposal.decision_trace = [];
   if (!VALID_STAGES.has(stage)) stage = 'rl';
   const attrs = {};
@@ -65,6 +65,7 @@ function trace(proposal, stage, { reasoning = '', confidence = null, outcome = '
     outcome: String(outcome),
     otel: emitSpan(stage, attrs)
   };
+  if (typeof duration_ms === 'number' && Number.isFinite(duration_ms)) step.duration_ms = duration_ms;
   proposal.decision_trace.push(step);
   return step;
 }
@@ -90,7 +91,7 @@ function classifyFailure(proposal) {
 
 // Optional: append the spans to a per-run NDJSON file, OTel-style.
 function persistRunSpans(runId, proposals) {
-  const dir = path.join(STATE_DIR, 'runs', runId);
+  const dir = path.join(stateDir(), 'runs', runId);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const out = path.join(dir, 'spans.ndjson');
   const lines = [];

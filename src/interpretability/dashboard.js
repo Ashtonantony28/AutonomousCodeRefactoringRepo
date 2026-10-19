@@ -5,8 +5,12 @@ const path = require('path');
 const calibration = require('../rl/calibration');
 const { clusterFailures } = require('./clustering');
 
-const DASHBOARD_DIR = path.resolve(__dirname, '..', '..', 'dashboard');
-const DASHBOARD_PATH = path.join(DASHBOARD_DIR, 'dashboard.html');
+const DEFAULT_DASHBOARD_DIR = path.resolve(__dirname, '..', '..', 'dashboard');
+
+function dashboardDir() {
+  return process.env.REFACTOR_DASHBOARD_DIR ? path.resolve(process.env.REFACTOR_DASHBOARD_DIR) : DEFAULT_DASHBOARD_DIR;
+}
+function dashboardPath() { return path.join(dashboardDir(), 'dashboard.html'); }
 
 function htmlEscape(s) {
   return String(s == null ? '' : s)
@@ -445,10 +449,13 @@ document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
 }
 
 function renderDashboard(session) {
-  if (!fs.existsSync(DASHBOARD_DIR)) fs.mkdirSync(DASHBOARD_DIR, { recursive: true });
+  const dir = dashboardDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const html = renderHtml(session);
-  fs.writeFileSync(DASHBOARD_PATH, html);
-  return DASHBOARD_PATH;
+  const out = dashboardPath();
+  fs.writeFileSync(out, html);
+  return out;
 }
 
-module.exports = { renderDashboard, renderHtml, aggregateStats, reliability, agreementMatrix, DASHBOARD_PATH };
+module.exports = { renderDashboard, renderHtml, aggregateStats, reliability, agreementMatrix, dashboardDir, dashboardPath };
+Object.defineProperty(module.exports, 'DASHBOARD_PATH', { enumerable: true, get: dashboardPath });

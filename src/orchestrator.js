@@ -23,6 +23,7 @@ const { trainIfReady, loadClassifier } = require('./rl/classifier');
 const { computeReward, rollingWarning, rewardBreakdown } = require('./rl/reward');
 const calibration = require('./rl/calibration');
 const bugInjector = require('./rl/bug-injector');
+const { extractFeatures } = require('./rl/features');
 
 const { trace, classifyFailure, persistRunSpans } = require('./interpretability/tracer');
 const { renderDashboard } = require('./interpretability/dashboard');
@@ -62,15 +63,7 @@ function installSignalHandlers(session) {
 }
 
 function featuresFor(p) {
-  const ast = p.pattern_check_results || [];
-  const passed = ast.filter(c => c.passed).length;
-  const patternScore = ast.length ? passed / ast.length : 0.5;
-  const claudeConf = p.critic_verdict ? (p.critic_verdict.claude_confidence || 0) : 0;
-  const complexity = Math.max(
-    (p.proposed_code || '').split('\n').length,
-    (p.current_code || '').split('\n').length
-  );
-  return [claudeConf, patternScore, complexity, 1, p.risk_estimate || 0];
+  return extractFeatures(p);
 }
 
 async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, allowRepair = true, attemptIdx = 0 }) {
@@ -97,13 +90,15 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   // RL gate
   if (classifier.isTrained()) {
+    const t0 = performance.now();
     const features = featuresFor(proposal);
     const pPass = classifier.predict(features);
     proposal.rl_prediction = pPass;
     trace(proposal, 'rl', {
       reasoning: `predicted p_pass=${pPass.toFixed(3)}`,
       confidence: pPass,
-      outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved'
+      outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved',
+      duration_ms: Number((performance.now() - t0).toFixed(3))
     });
     if (pPass < RL_GATE_THRESHOLD) {
       proposal.test_outcome = { status: 'rl_rejected', p_pass: pPass };
@@ -134,7 +129,7 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   session.test_results.push({ proposal_id: proposal.issue_id, ...result });
 
   // Reward / RL sample
-  const sample = collectSample(proposal);
+  const sample = collectSample(proposal, absRepo);
   session.rl_samples.push(sample);
   proposal.reward = computeReward(proposal);
   proposal.reward_breakdown = rewardBreakdown(proposal);
@@ -142,7 +137,7 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   // Synthetic negatives (CriticGPT-style) when the proposal passed cleanly
   if (result.status === 'passed') {
-    const negatives = bugInjector.syntheticNegatives(proposal);
+    const negatives = bugInjector.syntheticNegatives(proposal, absRepo);
     if (negatives.length) {
       session.rl_samples.push(...negatives);
     }
@@ -174,16 +169,19 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   return proposal;
 }
 
-async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarchical = true, serveDashboard = false, dashboardPort = 4173 }) {
+async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarchical = true, serveDashboard = false, dashboardPort = 4173, cli = false }) {
   const absRepo = path.resolve(repo);
   if (!fs.existsSync(absRepo)) {
     logErr(`target repo does not exist: ${absRepo}`);
-    process.exit(2);
+    if (cli) process.exit(2);
+    const err = new Error(`target repo does not exist: ${absRepo}`);
+    err.code = 'ENOREPO';
+    throw err;
   }
   apiCache.setMode(cache);
 
   const session = loadOrInit(absRepo, { resume });
-  installSignalHandlers(session);
+  if (cli) installSignalHandlers(session);
   const tracker = new TokenTracker(session);
   const classifier = loadClassifier();
 
@@ -201,7 +199,7 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
     logWarn('no source files to analyze; nothing to do');
     saveSession(session);
     renderDashboard(session);
-    return;
+    return session;
   }
 
   let analyzerProposals;
@@ -211,7 +209,7 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
     logErr(`analyzer failed: ${err.message}`);
     saveSession(session);
     renderDashboard(session);
-    return;
+    return session;
   }
   for (const p of analyzerProposals) {
     p.decision_trace = p.decision_trace || [];
@@ -243,12 +241,13 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   // Persist OTel-style spans and dashboard
   try { persistRunSpans(session.run_id, session.proposals); } catch (err) { /* */ }
-  renderDashboard(session);
-  logOk('dashboard written: dashboard/dashboard.html');
+  const dashFile = renderDashboard(session);
+  logOk(`dashboard written: ${path.relative(process.cwd(), dashFile) || dashFile}`);
 
   const stats = summarizeRun(session);
   logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected}`);
   saveSession(session);
+  return session;
 }
 
 function summarizeRun(session) {
@@ -291,7 +290,8 @@ if (require.main === module) {
     cache: opts.cache,
     hierarchical: opts.hierarchical !== false,
     serveDashboard: opts.serve,
-    dashboardPort: Number(opts.port) || 4173
+    dashboardPort: Number(opts.port) || 4173,
+    cli: true
   }).catch((err) => {
     console.error(chalk.red('[orch] fatal: '), err);
     process.exit(1);

@@ -8,3 +8,5 @@ state/*.json.bak
 state/cache/
 state/runs/
 dashboard/dashboard.html
+__pycache__/
+.pytest_cache/

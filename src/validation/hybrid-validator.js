@@ -13,14 +13,20 @@ const PATTERN_WEIGHT_WITH_DT = 0.3;
 const DT_WEIGHT              = 0.2;
 
 async function runHybridValidator({ proposal, tracker, repoRoot, runCritic }) {
+  const elapsed = (t0) => Number((performance.now() - t0).toFixed(3));
+  let t0 = performance.now();
   const verdict = await runCritic({ proposal, tracker });
+  const criticMs = elapsed(t0);
   proposal.critic_verdict = verdict;
 
+  t0 = performance.now();
   const ast = runChecks({ proposal, repoRoot });
+  const astMs = elapsed(t0);
   proposal.pattern_check_results = ast.checks;
 
   // Differential testing oracle (JS only and only when we can isolate a fn).
   let dt = null;
+  t0 = performance.now();
   if (/\.(js|cjs|mjs)$/i.test(proposal.file)) {
     try {
       dt = diffTesting.run({
@@ -35,6 +41,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic }) {
   } else {
     proposal.diff_test = { applicable: false, reason: 'non-JS file', score: null };
   }
+  const dtMs = elapsed(t0);
 
   const claudeConf = verdict.claude_confidence || 0;
   const patternScore = ast.score;
@@ -58,14 +65,16 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic }) {
       timestamp: new Date().toISOString(),
       reasoning: verdict.reasoning,
       confidence: claudeConf,
-      outcome: verdict.preserves_semantics ? 'preserves_semantics' : 'semantics_change_or_unsure'
+      outcome: verdict.preserves_semantics ? 'preserves_semantics' : 'semantics_change_or_unsure',
+      duration_ms: criticMs
     });
     proposal.decision_trace.push({
       stage: 'ast',
       timestamp: new Date().toISOString(),
       reasoning: ast.checks.map(c => `${c.check_name}:${c.passed ? 'pass' : 'fail'}`).join(', '),
       confidence: patternScore,
-      outcome: `pattern_score=${patternScore.toFixed(3)} lang=${ast.lang || 'unknown'}`
+      outcome: `pattern_score=${patternScore.toFixed(3)} lang=${ast.lang || 'unknown'}`,
+      duration_ms: astMs
     });
     if (dt && dt.applicable) {
       proposal.decision_trace.push({
@@ -73,7 +82,8 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic }) {
         timestamp: new Date().toISOString(),
         reasoning: `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, ${dt.mismatches} mismatches`,
         confidence: dt.score,
-        outcome: dt.mismatches === 0 ? 'equivalent_under_inputs' : `divergent: ${JSON.stringify(dt.counterexample && dt.counterexample.args)}`
+        outcome: dt.mismatches === 0 ? 'equivalent_under_inputs' : `divergent: ${JSON.stringify(dt.counterexample && dt.counterexample.args)}`,
+        duration_ms: dtMs
       });
     }
   }
