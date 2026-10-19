@@ -192,3 +192,80 @@ test('node builtins are not new dependencies; score is passed/total', () => {
   assert.strictEqual(check(r, 'new_dependency').passed, true);
   assert.strictEqual(r.score, r.checks.filter(c => c.passed).length / r.checks.length);
 });
+
+// SG9: the four CLAUDE.md anti-pattern checks veto on failure.
+test('failing anti-pattern checks are vetoes; passing ones stay score', () => {
+  const cur = "function load(p, opts) {\n  try {\n    return fs.readFileSync(p, opts.encoding || 'utf8');\n  } catch (e) {\n    return null;\n  }\n}";
+  const prop = "function load(p) {\n  const axios = require('axios');\n  if (p) {\n    axios.get(p);\n  }\n}";
+  const dir = repoWith({
+    'src/loader.js': `'use strict';\nconst fs = require('fs');\n${cur}\nmodule.exports = { load };\n`,
+    'src/app.js': "const { load } = require('./loader');\nmodule.exports = () => load('cfg.json', { encoding: 'utf8' });\n"
+  });
+  const r = runChecks({ proposal: makeProposal('src/loader.js', cur, prop), repoRoot: dir });
+  for (const name of ['signature_drift', 'error_handling_removal', 'new_dependency', 'return_type_change']) {
+    const c = check(r, name);
+    assert.strictEqual(c.passed, false, name);
+    assert.strictEqual(c.severity, 'veto', name);
+  }
+  const ok = runChecks({ proposal: makeProposal('index.js', 'function double(x) { return x * 2; }', 'function double(x) { const r = x * 2; return r; }'), repoRoot: repo });
+  for (const c of ok.checks) assert.strictEqual(c.severity, 'score', c.check_name);
+});
+
+test('polyglot anti-pattern check failures are vetoes too', () => {
+  const cur = 'def load(p):\n    try:\n        return open(p).read()\n    except OSError:\n        return None';
+  const prop = 'def load(p):\n    return open(p).read()';
+  const dir = repoWith({ 'm.py': `${cur}\n` });
+  const c = check(runChecks({ proposal: makeProposal('m.py', cur, prop), repoRoot: dir }), 'error_handling_removal');
+  assert.strictEqual(c.passed, false);
+  assert.strictEqual(c.severity, 'veto');
+});
+
+// SG9: the signature_drift scan is bounded (word-boundary filter, file cap, parse cache).
+function countParses(fn) {
+  const babel = require('@babel/parser');
+  const orig = babel.parse;
+  const heads = [];
+  babel.parse = function (src, opts) { heads.push(src.slice(0, 40)); return orig.call(this, src, opts); };
+  try { fn(); } finally { babel.parse = orig; }
+  return heads;
+}
+
+test('signature_drift parses only files naming the function on a word boundary, and caches parses', () => {
+  const cur = 'function tally(a) {\n  return a;\n}';
+  const prop = 'function tally(a, b) {\n  return a + (b || 0);\n}';
+  const files = { 'lib.js': `${cur}\nmodule.exports = { tally };\n` };
+  for (let i = 0; i < 5; i++) files[`near/n${i}.js`] = `// near${i}\nconst tallyTotal = 1;\nfunction untally() { return tallyTotal; }\n`;
+  for (let i = 0; i < 3; i++) files[`word/w${i}.js`] = `// word${i}\nconst label = 'tally';\nmodule.exports = { label };\n`;
+  const dir = repoWith(files);
+  const proposal = makeProposal('lib.js', cur, prop);
+  const first = countParses(() => assert.strictEqual(check(runChecks({ proposal, repoRoot: dir }), 'signature_drift').passed, true));
+  assert.strictEqual(first.filter(s => s.startsWith('// near')).length, 0, 'substring-only matches are not parsed');
+  assert.strictEqual(first.filter(s => s.startsWith('// word')).length, 3);
+  const second = countParses(() => runChecks({ proposal, repoRoot: dir }));
+  assert.strictEqual(second.filter(s => s.startsWith('// word')).length, 0, 'unchanged files come from the parse cache');
+  fs.appendFileSync(path.join(dir, 'word/w0.js'), '// touched\n');
+  const third = countParses(() => runChecks({ proposal, repoRoot: dir }));
+  assert.strictEqual(third.filter(s => s.startsWith('// word')).length, 1, 'a changed file is re-parsed');
+});
+
+test('signature_drift scan is capped and says so; it stops at the first call site', () => {
+  const cur = 'function capme(a) {\n  return a;\n}';
+  const prop = 'function capme(a, b) {\n  return a + (b || 0);\n}';
+  const files = { 'lib.js': `${cur}\nmodule.exports = { capme };\n` };
+  for (let i = 0; i < 205; i++) files[`m/f${i}.js`] = `// mention${i}\nconst name = 'capme';\nmodule.exports = { name };\n`;
+  const dir = repoWith(files);
+  let c;
+  const parsed = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', cur, prop), repoRoot: dir }), 'signature_drift'); });
+  assert.strictEqual(c.passed, true, c.detail);
+  assert.match(c.detail, /capped at 200 files/);
+  assert.strictEqual(parsed.filter(s => s.startsWith('// mention')).length, 200);
+
+  const callers = { 'lib.js': `${cur}\nmodule.exports = { capme };\n` };
+  for (let i = 0; i < 20; i++) callers[`c/c${i}.js`] = `// caller${i}\nconst { capme } = require('../lib');\ncapme(${i});\n`;
+  const dir2 = repoWith(callers);
+  const parsed2 = countParses(() => { c = check(runChecks({ proposal: makeProposal('lib.js', cur, prop), repoRoot: dir2 }), 'signature_drift'); });
+  assert.strictEqual(c.passed, false);
+  assert.strictEqual(c.severity, 'veto');
+  assert.strictEqual(parsed2.filter(s => s.startsWith('// caller')).length, 1, 'scan stops at the first file with a call site');
+  assert.match(c.detail, /stops at the first call site/);
+});

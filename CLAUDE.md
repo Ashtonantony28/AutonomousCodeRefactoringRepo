@@ -128,13 +128,25 @@ combined_confidence = 0.5 * jury.p_preserves + 0.3 * pattern_score + 0.2 * diff_
 ```
 
 Proposals are rejected before Executor (`critic_rejected`) when
-`combined_confidence < 0.5`, OR the jury does not approve on its own: the
-majority `preserves_semantics` must be true AND `jury.p_preserves >= 0.5`
-(`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic. Independently of the score, a proposal is **vetoed**
+`combined_confidence < 0.5`, OR the jury does not approve on its own: a
+majority of `panel[]` says `preserves_semantics: true` AND `jury.p_preserves >= 0.5`
+(`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic.
+Without an `equivalent` diff test the gate fails closed: an `inconclusive`
+diff test that ran inputs (`runs > 0`) is rejected, and any other
+inconclusive/inapplicable one (non-JS, nothing executed) proceeds only with a
+unanimous jury approve and every AST check passed. The gate and fusion read
+only contract fields (`panel`, `p_preserves`, `agreement`; `applicable`,
+`verdict`, `runs`); the diff score is derived from `verdict`. Independently of
+the score, a proposal is **vetoed**
 (`test_outcome.status = 'vetoed'`, never reaches the RL gate or Executor) when
-the differential test is `divergent`, any check has `severity: 'veto'` (parse
-errors introduced by the proposal), or every persona says
-`preserves_semantics: false` (malformed verdicts count as false).
+the differential test is `divergent`, any check has `severity: 'veto'` (any
+failed anti-pattern check above, or parse errors introduced by the proposal),
+or every persona says `preserves_semantics: false` (malformed verdicts count
+as false).
+
+`signature_drift` scans only repo files that name the function on a word
+boundary, parses at most 200 of them (over the cap the check passes with a
+`detail` saying so), stops at the first call site, and caches parses per run.
 
 ---
 

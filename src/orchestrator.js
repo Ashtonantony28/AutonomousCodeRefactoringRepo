@@ -14,7 +14,7 @@ const apiCache = require('./utils/api-cache');
 
 const { runAnalyzer } = require('./agents/analyzer');
 const { runCritic } = require('./agents/critic');
-const { runHybridValidator } = require('./validation/hybrid-validator');
+const { runHybridValidator, unconfirmedBlock, juryVotes } = require('./validation/hybrid-validator');
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
 const { FileSnapshot } = require('./runner/reverter');
@@ -62,6 +62,19 @@ function featuresFor(p) {
   return extractFeatures(p);
 }
 
+// Pre-RL gate on contract fields only. -> rejection reason, or null to proceed.
+function criticGate(proposal) {
+  const jury = proposal.critic_verdict;
+  const votes = juryVotes(jury);
+  const p = jury && typeof jury.p_preserves === 'number' ? jury.p_preserves : null;
+  if (!votes.majority || p === null || p < MIN_CRITIC_P) {
+    return `critic jury does not approve (${votes.approve}/${votes.n} preserves_semantics, p_preserves=${p === null ? 'n/a' : p}, need majority and >= ${MIN_CRITIC_P})`;
+  }
+  if (!(proposal.combined_confidence >= REJECT_THRESHOLD)) return `combined_confidence < ${REJECT_THRESHOLD}`;
+  const block = unconfirmedBlock({ jury, checks: proposal.pattern_check_results, dt: proposal.diff_test });
+  return block ? `unconfirmed edit: ${block}` : null;
+}
+
 // `work` = { root, info, snapshotPath }: where edits are validated, applied
 // and tested (the run's worktree, or the target itself in dry-run / non-git
 // fallback). `absRepo` is the target, used only as the sample label.
@@ -92,12 +105,8 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     return proposal;
   }
 
-  const jury = proposal.critic_verdict;
-  const criticOk = !!jury && jury.preserves_semantics === true && (jury.p_preserves || 0) >= MIN_CRITIC_P;
-  if ((proposal.combined_confidence || 0) < REJECT_THRESHOLD || !criticOk) {
-    const reason = !criticOk
-      ? `critic jury does not approve (majority preserves_semantics=${!!(jury && jury.preserves_semantics)}, p_preserves=${jury ? jury.p_preserves : 'n/a'}, need >= ${MIN_CRITIC_P})`
-      : `combined_confidence < ${REJECT_THRESHOLD}`;
+  const reason = criticGate(proposal);
+  if (reason) {
     proposal.test_outcome = { status: 'critic_rejected', reason };
     trace(proposal, 'critic', {
       reasoning: `${reason}; rejecting`,
@@ -400,4 +409,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runPipeline, processProposal, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, criticGate, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, featuresFor, summarizeRun };

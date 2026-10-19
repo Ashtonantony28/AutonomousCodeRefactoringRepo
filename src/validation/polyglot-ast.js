@@ -510,21 +510,21 @@ function checkSignatureDrift(before, after, ctx = {}) {
     return { check_name: 'signature_drift', passed: true, detail: 'no signature changes', severity: 'score' };
   }
   if (!ctx.repoRoot) {
-    return { check_name: 'signature_drift', passed: false, severity: 'score', detail: `${all.map(describe).join('; ')}; call sites not checked (no repo root)` };
+    return { check_name: 'signature_drift', passed: false, severity: 'veto', detail: `${all.map(describe).join('; ')}; call sites not checked (no repo root)` };
   }
   const hits = findCallSites({ lang: before.lang, names: [...new Set(all.map(d => d.name))], file: ctx.file, proposedSrc: ctx.proposedSrc || '', region: ctx.region, repoRoot: ctx.repoRoot });
   const where = hits.map(h => `${h.name} in ${h.file} (${h.count})`).join(', ');
   return {
     check_name: 'signature_drift',
     passed: hits.length === 0,
-    severity: 'score',
+    severity: hits.length ? 'veto' : 'score',
     detail: `${all.map(describe).join('; ')}; ${hits.length ? `call sites outside edit: ${where}` : 'no call sites outside edit'}`
   };
 }
 
 function checkErrorHandlingRemoval(before, after) {
   if (before.tryCount > 0 && after.tryCount < before.tryCount) {
-    return { check_name: 'error_handling_removal', passed: false, severity: 'score', detail: `error-handling blocks: ${before.tryCount} → ${after.tryCount}` };
+    return { check_name: 'error_handling_removal', passed: false, severity: 'veto', detail: `error-handling blocks: ${before.tryCount} → ${after.tryCount}` };
   }
   return { check_name: 'error_handling_removal', passed: true, severity: 'score', detail: `before=${before.tryCount} after=${after.tryCount}` };
 }
@@ -539,7 +539,7 @@ function checkNewDependency(before, after, ctx = {}) {
   if (missing.length === 0) {
     return { check_name: 'new_dependency', passed: true, severity: 'score', detail: `added imports are declared: ${added.join(', ')}` };
   }
-  return { check_name: 'new_dependency', passed: false, severity: 'score', detail: `undeclared imports: ${missing.join(', ')}` };
+  return { check_name: 'new_dependency', passed: false, severity: 'veto', detail: `undeclared imports: ${missing.join(', ')}` };
 }
 
 function checkReturnTypeChange(before, after, ctx = {}) {
@@ -555,7 +555,7 @@ function checkReturnTypeChange(before, after, ctx = {}) {
   if (regressed.length === 0) {
     return { check_name: 'return_type_change', passed: true, severity: 'score', detail: 'all functions still return' };
   }
-  return { check_name: 'return_type_change', passed: false, severity: 'score', detail: `missing return in: ${regressed.join(', ')}` };
+  return { check_name: 'return_type_change', passed: false, severity: 'veto', detail: `missing return in: ${regressed.join(', ')}` };
 }
 
 function runChecks({ file, currentSrc, proposedSrc, repoRoot, region }) {

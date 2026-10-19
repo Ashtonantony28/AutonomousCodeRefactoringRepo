@@ -16,7 +16,9 @@ Orchestrator
   │
   ├── AST checker  ─► Babel (JS/TS) + polyglot regex (Python / Go / Ruby)
   │                   four anti-patterns: signature drift, error-handling
-  │                   removal, new-dep, return-path regression
+  │                   removal, new-dep, return-path regression (each a veto
+  │                   when it fails; the call-site scan parses at most 200
+  │                   files that name the function, cached per run)
   │
   ├── Differential testing ─► fast-check + vm isolation: input-equivalence
   │                           oracle for JS function refactors
@@ -25,8 +27,11 @@ Orchestrator
   │                       when differential testing is applicable,
   │                       p_preserves 0.6 + ast 0.4 otherwise; gate needs
   │                       combined >= 0.5 AND jury majority approve with
-  │                       p_preserves >= 0.5; hard vetoes
-  │                       (divergent diff test, parse veto, unanimous reject)
+  │                       p_preserves >= 0.5; without an `equivalent` diff
+  │                       test it fails closed (inconclusive after running
+  │                       inputs → rejected; otherwise unanimous approve and
+  │                       every AST check passed); hard vetoes (divergent diff
+  │                       test, failed anti-pattern or parse check, unanimous reject)
   │
   ├── Learned gate ("RL gate") ─► supervised logistic regression on test
   │              outcomes, per target repo, plus isotonic-calibrated

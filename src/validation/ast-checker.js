@@ -265,13 +265,19 @@ function findCallSites({ drifted, proposedAst, region, repoRoot, file, fullSrc }
   if (!repoRoot) return hits;
   const targetAbs = file ? path.resolve(repoRoot, file) : null;
   const names = [...new Set(drifted.map(d => d.callName))];
+  const nameRe = new RegExp(`(?<![\\w$])(?:${names.map(escapeRegExp).join('|')})(?![\\w$])`);
+  let scanned = 0;
   for (const f of polyglot.collectRepoFiles(repoRoot, 500, JS_RE)) {
+    // One call site already fails the check; stop parsing.
+    if (hits.length) { hits.stopped = true; break; }
     if (f === targetAbs) continue;
     const src = polyglot.safeRead(f);
-    if (!src || !names.some(n => src.includes(n))) continue;
+    if (!src || !nameRe.test(src)) continue;
+    if (scanned >= CALL_SCAN_MAX_FILES) { hits.capped = true; break; }
+    scanned++;
     const rel = path.relative(repoRoot, f);
-    const { ast } = parseJs(src, f);
-    if (!ast) {
+    const parsed = parsedCalls(f, src);
+    if (!parsed) {
       const stripped = polyglot.stripCode(src, 'javascript');
       for (const d of drifted) {
         const n = escapeRegExp(d.callName);
@@ -279,16 +285,36 @@ function findCallSites({ drifted, proposedAst, region, repoRoot, file, fullSrc }
         const defs = (stripped.match(new RegExp(`\\bfunction\\s*\\*?\\s*${n}\\s*\\(`, 'g')) || []).length;
         add(d, rel, Math.max(0, calls - defs));
       }
-      continue;
-    }
-    const viaImport = targetAbs ? importsTarget(f, [...collectImports(ast)], targetAbs) : true;
-    const calls = collectCalls(ast);
-    for (const d of drifted) {
-      if (d.kind !== 'method' && !viaImport) continue;
-      add(d, rel, calls.filter(c => callMatches(c, d, viaImport)).length);
+    } else {
+      const viaImport = targetAbs ? importsTarget(f, parsed.imports, targetAbs) : true;
+      for (const d of drifted) {
+        if (d.kind !== 'method' && !viaImport) continue;
+        add(d, rel, parsed.calls.filter(c => callMatches(c, d, viaImport)).length);
+      }
     }
   }
   return hits;
+}
+
+// Parse cache for call-site scans: per process (one run), keyed by path and
+// validated by size + mtime, bounded in entries.
+const CALL_SCAN_MAX_FILES = 200;
+const PARSE_CACHE_MAX = 2000;
+const parseCache = new Map();
+
+function parsedCalls(f, src) {
+  let key = null;
+  try { const st = fs.statSync(f); key = `${st.size}:${st.mtimeMs}:${src.length}`; } catch { /* uncached */ }
+  const hit = key && parseCache.get(f);
+  if (hit && hit.key === key) return hit.value;
+  const { ast } = parseJs(src, f);
+  const value = ast ? { calls: collectCalls(ast), imports: [...collectImports(ast)] } : null;
+  if (key) {
+    parseCache.delete(f);
+    parseCache.set(f, { key, value });
+    if (parseCache.size > PARSE_CACHE_MAX) parseCache.delete(parseCache.keys().next().value);
+  }
+  return value;
 }
 
 function checkSignatureDrift({ currentAst, proposedAst, repoRoot, region = null, file = null, fullSrc = null }) {
@@ -308,11 +334,13 @@ function checkSignatureDrift({ currentAst, proposedAst, repoRoot, region = null,
     ? `${d.qname} removed/renamed${addedNames ? ` (new: ${addedNames})` : ''}`
     : `${d.qname}: ${d.before}→${d.after} args`;
   const where = hits.map(h => `${h.name} in ${h.file} (${h.count})`).join(', ');
+  const scan = hits.stopped ? ' (repo scan stops at the first call site)'
+    : hits.capped ? ` (repo scan capped at ${CALL_SCAN_MAX_FILES} files mentioning the name; rest not checked)` : '';
   return {
     check_name: 'signature_drift',
     passed: hits.length === 0,
-    severity: 'score',
-    detail: `${drift.map(describe).join('; ')}; ${hits.length ? `call sites outside edit: ${where}` : 'no call sites outside edit'}`
+    severity: hits.length ? 'veto' : 'score',
+    detail: `${drift.map(describe).join('; ')}; ${hits.length ? `call sites outside edit: ${where}` : 'no call sites outside edit'}${scan}`
   };
 }
 
@@ -338,7 +366,7 @@ function countTryCatch(src) {
 
 function errorHandlingResult(before, after, how) {
   if (before > 0 && after < before) {
-    return { check_name: 'error_handling_removal', passed: false, severity: 'score', detail: `try/catch or .catch() count went from ${before} to ${after} (${how})` };
+    return { check_name: 'error_handling_removal', passed: false, severity: 'veto', detail: `try/catch or .catch() count went from ${before} to ${after} (${how})` };
   }
   return { check_name: 'error_handling_removal', passed: true, severity: 'score', detail: `before=${before} after=${after} (${how})` };
 }
@@ -432,7 +460,7 @@ function checkNewDependency({ currentAst, proposedAst, repoRoot, file = null }) 
   if (missing.length === 0) {
     return { check_name: 'new_dependency', passed: true, severity: 'score', detail: `added imports declared in package.json: ${added.join(', ')}` };
   }
-  return { check_name: 'new_dependency', passed: false, severity: 'score', detail: `undeclared imports: ${missing.join(', ')}` };
+  return { check_name: 'new_dependency', passed: false, severity: 'veto', detail: `undeclared imports: ${missing.join(', ')}` };
 }
 
 // ---------- Return-type change ----------
@@ -573,7 +601,7 @@ function checkReturnTypeChange({ currentAst, proposedAst, region = null }) {
   if (regressed.length === 0) {
     return { check_name: 'return_type_change', passed: true, severity: 'score', detail: 'all functions still return on all paths' };
   }
-  return { check_name: 'return_type_change', passed: false, severity: 'score', detail: `missing return path in: ${regressed.join(', ')}` };
+  return { check_name: 'return_type_change', passed: false, severity: 'veto', detail: `missing return path in: ${regressed.join(', ')}` };
 }
 
 // ---------- Parse check ----------
@@ -699,5 +727,6 @@ module.exports = {
   collectCalls,
   functionsAlwaysReturn,
   countTryCatch,
-  tryParse
+  tryParse,
+  CALL_SCAN_MAX_FILES
 };

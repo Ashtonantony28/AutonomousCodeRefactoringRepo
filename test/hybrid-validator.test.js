@@ -9,7 +9,7 @@ const { freshSession } = require('../src/utils/checkpoint');
 const { TokenTracker } = require('../src/utils/token-tracker');
 const { runHybridValidator } = require('../src/validation/hybrid-validator');
 const { runCritic, normalizeVerdict, aggregateJury } = require('../src/agents/critic');
-const { processProposal } = require('../src/orchestrator');
+const { processProposal, criticGate } = require('../src/orchestrator');
 const { assertJuryVerdict, assertVerdict, assertCheckResult, assertDiffTest, assertProposal } = require('../src/contracts');
 const { makeTempRepo, makeProposal } = require('./helpers/factories');
 const { installStub, resetClient } = require('./helpers/stub-client');
@@ -202,4 +202,78 @@ test('runCritic output feeds runHybridValidator end to end through the stub clie
   await runHybridValidator({ proposal, tracker, repoRoot: repo, runCritic });
   assert.strictEqual(proposal.critic_verdict.p_preserves, 0.8);
   assert.strictEqual(proposal.critic_verdict.panel.length, 3);
+});
+
+// SG9: fail-closed gate.
+const APPROVE_RAW = { ...base, preserves_semantics: true, p_preserves: 0.9 };
+
+test('a proposal failing all four anti-pattern checks is vetoed despite a unanimous approve', async (t) => {
+  const ctx = setup(t);
+  const cur = "function load(p, opts) {\n  try {\n    return fs.readFileSync(p, opts.encoding || 'utf8');\n  } catch (e) {\n    return null;\n  }\n}";
+  const prop = "function load(p) {\n  const axios = require('axios');\n  if (p) {\n    axios.get(p);\n  }\n}";
+  fs.mkdirSync(path.join(ctx.repo, 'src'));
+  fs.writeFileSync(path.join(ctx.repo, 'src/loader.js'), `'use strict';\nconst fs = require('fs');\n${cur}\nmodule.exports = { load };\n`);
+  fs.writeFileSync(path.join(ctx.repo, 'src/app.js'), "const { load } = require('./loader');\nmodule.exports = () => load('cfg.json', { encoding: 'utf8' });\n");
+  const p = await viaPipeline(ctx, makeProposal('src/loader.js', cur, prop), APPROVE_RAW);
+  assert.strictEqual(p.test_outcome.status, 'vetoed');
+  for (const name of ['signature_drift', 'error_handling_removal', 'new_dependency', 'return_type_change']) {
+    assert(p.veto.reasons.some(r => r.startsWith(`check_veto(${name})`)), `${name}: ${p.veto.reasons.join(' | ')}`);
+  }
+});
+
+test('inconclusive diff test that ran inputs blocks even a unanimous approve (corpus M24)', async (t) => {
+  const ctx = setup(t);
+  const cur = 'function ext(p) {\n  return path.extname(p);\n}';
+  fs.writeFileSync(path.join(ctx.repo, 'ext.js'), `'use strict';\nconst path = require('path');\n${cur}\nmodule.exports = { ext };\n`);
+  const p = await viaPipeline(ctx, makeProposal('ext.js', cur, 'function ext(p) {\n  return path.basename(p);\n}'), APPROVE_RAW);
+  assert.strictEqual(p.diff_test.verdict, 'inconclusive');
+  assert(p.diff_test.runs > 0);
+  assert.strictEqual(p.confidence_weights.diff_test, undefined, 'no diff-test weight without a verdict');
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /could not confirm equivalence/);
+});
+
+test('inapplicable diff test (non-JS) proceeds only with a unanimous approve and all checks passing', async (t) => {
+  const ctx = setup(t);
+  const cur = 'def add(a, b):\n    result = a + b\n    return result';
+  fs.writeFileSync(path.join(ctx.repo, 'm.py'), `${cur}\n`);
+  const prop = 'def add(a, b):\n    return a + b';
+  const split = await viaPipeline(ctx, makeProposal('m.py', cur, prop),
+    perPersona(persona => persona === 'security' ? { ...base, preserves_semantics: false, p_preserves: 0.6 } : APPROVE_RAW));
+  assert.strictEqual(split.diff_test.applicable, false);
+  assert(split.combined_confidence >= 0.5);
+  assert.strictEqual(split.test_outcome.status, 'critic_rejected');
+  assert.match(split.test_outcome.reason, /2\/3 approve \(need unanimous\)/);
+  const unanimous = await viaPipeline(ctx, makeProposal('m.py', cur, prop), APPROVE_RAW);
+  assert.strictEqual(unanimous.test_outcome.status, 'dry_run');
+});
+
+test('fusion and gate use only JuryVerdict / DiffTest contract fields', async (t) => {
+  const { repo, tracker } = setup(t);
+  const diffTesting = require('../src/validation/diff-testing');
+  const realRun = diffTesting.run;
+  diffTesting.run = (args) => {
+    const d = realRun(args);
+    return { applicable: d.applicable, verdict: d.verdict, runs: d.runs, duration_ms: d.duration_ms };
+  };
+  t.after(() => { diffTesting.run = realRun; });
+  const strip = (j) => ({ panel: j.panel, p_preserves: j.p_preserves, agreement: j.agreement });
+  const proposal = makeProposal('index.js', DOUBLE, SAME);
+  const res = await runHybridValidator({ proposal, tracker, repoRoot: repo, runCritic: async () => strip(jury(APPROVE)) });
+  assert.strictEqual(proposal.diff_test.verdict, 'equivalent');
+  assert.strictEqual(proposal.combined_confidence, Number((0.5 * 0.9 + 0.3 * res.ast.score + 0.2).toFixed(4)));
+  assert.strictEqual(criticGate(proposal), null);
+});
+
+test('criticGate derives majority and unanimity from panel[]', () => {
+  const checks = [{ check_name: 'parse', passed: true, detail: '', severity: 'score' }];
+  const inapplicable = { applicable: false, verdict: 'inconclusive', runs: 0, reason: 'non-JS file', duration_ms: 0 };
+  const mk = (raws, extra = {}) => ({ critic_verdict: { ...jury(raws), preserves_semantics: true }, pattern_check_results: checks, diff_test: inapplicable, combined_confidence: 0.9, ...extra });
+  const split = [APPROVE[0], APPROVE[1], { preserves_semantics: false, p_preserves: 0.9 }];
+  assert.match(criticGate(mk(split)), /2\/3 approve/);
+  assert.strictEqual(criticGate(mk(APPROVE)), null);
+  assert.match(criticGate(mk(APPROVE, { pattern_check_results: [{ ...checks[0], passed: false }] })), /failed checks: parse/);
+  assert.match(criticGate(mk(APPROVE, { combined_confidence: 0.4 })), /combined_confidence/);
+  const rejects = [{ preserves_semantics: false, p_preserves: 0.9 }, { preserves_semantics: false, p_preserves: 0.9 }, APPROVE[0]];
+  assert.match(criticGate({ ...mk(rejects), critic_verdict: { ...jury(rejects), preserves_semantics: true } }), /does not approve/);
 });

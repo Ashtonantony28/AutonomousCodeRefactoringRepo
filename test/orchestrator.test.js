@@ -90,3 +90,25 @@ test('a run on another target does not discard a resumable session', async (t) =
   assert.strictEqual(a2.run_id, a1.run_id);
   assert.strictEqual(stub.count('analyzer-propose'), 0);
 });
+
+test('an edit the diff test could not confirm never reaches the executor (fail-closed gate)', async (t) => {
+  const { processProposal } = require('../src/orchestrator');
+  const { freshSession } = require('../src/utils/checkpoint');
+  const { TokenTracker } = require('../src/utils/token-tracker');
+  const { Classifier } = require('../src/rl/classifier');
+  const { makeProposal } = require('./helpers/factories');
+  const path = require('path');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => { resetClient(); env.rm(repo); });
+  const cur = 'function ext(p) {\n  return path.extname(p);\n}';
+  const src = `'use strict';\nconst path = require('path');\n${cur}\nmodule.exports = { ext };\n`;
+  fs.writeFileSync(path.join(repo, 'src', 'ext.js'), src);
+  installStub({ critic: { preserves_semantics: true, p_preserves: 0.95, edge_cases: [], hallucination_flags: [], reasoning: 'same' } });
+  const session = freshSession(repo);
+  const proposal = makeProposal('src/ext.js', cur, 'function ext(p) {\n  return path.basename(p);\n}');
+  session.proposals.push(proposal);
+  await withoutTestContext(() => processProposal({ proposal, session, tracker: new TokenTracker(session), classifier: new Classifier(null), dryRun: false, absRepo: repo, allowRepair: false }));
+  assert.strictEqual(proposal.test_outcome.status, 'critic_rejected', JSON.stringify(proposal.test_outcome));
+  assert.strictEqual(session.test_results.length, 0);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'ext.js'), 'utf8'), src);
+});

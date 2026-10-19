@@ -9,9 +9,12 @@ const { trace } = require('../interpretability/tracer');
 
 // combined = w_c * jury.p_preserves + w_a * pattern_score (+ w_d * diff score)
 // Weights are adaptive:
-//   - if differential testing is applicable, critic=0.5 / ast=0.3 / diff=0.2
-//   - otherwise, critic=0.6 / ast=0.4 (original spec)
+//   - if the diff test is applicable (equivalent|divergent), critic=0.5 / ast=0.3 / diff=0.2
+//   - otherwise, critic=0.6 / ast=0.4 (original spec); an unconfirmed edit
+//     must also clear unconfirmedBlock() in the gate
 // Vetoes (proposal.veto) override the score: see vetoReasons().
+// Only contract fields are read: JuryVerdict {panel, p_preserves, agreement},
+// DiffTest {applicable, verdict, runs, reason}.
 const CRITIC_WEIGHT_DEFAULT  = 0.6;
 const PATTERN_WEIGHT_DEFAULT = 0.4;
 const CRITIC_WEIGHT_WITH_DT  = 0.5;
@@ -24,7 +27,36 @@ function readFileSrc(repoRoot, file) {
 }
 
 function inconclusive(reason, extra = {}) {
-  return { applicable: false, verdict: 'inconclusive', runs: 0, reason, duration_ms: 0, score: 0.5, ...extra };
+  return { applicable: false, verdict: 'inconclusive', runs: 0, reason, duration_ms: 0, ...extra };
+}
+
+function diffScore(dt) {
+  if (!dt || !dt.applicable) return null;
+  return dt.verdict === 'equivalent' ? 1 : dt.verdict === 'divergent' ? 0 : null;
+}
+
+function juryVotes(jury) {
+  const panel = (jury && Array.isArray(jury.panel)) ? jury.panel : [];
+  const approve = panel.filter(v => v.preserves_semantics === true).length;
+  return { n: panel.length, approve, majority: approve * 2 > panel.length, unanimous: panel.length > 0 && approve === panel.length };
+}
+
+// Without an `equivalent` diff test nothing deterministic confirms the edit, so
+// it fails closed: a diff test that exercised the code (runs > 0) but could not
+// confirm equivalence blocks; otherwise every persona must approve and every
+// AST check must pass. -> reason string, or null when the edit may proceed.
+function unconfirmedBlock({ jury, checks, dt }) {
+  if (dt && dt.applicable && dt.verdict === 'equivalent') return null;
+  if (dt && dt.verdict === 'inconclusive' && dt.runs > 0) {
+    return `diff test ran ${dt.runs} input(s) but could not confirm equivalence (${dt.reason || 'inconclusive'})`;
+  }
+  const votes = juryVotes(jury);
+  const failed = (checks || []).filter(c => !c.passed).map(c => c.check_name);
+  if (votes.unanimous && !failed.length) return null;
+  const why = [];
+  if (!votes.unanimous) why.push(`jury ${votes.approve}/${votes.n} approve (need unanimous)`);
+  if (failed.length) why.push(`failed checks: ${failed.join(', ')}`);
+  return `diff test ${dt ? dt.verdict : 'missing'} (${(dt && dt.reason) || 'not applicable'}); ${why.join('; ')}`;
 }
 
 function vetoReasons({ jury, checks, dt }) {
@@ -74,7 +106,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
       dt = inconclusive(`diff-test error: ${err.message}`, { duration_ms: elapsed(t0) });
     }
   } else {
-    dt = inconclusive('non-JS file', { score: null });
+    dt = inconclusive('non-JS file');
   }
   const dtMs = elapsed(t0);
   assertDiffTest(dt);
@@ -84,10 +116,11 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
   const patternScore = ast.score;
   let combined;
   let weights;
-  if (dt.applicable) {
+  const dScore = diffScore(dt);
+  if (dScore !== null) {
     combined = CRITIC_WEIGHT_WITH_DT * pPreserves
              + PATTERN_WEIGHT_WITH_DT * patternScore
-             + DT_WEIGHT * dt.score;
+             + DT_WEIGHT * dScore;
     weights = { critic: CRITIC_WEIGHT_WITH_DT, ast: PATTERN_WEIGHT_WITH_DT, diff_test: DT_WEIGHT };
   } else {
     combined = CRITIC_WEIGHT_DEFAULT * pPreserves + PATTERN_WEIGHT_DEFAULT * patternScore;
@@ -119,7 +152,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
       reasoning: dt.applicable
         ? `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, verdict ${dt.verdict}`
         : `differential testing inconclusive: ${dt.reason || 'n/a'}`,
-      confidence: dt.applicable ? dt.score : null,
+      confidence: dScore,
       outcome: dt.verdict === 'divergent'
         ? `divergent: ${JSON.stringify(dt.counterexample && dt.counterexample.args)}`
         : dt.verdict,
@@ -134,6 +167,9 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
 module.exports = {
   runHybridValidator,
   vetoReasons,
+  unconfirmedBlock,
+  juryVotes,
+  diffScore,
   CRITIC_WEIGHT_DEFAULT,
   PATTERN_WEIGHT_DEFAULT,
   CRITIC_WEIGHT_WITH_DT,

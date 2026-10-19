@@ -68,7 +68,7 @@ wrap(bug, 'syntheticNegatives', (ss) => ss.forEach(s => check('bug-injector -> S
 const { runPipeline } = require('../../src/orchestrator');
 const { installStub, resetClient, loadFixtureResponses } = require('../../test/helpers/stub-client');
 const { loadSamples, samplesPath } = collector;
-const { stateDir } = require('../../src/utils/checkpoint');
+const { stateDir, sessionPath } = require('../../src/utils/checkpoint');
 
 function spansOf(runId) {
   const f = path.join(stateDir(), 'runs', runId, 'spans.ndjson');
@@ -112,7 +112,7 @@ async function runFixture(name, { responses, gitRepo = true, label = name } = {}
   }
   for (const s of session.rl_samples) check('session.rl_samples[]', C.assertSample, s);
   for (const s of loadSamples(repo)) check(`per-target ${path.basename(samplesPath(repo))}`, C.assertSample, s);
-  const persisted = JSON.parse(fs.readFileSync(path.join(stateDir(), 'session.json'), 'utf8'));
+  const persisted = JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8'));
   for (const k of SESSION_KEYS) if (!(k in persisted)) violations.push({ fixture: label, boundary: 'session.json schema (CLAUDE.md)', error: `missing ${k}` });
   checkSpans(session);
   const statuses = session.proposals.map(p => `${p.parent_issue_id ? 'repair ' : ''}${p.test_outcome && p.test_outcome.status}`);

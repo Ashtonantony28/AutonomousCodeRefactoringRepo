@@ -42,7 +42,7 @@ function stageSignals(proposal) {
     const passed = ast.filter(c => c.passed).length;
     sig.ast_ok = ast.length ? passed / ast.length : 0;
   }
-  if (proposal.diff_test && proposal.diff_test.applicable) sig.diff_test_ok = proposal.diff_test.score || 0;
+  if (proposal.diff_test && proposal.diff_test.applicable) sig.diff_test_ok = proposal.diff_test.verdict === 'equivalent' ? 1 : 0;
   const status = proposal.test_outcome && proposal.test_outcome.status;
   if (status && status !== 'apply_failed' && status !== 'error') sig.applied = 1;
   if (['passed', 'failed', 'reverted', 'applied_no_tests'].includes(status)) sig.tests_ran = 1;
