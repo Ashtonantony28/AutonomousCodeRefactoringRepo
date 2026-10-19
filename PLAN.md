@@ -59,7 +59,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | done |
 | SG3 | AST and polyglot check precision | SG0 | thread worker | done |
 | SG4 | Safe anchor matching and edit application | SG0 | thread worker | done |
-| SG5 | Executor and session robustness | SG0, SG4 | thread worker | proposed |
+| SG5 | Executor and session robustness | SG0, SG4 | thread worker | done |
 | SG6 | Learning loop on real features | SG0, SG1 | thread worker | proposed |
 | SG7 | Live dashboard, safe rendering, real spans | SG0 | thread worker | done |
 | SG8 | Live end-to-end run on a sample repo | SG1–SG7 | thread worker | proposed |
@@ -110,7 +110,7 @@ Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6)
 - Work in a git worktree on branch `refactor/<run_id>`; one commit per passing proposal; target's working tree never touched. Coverage output stays in the worktree.
 - SIGINT/SIGTERM: revert in-flight edit before exit (snapshot persisted to state dir).
 - Test runner spawned in its own process group; timeout kills the group.
-- No test runner → `skipped_no_tests`, edit reverted (opt-in `--allow-untested` keeps it).
+- No test runner → `skipped_no_tests`, edit reverted. (`--allow-untested` dropped 2026-10-19: it needed a new contract status and keeping untested edits contradicts the safety goal.)
 - Remove the decorative Executor Claude call.
 - `--resume`: no re-analysis when proposals exist; pending repairs are processed. Deterministic `issue_id = sha256(file + current_code)[:16]` so replay cache keys are stable.
 - Either call `pruneContext` per `CLAUDE.md` or update `CLAUDE.md` to the implemented behaviour (decide in SG5, record here).
@@ -158,3 +158,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-19 | SG7 | green | SG7 tests 17/17, `npm test` 133/133, `state/`+`dashboard/` untouched. Per-request render + in-place swap on SSE; inline JSON in `application/json` script with escaping; spans carry trace/parent/start/end; probe wired in; `--serve` server now unref'd (stops at run end). Open for SG1/SG5: orchestrator should import `RL_GATE_THRESHOLD` from `rl/classifier.js` and pass `trace_id` to `trace()`; confirm veto object shape; server watches global `sessionPath()`. |
 | 2026-10-19 | SG3 | green | ast/polyglot tests 26/26, `npm test` after merge with SG7 green, bench ast p95 ~1 ms. `runChecks` adds `splice{ok,reason,occurrences}`; `severity:'veto'` only for parse errors introduced by the proposal. Open for SG1: treat `severity:'veto'` as hard veto. Python/Go remain lexical; Python return check only flags losing all value returns. `@babel/traverse` now unused. |
 | 2026-10-19 | SG1 | green | critic/validator tests 24/24, `npm test` 172/172, bench all stages within budget. Jury `p_preserves` (mean) drives fusion; vetoes (divergent diff test, `severity:'veto'` check, unanimous reject) → `vetoed`; gate also requires jury majority approve AND `p_preserves >= MIN_CRITIC_P` (0.5) so AST+diff can't outvote the critic; `fileSrc` wired; `RL_GATE_THRESHOLD` shared; `run_id`/`trace_id` on traces. Fixture `js-basic-safeparse` now `vetoed` (intended). Malformed critic output counts as reject. Open for SG6: features/bug-injector/classifyFailure still read the `claude_confidence` alias. |
+| 2026-10-19 | SG5 | green | executor+e2e 12/12, `npm test` 184/184, bench within budget. Edits run in a git worktree on `refactor/<run_id>` with one commit per passing proposal (non-git targets fall back in-place with a warning); SIGINT/crash restore via on-disk snapshot; process-group kill; Executor Claude call removed; `apply_failed` carries tier/detail; deterministic issue_id; `--resume` skips Analyzer and runs pending repairs; replay rerun makes 0 calls. `pruneContext` removed, CLAUDE.md updated. `--allow-untested` dropped (would need a contract change). Open: worktrees not cleaned up after runs; dashboard/reward still mention dead `applied_no_tests`. |
