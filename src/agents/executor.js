@@ -25,7 +25,8 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
       repoRoot,
       relPath: proposal.file,
       currentCode: proposal.current_code,
-      proposedCode: proposal.proposed_code
+      proposedCode: proposal.proposed_code,
+      expectedRegion: proposal.validated_region ? proposal.validated_region.text : null
     });
   } catch (err) {
     snap.restoreAll();

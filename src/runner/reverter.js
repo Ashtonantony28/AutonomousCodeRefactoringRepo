@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { findAnchor, AnchorError, reindentReplacement } = require('./anchor-matcher');
+const { findAnchor, AnchorError, reindentReplacement, langOf } = require('./anchor-matcher');
 
 // Snapshots of files about to be edited. With `persistPath` the snapshot is
 // also written to disk (atomically) before any edit so a crash-restart can
@@ -101,16 +101,13 @@ class FileSnapshot {
   }
 }
 
-function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
-  const abs = path.join(repoRoot, relPath);
-  if (!fs.existsSync(abs)) {
-    throw new Error(`target file does not exist: ${relPath}`);
-  }
-  const src = fs.readFileSync(abs, 'utf8');
-
+// Where `currentCode` lands in `src` and what replaces it there.
+// -> { match, region, replacement }; throws (with tier/detail) when the
+// anchor matcher refuses.
+function resolveEdit({ src, relPath, currentCode, proposedCode }) {
   let match;
   try {
-    match = findAnchor(src, currentCode);
+    match = findAnchor(src, currentCode, { lang: langOf(relPath) });
   } catch (err) {
     if (err instanceof AnchorError) {
       const e = new Error(`anchor match failed in ${relPath}: ${err.message}`);
@@ -124,6 +121,24 @@ function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
   // Non-exact tiers: re-indent the replacement to the matched region's
   // indentation (tab-aware; shared helper with the indent-shift tier).
   const replacement = reindentReplacement(src, match, currentCode, proposedCode);
+  return { match, region: src.slice(match.start, match.end), replacement };
+}
+
+// `expectedRegion`: the text the validators judged; the edit is refused
+// (tier 'region') unless the matched region is exactly that text.
+function applyEdit({ repoRoot, relPath, currentCode, proposedCode, expectedRegion = null }) {
+  const abs = path.join(repoRoot, relPath);
+  if (!fs.existsSync(abs)) {
+    throw new Error(`target file does not exist: ${relPath}`);
+  }
+  const src = fs.readFileSync(abs, 'utf8');
+  const { match, region, replacement } = resolveEdit({ src, relPath, currentCode, proposedCode });
+  if (expectedRegion != null && region !== expectedRegion) {
+    const e = new Error(`anchor match failed in ${relPath}: matched region (${match.tier}, offsets ${match.start}-${match.end}) is not the region that was validated`);
+    e.tier = 'region';
+    e.detail = { reason: 'region_changed', match_tier: match.tier, start: match.start, end: match.end };
+    throw e;
+  }
 
   const next = src.slice(0, match.start) + replacement + src.slice(match.end);
   fs.writeFileSync(abs, next);
@@ -135,8 +150,9 @@ function applyEdit({ repoRoot, relPath, currentCode, proposedCode }) {
     matchDelta: match.delta == null ? null : match.delta,
     matchStart: match.start,
     matchEnd: match.end,
+    matchedRegion: region,
     reindented: replacement !== proposedCode
   };
 }
 
-module.exports = { FileSnapshot, applyEdit };
+module.exports = { FileSnapshot, applyEdit, resolveEdit };

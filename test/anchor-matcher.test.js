@@ -102,3 +102,103 @@ test('fuzzy over a 200 KB file finds the unique token-identical window', () => {
   assert.strictEqual(r.tier, 'fuzzy');
   assert.strictEqual(file.slice(r.start, r.end), 'function fn_2000(a, b) {\n  const r2000 = a * 2000 + b;\n  return r2000;\n}');
 });
+
+// ---- SG10: whitespace/fuzzy tiers only accept regions that behave like the anchor
+
+function refusal(fn) {
+  try { fn(); } catch (e) { return e; }
+  return assert.fail('expected the match to be refused');
+}
+
+test('whitespace tier: two reflowed copies of the anchor are ambiguous, never the first copy', () => {
+  const file = 'function f() {\n  return 1;\n}\nfunction g() {}\nfunction f() {\n    return 1;\n}\n';
+  const e = refusal(() => anchor.findAnchor(file, 'function f() { return 1; }'));
+  assert(e instanceof anchor.AnchorError);
+  assert.strictEqual(e.tier, 'whitespace');
+  assert.match(e.message, /2 locations \(whitespace-norm\); ambiguous/);
+  assert.strictEqual(e.detail.occurrences, 2);
+});
+
+test('whitespace tier refuses whitespace changes inside string, template and regex literals', () => {
+  for (const [file, needle] of [
+    ["function b(n) {\n  return 'Total:    ' + n;\n}", "function b(n) {\n  return 'Total: ' + n;\n}"],
+    ['const s = `a\n    b`;', 'const s = `a b`;'],
+    ['const r = /a  b/;\nr.test(x);', 'const r = /a b/; r.test(x);']
+  ]) {
+    const e = refusal(() => anchor.findAnchor(file, needle));
+    assert.strictEqual(e.tier, 'whitespace', needle);
+    assert.strictEqual(e.detail.reason, 'literal_whitespace', needle);
+  }
+});
+
+test('whitespace tier refuses a line break that changes ASI, accepts one that does not', () => {
+  const e = refusal(() => anchor.findAnchor('function total(a, b) {\n  return\n    a + b;\n}\n', 'function total(a, b) {\n  return a + b;\n}'));
+  assert.strictEqual(e.detail.reason, 'asi_boundary');
+  assert.strictEqual(refusal(() => anchor.findAnchor('a = b\n++c;\n', 'a = b ++c;')).detail.reason, 'asi_boundary');
+  assert.strictEqual(anchor.findAnchor('function f() {\n  return 1 +\n    2;\n}', 'function f() { return 1 + 2; }').tier, 'whitespace');
+});
+
+test('whitespace tier refuses a line comment that would swallow code', () => {
+  const e = refusal(() => anchor.findAnchor('x(); // note y();\nz();', 'x(); // note\ny();\nz();'));
+  assert.strictEqual(e.detail.reason, 'comment_boundary');
+});
+
+test('whitespace tier refuses a Python match that changes block structure, keeps a consistent re-indent', () => {
+  const file = 'def stats(xs):\n    total = 0\n    count = 0\n    for x in xs:\n        total += x\n        count += 1\n    return total, count\n';
+  const e = refusal(() => anchor.findAnchor(file, '    for x in xs:\n        total += x\n    count += 1', { lang: 'python' }));
+  assert.strictEqual(e.tier, 'whitespace');
+  assert.strictEqual(e.detail.reason, 'indentation');
+  const ok = anchor.findAnchor('class A:\n    def f(self):\n        if x:\n            y()\n        z()\n', 'def f(self):\n  if x:\n    y()\n  z()', { lang: 'python' });
+  assert.strictEqual(ok.tier, 'whitespace');
+});
+
+test('other languages refuse a moved line break', () => {
+  const e = refusal(() => anchor.findAnchor('func f() int {\n\treturn\n\t\tg()\n}\n', 'func f() int { return g() }', { lang: 'generic' }));
+  assert.strictEqual(e.detail.reason, 'line_structure');
+  assert.strictEqual(anchor.langOf('a/b.go'), 'generic');
+  assert.strictEqual(anchor.langOf('a/b.py'), 'python');
+  assert.strictEqual(anchor.langOf('a/b.tsx'), 'js');
+});
+
+test('fuzzy tier refuses a token-identical window that moves a line break after return', () => {
+  const e = refusal(() => anchor.findAnchor('function f(x) { return\n  x*2;\n}\nmodule.exports = f;\n', 'function f(x) {\n  return x * 2;\n}'));
+  assert.strictEqual(e.tier, 'fuzzy');
+  assert.strictEqual(e.detail.reason, 'asi_boundary');
+});
+
+function nearDupFile(size, blockLines) {
+  const block = (i) => {
+    let b = `function g${i}(a, b) {\n`;
+    for (let k = 0; k < blockLines - 2; k++) b += `  const v${k} = a + b * ${k} - ${i % 10};\n`;
+    return b + '}\n';
+  };
+  let src = '';
+  for (let i = 0; src.length + block(i).length <= size; i++) src += block(i);
+  return { src, block };
+}
+
+test('fuzzy tier is bounded: near-duplicate 200-line blocks in 199 KB decide well under 1 s', () => {
+  const { src, block } = nearDupFile(199000, 200);
+  const needle = block(30).replace('const v0 = a + b', 'const v0 = a - b').replace(/\n {2}/g, '\n    ');
+  const t0 = performance.now();
+  const e = refusal(() => anchor.findAnchor(src, needle));
+  const ms = performance.now() - t0;
+  assert.strictEqual(e.tier, 'fuzzy');
+  assert(ms < 500, `fuzzy tier took ${ms.toFixed(0)} ms`);
+});
+
+test('fuzzy tier stops at its work cap: apply_failed reason fuzzy_budget', () => {
+  const { src } = nearDupFile(30000, 20);
+  const half = src.slice(0, Math.floor(src.length / 2));
+  const needle = half.slice(0, half.lastIndexOf('\n}\n') + 2).replace(/\n {2}/g, '\n\t').replace('a + b * 3', 'a + b * 4');
+  assert.strictEqual(anchor.fuzzyMatch(src, needle, { maxCells: 1000 }).budget, true);
+  const e = refusal(() => anchor.findAnchor(src, needle));
+  assert.strictEqual(e.tier, 'fuzzy');
+  assert.strictEqual(e.detail.reason, 'fuzzy_budget');
+  assert.match(e.message, /^fuzzy_budget: /);
+});
+
+test('exact tier stops counting overlapping occurrences at a cap', () => {
+  const e = refusal(() => anchor.findAnchor('a'.repeat(199000), 'a'.repeat(1000)));
+  assert.match(e.message, /100\+ locations \(exact\)/);
+});

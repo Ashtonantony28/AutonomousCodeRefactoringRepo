@@ -123,3 +123,67 @@ test('fuzzy-tier edit is re-indented to the matched region', (t) => {
   assert.strictEqual(fs.readFileSync(path.join(repo, 'fz.js'), 'utf8'),
     'function outer() {\n    function f(x) {\n        return x * 3;\n    }\n    return f;\n}\n');
 });
+
+// ---- SG10
+
+function writeIn(repo, rel, src) {
+  fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+  fs.writeFileSync(path.join(repo, rel), src);
+}
+
+test('applyEdit reports the region it replaced (matchedRegion)', (t) => {
+  const repo = makeTempRepo();
+  t.after(() => rm(repo));
+  const original = 'const k = 1;\n  function f() {\n    return  1;\n  }\n';
+  writeIn(repo, 'm.js', original);
+  const res = applyEdit({ repoRoot: repo, relPath: 'm.js', currentCode: 'function f() { return 1; }', proposedCode: 'function f() { return 2; }' });
+  assert.strictEqual(res.matchTier, 'whitespace');
+  assert.strictEqual(res.matchedRegion, 'function f() {\n    return  1;\n  }');
+  assert.strictEqual(res.matchedRegion, original.slice(res.matchStart, res.matchEnd));
+});
+
+test('applyEdit refuses (tier region) when the matched region is not the validated one', (t) => {
+  const repo = makeTempRepo();
+  t.after(() => rm(repo));
+  const original = 'function f() {\n  return 1;\n}\n';
+  writeIn(repo, 'v.js', original);
+  assert.throws(
+    () => applyEdit({ repoRoot: repo, relPath: 'v.js', currentCode: 'function f() { return 1; }', proposedCode: 'function f() { return 2; }', expectedRegion: 'function f() { return 1; }' }),
+    (e) => e.tier === 'region' && e.detail.reason === 'region_changed' && e.detail.match_tier === 'whitespace'
+  );
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'v.js'), 'utf8'), original);
+  const ok = applyEdit({ repoRoot: repo, relPath: 'v.js', currentCode: 'function f() { return 1; }', proposedCode: 'function f() { return 2; }', expectedRegion: 'function f() {\n  return 1;\n}' });
+  assert.strictEqual(ok.matchTier, 'whitespace');
+});
+
+test('applyEdit refuses whitespace-tier regions that behave differently (string, ASI, Python blocks) and leaves the file untouched', (t) => {
+  const repo = makeTempRepo();
+  t.after(() => rm(repo));
+  const cases = [
+    ['src/banner.js', "function banner(name) {\n  return 'Total:    ' + name;\n}\n", "function banner(name) {\n  return 'Total: ' + name;\n}", 'literal_whitespace'],
+    ['src/sum.js', 'function total(a, b) {\n  return\n    a + b;\n}\n', 'function total(a, b) {\n  return a + b;\n}', 'asi_boundary'],
+    ['calc/ops.py', 'def stats(xs):\n    total = 0\n    count = 0\n    for x in xs:\n        total += x\n        count += 1\n    return total, count\n', '    for x in xs:\n        total += x\n    count += 1', 'indentation'],
+    ['cmd/main.go', 'func f() int {\n\treturn\n\t\tg()\n}\n', 'func f() int { return g() }', 'line_structure']
+  ];
+  for (const [rel, src, cur, reason] of cases) {
+    writeIn(repo, rel, src);
+    assert.throws(
+      () => applyEdit({ repoRoot: repo, relPath: rel, currentCode: cur, proposedCode: 'x' }),
+      (e) => /anchor match failed/.test(e.message) && e.tier === 'whitespace' && e.detail.reason === reason,
+      rel
+    );
+    assert.strictEqual(fs.readFileSync(path.join(repo, rel), 'utf8'), src, rel);
+  }
+});
+
+test('applyEdit: two reflowed copies are ambiguous at the whitespace tier and neither is edited', (t) => {
+  const repo = makeTempRepo();
+  t.after(() => rm(repo));
+  const original = 'function f() {\n  return 1;\n}\nfunction g() {}\nfunction f() {\n    return 1;\n}\n';
+  writeIn(repo, 'dup.js', original);
+  assert.throws(
+    () => applyEdit({ repoRoot: repo, relPath: 'dup.js', currentCode: 'function f() { return 1; }', proposedCode: 'function f() { return 2; }' }),
+    (e) => e.tier === 'whitespace' && /ambiguous/.test(e.message) && e.detail.occurrences === 2
+  );
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'dup.js'), 'utf8'), original);
+});

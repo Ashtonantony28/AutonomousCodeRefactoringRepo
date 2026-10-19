@@ -89,6 +89,20 @@ test('apply_failed carries the anchor tier and closest window', async (t) => {
   assertTestOutcome(res);
 });
 
+test('apply_failed (tier region) when the anchor no longer lands on the validated region', async (t) => {
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  const proposal = makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED);
+  proposal.validated_region = { tier: 'exact', start: 0, end: 10, text: 'function add(a, b) { return a + b; }' };
+  const res = await runExecutor({ proposal, repoRoot: repo });
+  assert.strictEqual(res.status, 'apply_failed');
+  assert.strictEqual(res.tier, 'region');
+  assert.strictEqual(res.detail.reason, 'region_changed');
+  assert.strictEqual(fs.readFileSync(path.join(repo, MATH), 'utf8'), before);
+  assertTestOutcome(res);
+});
+
 test('no test runner: skipped_no_tests and the file is restored', async (t) => {
   const repo = env.copyFixture('no-tests');
   t.after(() => env.rm(repo));

@@ -36,8 +36,8 @@ const MUTANTS = [
     from: 'else process.kill(-proc.pid, signal);', to: 'else proc.kill(signal);' },
   // --- anchor uniqueness at every tier (SG4)
   { id: 'A1', file: 'src/runner/anchor-matcher.js', why: 'whitespace tier silently picks the first of several matches (edit lands in the wrong place)',
-    from: "  const idxs = allIndexes(H, N);\n  if (!idxs.length) return null;\n  if (idxs.length > 1) return { ambiguous: true, count: idxs.length };",
-    to: "  const idxs = allIndexes(H, N);\n  if (!idxs.length) return null;" },
+    from: "  const idxs = allIndexes(H, N, MAX_OCCURRENCES);\n  if (!idxs.length) return null;\n  if (idxs.length > 1) return { ambiguous: true, count: idxs.length };",
+    to: "  const idxs = allIndexes(H, N, MAX_OCCURRENCES);\n  if (!idxs.length) return null;" },
   { id: 'A2', file: 'src/runner/anchor-matcher.js', control: true, why: 'exact tier ignores ambiguity',
     from: "  if (!idxs.length) return null;\n  if (idxs.length > 1) return { ambiguous: true, count: idxs.length };\n  return { start: idxs[0], end: idxs[0] + needle.length };",
     to: "  if (!idxs.length) return null;\n  return { start: idxs[0], end: idxs[0] + needle.length };" },

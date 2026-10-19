@@ -17,7 +17,7 @@ const { runCritic } = require('./agents/critic');
 const { runHybridValidator, unconfirmedBlock, juryVotes } = require('./validation/hybrid-validator');
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
-const { FileSnapshot } = require('./runner/reverter');
+const { FileSnapshot, resolveEdit } = require('./runner/reverter');
 const { killActive } = require('./runner/test-runner');
 const worktree = require('./runner/worktree');
 
@@ -75,6 +75,36 @@ function criticGate(proposal) {
   return block ? `unconfirmed edit: ${block}` : null;
 }
 
+// The validators judge exactly what the executor will replace. The anchor is
+// resolved first (`validated_region`, which the executor requires to match
+// again); unless it is `current_code` verbatim, validation runs on a view
+// holding the matched region and the re-indented replacement (from the line
+// start when only indentation precedes the region). -> view, or null.
+function regionView(proposal, root) {
+  delete proposal.validated_region;
+  if (!proposal.decision_trace) proposal.decision_trace = [];
+  let r;
+  let src;
+  try {
+    src = fs.readFileSync(path.join(root, proposal.file), 'utf8');
+    r = resolveEdit({ src, relPath: proposal.file, currentCode: proposal.current_code, proposedCode: proposal.proposed_code });
+  } catch {
+    return null; // the executor reports the anchor failure as apply_failed
+  }
+  proposal.validated_region = { tier: r.match.tier, start: r.match.start, end: r.match.end, text: r.region };
+  if (r.region === proposal.current_code && r.replacement === proposal.proposed_code) return null;
+  const before = src.slice(src.lastIndexOf('\n', r.match.start - 1) + 1, r.match.start);
+  const lead = /^[ \t]*$/.test(before) ? before : '';
+  return { ...proposal, current_code: lead + r.region, proposed_code: lead + r.replacement };
+}
+
+function adoptValidation(proposal, view) {
+  if (!view) return;
+  for (const [k, v] of Object.entries(view)) {
+    if (k !== 'current_code' && k !== 'proposed_code') proposal[k] = v;
+  }
+}
+
 // `work` = { root, info, snapshotPath }: where edits are validated, applied
 // and tested (the run's worktree, or the target itself in dry-run / non-git
 // fallback). `absRepo` is the target, used only as the sample label.
@@ -82,10 +112,13 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   const trace_id = session.run_id;
   if (!work) work = { root: absRepo, info: null, snapshotPath: inflightPath(absRepo) };
   proposal.run_id = session.run_id;
-  // Hybrid critic + AST + diff-testing
+  // Hybrid critic + AST + diff-testing, on the region the executor will replace
+  const view = regionView(proposal, work.root);
   try {
-    await runHybridValidator({ proposal, tracker, repoRoot: work.root, runCritic, runId: session.run_id });
+    await runHybridValidator({ proposal: view || proposal, tracker, repoRoot: work.root, runCritic, runId: session.run_id });
+    adoptValidation(proposal, view);
   } catch (err) {
+    adoptValidation(proposal, view);
     logErr(`hybrid validator error on ${proposal.file}: ${err.message}`);
     trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
     proposal.combined_confidence = 0;

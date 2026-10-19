@@ -54,10 +54,19 @@ function load(src) {
       const { proposal } = await throughGate({ repo, file: c.file, current: c.cur, proposed: c.prop });
       const s = summary(proposal);
       const before = fs.readFileSync(path.join(repo, c.file), 'utf8');
-      const edit = applyEdit({ repoRoot: repo, relPath: c.file, currentCode: c.cur, proposedCode: c.prop });
-      const after = fs.readFileSync(path.join(repo, c.file), 'utf8');
       console.log(`\n== ${c.id}`);
       console.log(`gate: status=${s.status} combined=${s.combined} dt=${s.diff_test} failed_checks=[${s.failed_checks}]`);
+      const vr = proposal.validated_region;
+      console.log(`validated on: ${vr ? `matched region (tier=${vr.tier})` : 'current_code (anchor did not resolve)'}`);
+      let edit;
+      try {
+        edit = applyEdit({ repoRoot: repo, relPath: c.file, currentCode: c.cur, proposedCode: c.prop, expectedRegion: vr ? vr.text : null });
+      } catch (err) {
+        console.log(`RESULT: refused (tier=${err.tier} reason=${err.detail && err.detail.reason}): ${err.message}`);
+        continue;
+      }
+      const after = fs.readFileSync(path.join(repo, c.file), 'utf8');
+      console.log(`RESULT: ${vr && vr.text === before.slice(edit.matchStart, edit.matchEnd) ? 'validated on the applied region' : 'APPLIED A REGION THAT WAS NOT VALIDATED'}`);
       console.log(`verbatim in file: ${before.includes(c.cur)}; applied via tier=${edit.matchTier}`);
       console.log(`replaced region: ${JSON.stringify(before.slice(edit.matchStart, edit.matchEnd))}`);
       console.log(`validated as:    ${JSON.stringify(c.cur)}`);

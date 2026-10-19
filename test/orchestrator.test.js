@@ -112,3 +112,53 @@ test('an edit the diff test could not confirm never reaches the executor (fail-c
   assert.strictEqual(session.test_results.length, 0);
   assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'ext.js'), 'utf8'), src);
 });
+
+// SG10: the validators judge the region the executor will replace.
+async function gateOnly(repo, file, cur, prop, prompts) {
+  const { processProposal } = require('../src/orchestrator');
+  const { freshSession } = require('../src/utils/checkpoint');
+  const { TokenTracker } = require('../src/utils/token-tracker');
+  const { Classifier } = require('../src/rl/classifier');
+  const { makeProposal } = require('./helpers/factories');
+  installStub({ critic: ({ user }) => { prompts.push(user); return { preserves_semantics: true, p_preserves: 0.95, edge_cases: [], hallucination_flags: [], reasoning: 'same' }; } });
+  const session = freshSession(repo);
+  const proposal = makeProposal(file, cur, prop);
+  session.proposals.push(proposal);
+  await processProposal({ proposal, session, tracker: new TokenTracker(session), classifier: new Classifier(null), dryRun: true, absRepo: repo, allowRepair: false });
+  return proposal;
+}
+
+test('a non-verbatim anchor is validated on the matched region: indent-shifted template literal is vetoed', async (t) => {
+  const path = require('path');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => { resetClient(); env.rm(repo); });
+  const src = "'use strict';\nfunction greet() {\n  const s = `a\n  b`;\n  return s;\n}\nmodule.exports = { greet };\n";
+  fs.writeFileSync(path.join(repo, 'src', 'greet.js'), src);
+  const cur = 'const s = `a\nb`;\nreturn s;';
+  const prompts = [];
+  const proposal = await gateOnly(repo, 'src/greet.js', cur, "const s = 'a\\nb';\nreturn s;", prompts);
+  assert.strictEqual(proposal.validated_region.tier, 'indent-shift');
+  assert.strictEqual(proposal.validated_region.text, '  const s = `a\n  b`;\n  return s;');
+  assert(prompts.some(u => u.includes('  const s = `a\n  b`;')), 'critic saw the matched region');
+  assert.strictEqual(proposal.diff_test.verdict, 'divergent', JSON.stringify(proposal.diff_test));
+  assert.strictEqual(proposal.test_outcome.status, 'vetoed', JSON.stringify(proposal.test_outcome));
+  assert.strictEqual(proposal.current_code, cur);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'greet.js'), 'utf8'), src);
+});
+
+test('a reflowed anchor is validated on the file text it maps to, current_code kept', async (t) => {
+  const path = require('path');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => { resetClient(); env.rm(repo); });
+  const src = "'use strict';\nfunction twice(x) {\n  const y = x * 2;\n  return y;\n}\nmodule.exports = { twice };\n";
+  fs.writeFileSync(path.join(repo, 'src', 'twice.js'), src);
+  const cur = 'function twice(x) { const y = x * 2; return y; }';
+  const prompts = [];
+  const proposal = await gateOnly(repo, 'src/twice.js', cur, 'function twice(x) { return x * 2; }', prompts);
+  assert.strictEqual(proposal.validated_region.tier, 'whitespace');
+  assert.strictEqual(proposal.validated_region.text, 'function twice(x) {\n  const y = x * 2;\n  return y;\n}');
+  assert(prompts.length && prompts.every(u => u.includes('function twice(x) {\n  const y = x * 2;\n  return y;\n}')), 'critic saw the file region');
+  assert.strictEqual(proposal.diff_test.verdict, 'equivalent', JSON.stringify(proposal.diff_test));
+  assert.strictEqual(proposal.test_outcome.status, 'dry_run', JSON.stringify(proposal.test_outcome));
+  assert.strictEqual(proposal.current_code, cur);
+});
