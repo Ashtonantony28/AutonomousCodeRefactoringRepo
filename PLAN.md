@@ -56,7 +56,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 |---|---|---|---|---|
 | SG0 | Contracts, test harness, fixtures, bench | — | thread worker | done |
 | SG1 | Sound score fusion and vetoes | SG0 | thread worker | proposed |
-| SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | proposed |
+| SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | done |
 | SG3 | AST and polyglot check precision | SG0 | thread worker | proposed |
 | SG4 | Safe anchor matching and edit application | SG0 | thread worker | proposed |
 | SG5 | Executor and session robustness | SG0, SG4 | thread worker | proposed |
@@ -153,3 +153,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 |---|---|---|---|
 | 2026-10-19 | — | plan drafted | awaiting approval |
 | 2026-10-19 | SG0 | green | `npm test` 91/91 (50 smoke assertions migrated), bench all stages within budget, `state/` untouched. Open: RL samples/weights still at the global state dir (`stateDirFor` exists, SG6 switches); `no-tests` fixture's `expected_status` is the SG5 target `skipped_no_tests` (executor still returns `applied_no_tests`). |
+| 2026-10-19 | SG2 | green | `node --test test/diff-testing.test.js` 23/23, `npm test` 112/112, bench difftest p50 78 ms / p95 119 ms (budget 2000). Sync API kept (worker + `Atomics.wait`). Open: `hybrid-validator.js` does not pass `fileSrc` yet (SG1 wiring); edits to non-callables (e.g. a constant) are `inconclusive`; `run` blocks the event loop up to the 3 s hard kill. |

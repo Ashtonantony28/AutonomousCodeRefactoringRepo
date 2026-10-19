@@ -1,109 +1,206 @@
 'use strict';
 
-// Differential testing oracle. Given a refactoring proposal that touches a
-// pure(-ish) function, sandbox both the current and proposed source in two
-// isolated vm contexts, then run fast-check property-based input generation
-// against both. If the output for some input differs (or one throws while
-// the other doesn't), the refactor is not semantics-preserving.
+// Differential testing oracle. Both the current and the proposed source are
+// loaded into isolated vm contexts inside a worker_thread (resource-limited,
+// empty env, killed after HARD_KILL_MS) and the target function is called
+// with the same generated inputs on both sides. Inputs are passed as source
+// literals and re-materialised inside each context on every call, so each
+// side gets a fresh deep copy that lives in its own realm (stronger than
+// structuredClone: no host object is ever handed to evaluated code).
 //
-// Returns a result {applicable, runs, mismatches, sample, score} where:
-//   - applicable: false if we couldn't locate a callable function or build
-//     a sandbox (e.g. file is React JSX, has top-level await, etc.)
-//   - score: in [0,1]; mismatches/runs subtracted from 1 (capped at 0)
+// Result (src/contracts.js DiffTest):
+//   { applicable, verdict: 'equivalent'|'divergent'|'inconclusive', runs,
+//     counterexample?, reason?, duration_ms }
+// plus legacy fields for hybrid-validator.js: score (1 / 0 / 0.5),
+// mismatches, function_name, arity, mode ('file'|'snippet').
 //
-// Designed to be FAST and SAFE — small input space, short timeouts. The
-// idea (Le et al. PLDI'14 + Mokav 2024) is to use generated equivalence
-// modulo inputs as a high-value pattern check.
+// run() is synchronous: the caller blocks on Atomics.wait until the worker
+// reports or the hard kill fires.
 
-const vm = require('vm');
+const path = require('path');
+const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads');
+const { parse } = require('@babel/parser');
 
 let fc;
 try { fc = require('fast-check'); } catch { fc = null; }
 
-const RUN_TIMEOUT_MS = 1500;
+const WORKER_FILE = path.join(__dirname, 'diff-sandbox-worker.js');
 const MAX_RUNS = 25;
+const HARD_KILL_MS = 3000;
+const BUDGET_MS = 1500;
+const CALL_TIMEOUT_MS = 250;
+const LOAD_TIMEOUT_MS = 1000;
+const SEED = 42;
+const CLASS_WRAP = '__DT_Class__';
+const RESOURCE_LIMITS = { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 16, stackSizeMb: 4 };
 
-function buildSandbox(src) {
-  const sandbox = { module: { exports: {} }, exports: {}, console: { log: () => {}, warn: () => {}, error: () => {} }, require: stubRequire };
-  sandbox.exports = sandbox.module.exports;
-  const ctx = vm.createContext(sandbox, { name: 'diff-test' });
+function tryParse(src) {
   try {
-    const script = new vm.Script(src, { filename: 'sandbox.js' });
-    script.runInContext(ctx, { timeout: RUN_TIMEOUT_MS });
-  } catch (err) {
-    return { ok: false, error: err.message };
+    return parse(src, {
+      sourceType: 'unambiguous',
+      allowReturnOutsideFunction: true,
+      allowAwaitOutsideFunction: false,
+      errorRecovery: false
+    });
+  } catch {
+    return null;
   }
-  return { ok: true, ctx, sandbox };
 }
 
-function stubRequire(name) {
-  // Allow a tiny allowlist of stdlib modules; everything else returns a
-  // proxy that records access but never crashes.
-  if (name === 'util') return require('util');
-  if (name === 'path') return require('path');
-  if (name === 'url') return require('url');
-  return new Proxy(function () {}, {
-    get: () => stubRequire('_'),
-    apply: () => undefined
-  });
+function paramCount(fn) {
+  return fn.params.length;
 }
 
-function findExport(sandbox, name) {
-  if (sandbox.module && sandbox.module.exports && typeof sandbox.module.exports[name] === 'function') {
-    return sandbox.module.exports[name];
-  }
-  if (sandbox.exports && typeof sandbox.exports[name] === 'function') return sandbox.exports[name];
-  // Some sources do `function foo(){}` without exporting — check the
-  // sandbox global directly.
-  if (typeof sandbox[name] === 'function') return sandbox[name];
-  return null;
+function isFn(n) {
+  return n && (n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression');
 }
 
-function detectFunctionName(src) {
-  // Patterns tried in order:
-  //   function NAME(...) {}
-  //   const|let|var NAME = ...
-  //   module.exports.NAME = ...
-  //   module.exports = function NAME(...)
-  //   exports.NAME = ...
-  //   exports.NAME = function NAME(...)
-  const patterns = [
-    /\bfunction\s+([A-Za-z_]\w*)\s*\(/,
-    /^\s*(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:function\s*\(|\(|[A-Za-z_$])/m,
-    /\bmodule\.exports\.([A-Za-z_]\w*)\s*=/,
-    /\bexports\.([A-Za-z_]\w*)\s*=/
-  ];
-  for (const re of patterns) {
-    const m = src.match(re);
-    if (m) return m[1];
-  }
-  return null;
+function memberName(n) {
+  if (!n || n.type !== 'MemberExpression' || n.computed) return null;
+  return n.property.type === 'Identifier' ? n.property.name : null;
 }
 
-function detectArity(src, name) {
-  // Try a few common shapes — function decl, `NAME = function(args)`,
-  // `NAME = (args) =>`, `module.exports.NAME = function(args)`.
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const candidates = [
-    new RegExp(`\\bfunction\\s+${escapedName}\\s*\\(([^)]*)\\)`),
-    new RegExp(`\\b${escapedName}\\s*=\\s*(?:async\\s*)?function\\s*[A-Za-z_]*\\s*\\(([^)]*)\\)`),
-    new RegExp(`\\b${escapedName}\\s*=\\s*(?:async\\s*)?\\(([^)]*)\\)\\s*=>`),
-    new RegExp(`\\bmodule\\.exports\\.${escapedName}\\s*=\\s*(?:async\\s*)?function\\s*[A-Za-z_]*\\s*\\(([^)]*)\\)`)
-  ];
-  for (const re of candidates) {
-    const m = src.match(re);
-    if (m) {
-      const params = m[1].split(',').map(s => s.trim()).filter(Boolean);
-      return Math.min(Math.max(params.length, 1), 4);
+function isExportsTarget(n) {
+  if (!n || n.type !== 'MemberExpression') return false;
+  const o = n.object;
+  if (o.type === 'Identifier' && o.name === 'exports') return true;
+  return o.type === 'MemberExpression' && o.object.type === 'Identifier' && o.object.name === 'module' && memberName(o) === 'exports';
+}
+
+function classTargets(cls, className, out) {
+  for (const m of cls.body.body) {
+    if (m.type === 'ClassMethod' && m.kind === 'method' && !m.computed && m.key.type === 'Identifier') {
+      out.push({ kind: 'method', className, name: m.key.name, isStatic: !!m.static, params: paramCount(m), start: m.start, end: m.end });
     }
   }
-  return 1;
+}
+
+// Top-level callables of a program: function declarations, const/let/var
+// bound function or arrow expressions, module.exports/exports assignments,
+// and class methods (of declared or variable-bound classes).
+function collectTargets(ast) {
+  const out = [];
+  const visit = (node) => {
+    if (!node) return;
+    switch (node.type) {
+      case 'ExportNamedDeclaration':
+      case 'ExportDefaultDeclaration':
+        visit(node.declaration);
+        break;
+      case 'FunctionDeclaration':
+        if (node.id) out.push({ kind: 'fn', name: node.id.name, params: paramCount(node), start: node.start, end: node.end });
+        break;
+      case 'ClassDeclaration':
+        if (node.id) classTargets(node, node.id.name, out);
+        break;
+      case 'VariableDeclaration':
+        for (const d of node.declarations) {
+          if (d.id.type !== 'Identifier' || !d.init) continue;
+          if (isFn(d.init)) out.push({ kind: 'fn', name: d.id.name, params: paramCount(d.init), start: node.start, end: node.end });
+          else if (d.init.type === 'ClassExpression') classTargets(d.init, d.id.name, out);
+        }
+        break;
+      case 'ExpressionStatement': {
+        const e = node.expression;
+        if (e.type !== 'AssignmentExpression' || !isFn(e.right)) break;
+        const prop = memberName(e.left);
+        if (prop && isExportsTarget(e.left)) {
+          out.push({ kind: 'fn', name: prop, params: paramCount(e.right), start: node.start, end: node.end });
+        } else if (prop === 'exports' && e.left.object.type === 'Identifier' && e.left.object.name === 'module' && e.right.id) {
+          out.push({ kind: 'fn', name: e.right.id.name, params: paramCount(e.right), start: node.start, end: node.end });
+        } else if (e.left.type === 'Identifier') {
+          out.push({ kind: 'fn', name: e.left.name, params: paramCount(e.right), start: node.start, end: node.end });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  };
+  for (const stmt of ast.program.body) visit(stmt);
+  return out;
+}
+
+// Rewrite ES module syntax to something a CommonJS-style wrapper accepts.
+// Imports become sandbox require() stubs; export keywords are dropped.
+function toScript(src, ast) {
+  if (!ast || ast.program.sourceType !== 'module') return src;
+  const edits = [];
+  for (const node of ast.program.body) {
+    if (node.type === 'ImportDeclaration') {
+      const from = JSON.stringify(node.source.value);
+      const text = node.specifiers.map(s => `var ${s.local.name} = require(${from});`).join(' ');
+      edits.push({ start: node.start, end: node.end, text });
+    } else if (node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') {
+      if (node.declaration) edits.push({ start: node.start, end: node.declaration.start, text: '' });
+      else edits.push({ start: node.start, end: node.end, text: '' });
+    } else if (node.type === 'ExportDefaultDeclaration') {
+      const d = node.declaration;
+      const named = (d.type === 'FunctionDeclaration' || d.type === 'ClassDeclaration') && d.id;
+      edits.push({ start: node.start, end: d.start, text: named ? '' : 'module.exports.default = ' });
+    }
+  }
+  edits.sort((a, b) => b.start - a.start);
+  let out = src;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return out;
+}
+
+// Snippet path: the snippet alone, or wrapped in a class when it is a bare
+// method (or several) that does not parse at top level.
+function prepareSnippet(src) {
+  const ast = tryParse(src);
+  if (ast) return { code: toScript(src, ast), targets: collectTargets(ast).map(t => ({ ...t, text: src.slice(t.start, t.end) })), parsed: true };
+  const wrapped = `class ${CLASS_WRAP} {\n${src}\n}`;
+  const wast = tryParse(wrapped);
+  if (wast) return { code: wrapped, targets: collectTargets(wast).map(t => ({ ...t, text: wrapped.slice(t.start, t.end) })), parsed: true };
+  return { code: src, targets: [], parsed: false };
+}
+
+function prepareFile(fileSrc, region, src) {
+  const ast = tryParse(fileSrc);
+  if (!ast) return { code: src, targets: [], parsed: false };
+  const targets = collectTargets(ast)
+    .filter(t => t.start < region.end && t.end > region.start)
+    .map(t => ({ ...t, text: fileSrc.slice(t.start, t.end) }));
+  return { code: toScript(fileSrc, ast), targets, parsed: true };
+}
+
+const keyOf = (t) => `${t.kind}:${t.className || ''}:${t.isStatic ? 's' : ''}:${t.name}`;
+
+function chooseTarget(curTargets, propTargets, functionName) {
+  if (functionName) {
+    return propTargets.find(t => t.name === functionName) || curTargets.find(t => t.name === functionName) || null;
+  }
+  const curByKey = new Map(curTargets.map(t => [keyOf(t), t]));
+  const inBoth = propTargets.filter(t => curByKey.has(keyOf(t)));
+  const changed = inBoth.find(t => curByKey.get(keyOf(t)).text !== t.text);
+  if (changed) return changed;
+  if (inBoth.length) return inBoth[0];
+  if (!propTargets.length) return curTargets[0] || null;
+  return null;
+}
+
+// Proposed inputs as JS source literals, evaluated inside each context.
+function toLiteral(v) {
+  if (v === undefined) return 'undefined';
+  if (v === null) return 'null';
+  if (typeof v === 'number') {
+    if (Number.isNaN(v)) return 'NaN';
+    if (v === Infinity) return 'Infinity';
+    if (v === -Infinity) return '-Infinity';
+    if (Object.is(v, -0)) return '-0';
+    return String(v);
+  }
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'boolean') return String(v);
+  if (typeof v === 'bigint') return `${v}n`;
+  if (Array.isArray(v)) return `[${v.map(toLiteral).join(', ')}]`;
+  if (typeof v === 'object') return `({${Object.keys(v).map(k => `${JSON.stringify(k)}: ${toLiteral(v[k])}`).join(', ')}})`;
+  return 'undefined';
 }
 
 function buildArbitrary(arity) {
-  if (!fc) return null;
-  // Mix integers, small strings, small arrays — keeps the search space
-  // tight but representative.
   const base = fc.oneof(
     fc.integer({ min: -50, max: 50 }),
     fc.float({ noNaN: true, min: -100, max: 100 }),
@@ -112,98 +209,125 @@ function buildArbitrary(arity) {
     fc.constantFrom(null, undefined, 0, ''),
     fc.array(fc.integer({ min: -10, max: 10 }), { maxLength: 4 })
   );
-  const tuple = Array(arity).fill(0).map(() => base);
-  return fc.tuple(...tuple);
+  return fc.tuple(...Array(arity).fill(base));
 }
 
-function safeRun(fn, args) {
+const EDGE_VALUES = [null, undefined, 0, '', [], 1, -1, 'a', [1, 2, 3], true];
+
+function buildInputs(arity, runs) {
+  const tuples = EDGE_VALUES.map(v => Array(arity).fill(v));
+  if (fc && runs > 0) tuples.push(...fc.sample(buildArbitrary(arity), { numRuns: runs, seed: SEED }));
+  return tuples.map(t => ({ args: t, literal: `[${t.map(toLiteral).join(', ')}]` }));
+}
+
+function jsonSafe(v) {
+  try { return JSON.parse(JSON.stringify(v === undefined ? null : v, (k, x) => (typeof x === 'bigint' ? String(x) : x))); } catch { return null; }
+}
+
+function execute(payload, hardKillMs) {
+  const sab = new SharedArrayBuffer(4);
+  const { port1, port2 } = new MessageChannel();
+  let worker;
   try {
-    const out = fn(...args);
-    if (out && typeof out.then === 'function') return { kind: 'async' };
-    return { kind: 'value', value: out };
+    worker = new Worker(WORKER_FILE, {
+      workerData: { ...payload, flag: sab, port: port2 },
+      transferList: [port2],
+      resourceLimits: RESOURCE_LIMITS,
+      env: {},
+      argv: [],
+      execArgv: [],
+      stdout: true,
+      stderr: true
+    });
   } catch (err) {
-    return { kind: 'throw', error: err && err.message };
+    port1.close();
+    return { verdict: 'inconclusive', reason: `worker failed to start: ${err.message}`, runs: 0 };
   }
+  worker.on('error', () => {});
+  worker.unref();
+  Atomics.wait(new Int32Array(sab), 0, 0, Math.max(1, hardKillMs));
+  let result = null, last = null, runs = 0, m;
+  while ((m = receiveMessageOnPort(port1))) {
+    const msg = m.message;
+    if (msg.type === 'result') result = msg.result;
+    else { last = msg; if (msg.type === 'compared') runs = msg.index + 1; }
+  }
+  worker.terminate().catch(() => {});
+  port1.close();
+  if (result) return result;
+  if (last && last.type === 'progress' && last.current.kind !== 'timeout') {
+    return {
+      verdict: 'divergent',
+      runs: last.index + 1,
+      reason: `proposed side still running at the ${HARD_KILL_MS} ms hard kill while current returned`,
+      counterexample: { index: last.index, input: last.input, current: last.current, proposed: { kind: 'timeout', hard_kill: true } }
+    };
+  }
+  return { verdict: 'inconclusive', reason: `hard kill: sandbox did not finish within ${HARD_KILL_MS} ms`, runs };
 }
 
-function equivalent(a, b) {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'throw') return true; // both threw; we count it as equivalent
-  if (a.kind === 'async') return true; // skip async — can't compare cheaply
-  return deepEq(a.value, b.value);
+function finish(t0, fields) {
+  const out = { ...fields, duration_ms: Number((performance.now() - t0).toFixed(3)) };
+  out.applicable = out.verdict !== 'inconclusive';
+  out.score = out.verdict === 'equivalent' ? 1 : out.verdict === 'divergent' ? 0 : 0.5;
+  out.mismatches = out.verdict === 'divergent' ? 1 : 0;
+  if (out.verdict === 'inconclusive' && !out.reason) out.reason = 'inconclusive';
+  return out;
 }
 
-function deepEq(a, b) {
-  if (a === b) return true;
-  if (typeof a === 'number' && typeof b === 'number') {
-    if (Number.isNaN(a) && Number.isNaN(b)) return true;
-    return Math.abs(a - b) < 1e-9;
+function run(opts) {
+  const t0 = performance.now();
+  const { currentSrc, proposedSrc, fileSrc, functionName, arity, runs = MAX_RUNS } = opts;
+  const hardKillMs = opts.hardKillMs || HARD_KILL_MS;
+  if (typeof currentSrc !== 'string' || typeof proposedSrc !== 'string') {
+    return finish(t0, { verdict: 'inconclusive', reason: 'currentSrc and proposedSrc must be strings', runs: 0 });
   }
-  if (a == null || b == null) return a === b;
-  if (typeof a !== 'object' || typeof b !== 'object') return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  if (Array.isArray(a)) {
-    if (a.length !== b.length) return false;
-    return a.every((x, i) => deepEq(x, b[i]));
+
+  let mode = 'snippet';
+  let cur, prop;
+  const at = typeof fileSrc === 'string' && currentSrc ? fileSrc.indexOf(currentSrc) : -1;
+  if (at >= 0) {
+    const proposedFile = fileSrc.replace(currentSrc, () => proposedSrc);
+    cur = prepareFile(fileSrc, { start: at, end: at + currentSrc.length }, fileSrc);
+    prop = prepareFile(proposedFile, { start: at, end: at + proposedSrc.length }, proposedFile);
+    if (cur.parsed) {
+      mode = 'file';
+      if (!cur.targets.length && !prop.targets.length) {
+        const snipCur = prepareSnippet(currentSrc), snipProp = prepareSnippet(proposedSrc);
+        cur.targets = snipCur.targets.filter(t => t.kind === 'fn');
+        prop.targets = snipProp.targets.filter(t => t.kind === 'fn');
+      }
+    }
   }
-  const ka = Object.keys(a), kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  return ka.every(k => deepEq(a[k], b[k]));
+  if (mode === 'snippet') {
+    cur = prepareSnippet(currentSrc);
+    prop = prepareSnippet(proposedSrc);
+  }
+
+  const target = chooseTarget(cur.targets, prop.targets, functionName);
+  if (!target) {
+    return finish(t0, { verdict: 'inconclusive', reason: 'no callable function located in the edit', runs: 0, mode });
+  }
+  const k = arity || Math.min(Math.max(target.params, 1), 4);
+  const inputs = buildInputs(k, runs);
+  const desc = { kind: target.kind, name: target.name, className: target.className, isStatic: !!target.isStatic };
+
+  const elapsed = performance.now() - t0;
+  const res = execute({
+    currentCode: cur.code,
+    proposedCode: prop.code,
+    target: desc,
+    inputs: inputs.map(i => i.literal),
+    callTimeoutMs: opts.callTimeoutMs || CALL_TIMEOUT_MS,
+    loadTimeoutMs: LOAD_TIMEOUT_MS,
+    budgetMs: opts.budgetMs || BUDGET_MS,
+    fileMode: mode === 'file'
+  }, hardKillMs - elapsed);
+
+  if (res.counterexample && Number.isInteger(res.counterexample.index)) {
+    res.counterexample.args = jsonSafe(inputs[res.counterexample.index].args);
+  }
+  return finish(t0, { ...res, function_name: target.className ? `${target.className}.${target.name}` : target.name, arity: k, mode });
 }
 
-function run({ currentSrc, proposedSrc, functionName, arity, runs = MAX_RUNS }) {
-  if (!fc) return { applicable: false, reason: 'fast-check not installed', score: 0.5, runs: 0, mismatches: 0 };
-
-  const name = functionName || detectFunctionName(proposedSrc) || detectFunctionName(currentSrc);
-  if (!name) return { applicable: false, reason: 'no top-level function name detected', score: 0.5, runs: 0, mismatches: 0 };
-
-  const sbA = buildSandbox(currentSrc);
-  const sbB = buildSandbox(proposedSrc);
-  if (!sbA.ok) return { applicable: false, reason: `current sandbox failed: ${sbA.error}`, score: 0.5, runs: 0, mismatches: 0 };
-  if (!sbB.ok) return { applicable: false, reason: `proposed sandbox failed: ${sbB.error}`, score: 0, runs: 0, mismatches: 1 };
-
-  const fnA = findExport(sbA.sandbox, name);
-  const fnB = findExport(sbB.sandbox, name);
-  if (!fnA || !fnB) return { applicable: false, reason: `function "${name}" not callable from sandbox`, score: 0.5, runs: 0, mismatches: 0 };
-
-  const k = arity || detectArity(proposedSrc, name) || 1;
-  const arb = buildArbitrary(k);
-  if (!arb) return { applicable: false, reason: 'fast-check arbitrary not built', score: 0.5, runs: 0, mismatches: 0 };
-
-  let mismatches = 0;
-  let counterexample = null;
-  let ran = 0;
-
-  try {
-    fc.assert(
-      fc.property(arb, (args) => {
-        ran++;
-        const a = safeRun(fnA, args);
-        const b = safeRun(fnB, args);
-        if (!equivalent(a, b)) {
-          mismatches++;
-          if (!counterexample) counterexample = { args, current: a, proposed: b };
-          return false;
-        }
-        return true;
-      }),
-      { numRuns: runs, endOnFailure: false }
-    );
-  } catch (err) {
-    // fast-check throws on assertion failure; we already captured the
-    // counterexample above, so swallow this and continue.
-  }
-
-  const score = ran > 0 ? Math.max(0, 1 - (mismatches / ran) * 2) : 0.5;
-  return {
-    applicable: true,
-    function_name: name,
-    arity: k,
-    runs: ran,
-    mismatches,
-    score,
-    counterexample
-  };
-}
-
-module.exports = { run, detectFunctionName, detectArity, equivalent };
+module.exports = { run, collectTargets, toLiteral, HARD_KILL_MS };

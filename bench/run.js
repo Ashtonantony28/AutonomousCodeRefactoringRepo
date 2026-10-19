@@ -68,12 +68,11 @@ const stubCritic = async ({ proposal }) => ({
   panel: [], agreement: { mean_confidence: 0.8, std_confidence: 0, unanimous_approval: true, approval_rate: 1, verbal_entropy: 0 }
 });
 
-// Only inputs that currently terminate; the hang repros belong to SG2.
 const RUNNERS = {
   ast: { filter: () => true, run: (c) => runChecks({ proposal: freshProposal(c.proposal), repoRoot: c.repo }) },
   difftest: {
     filter: (c) => /\.(js|cjs|mjs)$/i.test(c.proposal.file),
-    run: (c) => diffTesting.run({ currentSrc: c.proposal.current_code, proposedSrc: c.proposal.proposed_code })
+    run: (c) => diffTesting.run({ currentSrc: c.proposal.current_code, proposedSrc: c.proposal.proposed_code, fileSrc: c.original })
   },
   apply: {
     filter: () => true,
