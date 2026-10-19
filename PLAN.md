@@ -55,7 +55,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | id | title | depends on | owner | status |
 |---|---|---|---|---|
 | SG0 | Contracts, test harness, fixtures, bench | — | thread worker | done |
-| SG1 | Sound score fusion and vetoes | SG0 | thread worker | proposed |
+| SG1 | Sound score fusion and vetoes | SG0 | thread worker | done |
 | SG2 | Isolated, time-bounded differential testing | SG0 | thread worker | done |
 | SG3 | AST and polyglot check precision | SG0 | thread worker | done |
 | SG4 | Safe anchor matching and edit application | SG0 | thread worker | done |
@@ -157,3 +157,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-19 | SG4 | green | anchor/reverter tests 20/20, `npm test` 126/126 after merging with SG2, bench apply p95 37 ms (budget 100) incl. 200 KB cases. Tier order now exact → indent-shift → whitespace → fuzzy; fuzzy requires token identity and a runner-up gap ≥ 0.02. Open for SG5: executor's `apply_failed` drops `err.tier`/`err.detail.closest`. |
 | 2026-10-19 | SG7 | green | SG7 tests 17/17, `npm test` 133/133, `state/`+`dashboard/` untouched. Per-request render + in-place swap on SSE; inline JSON in `application/json` script with escaping; spans carry trace/parent/start/end; probe wired in; `--serve` server now unref'd (stops at run end). Open for SG1/SG5: orchestrator should import `RL_GATE_THRESHOLD` from `rl/classifier.js` and pass `trace_id` to `trace()`; confirm veto object shape; server watches global `sessionPath()`. |
 | 2026-10-19 | SG3 | green | ast/polyglot tests 26/26, `npm test` after merge with SG7 green, bench ast p95 ~1 ms. `runChecks` adds `splice{ok,reason,occurrences}`; `severity:'veto'` only for parse errors introduced by the proposal. Open for SG1: treat `severity:'veto'` as hard veto. Python/Go remain lexical; Python return check only flags losing all value returns. `@babel/traverse` now unused. |
+| 2026-10-19 | SG1 | green | critic/validator tests 24/24, `npm test` 172/172, bench all stages within budget. Jury `p_preserves` (mean) drives fusion; vetoes (divergent diff test, `severity:'veto'` check, unanimous reject) → `vetoed`; gate also requires jury majority approve AND `p_preserves >= MIN_CRITIC_P` (0.5) so AST+diff can't outvote the critic; `fileSrc` wired; `RL_GATE_THRESHOLD` shared; `run_id`/`trace_id` on traces. Fixture `js-basic-safeparse` now `vetoed` (intended). Malformed critic output counts as reject. Open for SG6: features/bug-injector/classifyFailure still read the `claude_confidence` alias. |
