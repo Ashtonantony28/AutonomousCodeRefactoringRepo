@@ -143,6 +143,39 @@ test('mixed panel with low p_preserves is critic_rejected, not vetoed', async (t
   assert.strictEqual(p.test_outcome.status, 'critic_rejected');
 });
 
+test('2 rejects + 1 approve (0/0/0.55) is critic_rejected despite clean AST and equivalent diff test', async (t) => {
+  const ctx = setup(t);
+  const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME),
+    perPersona(persona => persona === 'permissive'
+      ? { ...base, preserves_semantics: true, p_preserves: 0.55 }
+      : { ...base, preserves_semantics: false, p_preserves: 0 }));
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
+  assert(p.pattern_check_results.every(c => c.passed));
+  assert(p.combined_confidence >= 0.5, 'score alone would pass');
+  assert.strictEqual(p.veto, null);
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /critic jury does not approve/);
+});
+
+test('majority approve with jury p_preserves below 0.5 is critic_rejected', async (t) => {
+  const ctx = setup(t);
+  const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME),
+    perPersona(persona => persona === 'security'
+      ? { ...base, preserves_semantics: false, p_preserves: 0 }
+      : { ...base, preserves_semantics: true, p_preserves: 0.6 }));
+  assert.strictEqual(p.critic_verdict.preserves_semantics, true);
+  assert(p.critic_verdict.p_preserves < 0.5);
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+});
+
+test('clean 3-approve panel passes the gate', async (t) => {
+  const ctx = setup(t);
+  const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME),
+    perPersona(() => ({ ...base, preserves_semantics: true, p_preserves: 0.8 })));
+  assert.strictEqual(p.critic_verdict.agreement.unanimous, true);
+  assert.strictEqual(p.test_outcome.status, 'dry_run');
+});
+
 test('all-malformed panel (critic unavailable) is vetoed even when AST + diff test pass', async (t) => {
   const ctx = setup(t);
   const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME), 'not json');

@@ -23,7 +23,9 @@ Orchestrator
   │
   ├── Hybrid validator  ─► adaptive weights: p_preserves 0.5 + ast 0.3 + diff 0.2
   │                       when differential testing is applicable,
-  │                       p_preserves 0.6 + ast 0.4 otherwise; hard vetoes
+  │                       p_preserves 0.6 + ast 0.4 otherwise; gate needs
+  │                       combined >= 0.5 AND jury majority approve with
+  │                       p_preserves >= 0.5; hard vetoes
   │                       (divergent diff test, parse veto, unanimous reject)
   │
   ├── RL gate  ─► dependency-free logistic regression with counterfactual

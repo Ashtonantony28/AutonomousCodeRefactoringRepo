@@ -29,6 +29,7 @@ const { trace, classifyFailure, persistRunSpans } = require('./interpretability/
 const { renderDashboard } = require('./interpretability/dashboard');
 
 const REJECT_THRESHOLD = 0.5;
+const MIN_CRITIC_P = 0.5;
 
 function logInfo(msg) { console.log(chalk.cyan('[orch] ') + msg); }
 function logWarn(msg) { console.log(chalk.yellow('[orch] ') + msg); }
@@ -91,10 +92,15 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     return proposal;
   }
 
-  if ((proposal.combined_confidence || 0) < REJECT_THRESHOLD) {
-    proposal.test_outcome = { status: 'critic_rejected', reason: 'combined_confidence below threshold' };
+  const jury = proposal.critic_verdict;
+  const criticOk = !!jury && jury.preserves_semantics === true && (jury.p_preserves || 0) >= MIN_CRITIC_P;
+  if ((proposal.combined_confidence || 0) < REJECT_THRESHOLD || !criticOk) {
+    const reason = !criticOk
+      ? `critic jury does not approve (majority preserves_semantics=${!!(jury && jury.preserves_semantics)}, p_preserves=${jury ? jury.p_preserves : 'n/a'}, need >= ${MIN_CRITIC_P})`
+      : `combined_confidence < ${REJECT_THRESHOLD}`;
+    proposal.test_outcome = { status: 'critic_rejected', reason };
     trace(proposal, 'critic', {
-      reasoning: `combined_confidence < ${REJECT_THRESHOLD}; rejecting`,
+      reasoning: `${reason}; rejecting`,
       confidence: proposal.combined_confidence,
       outcome: 'critic_rejected',
       trace_id
@@ -316,4 +322,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runPipeline, processProposal, pruneContext, summarizeProposal, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, REJECT_THRESHOLD, MIN_CRITIC_P, pruneContext, summarizeProposal, featuresFor, summarizeRun };

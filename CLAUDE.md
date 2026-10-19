@@ -98,8 +98,10 @@ combined_confidence = 0.6 * jury.p_preserves + 0.4 * pattern_score
 combined_confidence = 0.5 * jury.p_preserves + 0.3 * pattern_score + 0.2 * diff_score
 ```
 
-Proposals with `combined_confidence < 0.5` are rejected before Executor
-(`critic_rejected`). Independently of the score, a proposal is **vetoed**
+Proposals are rejected before Executor (`critic_rejected`) when
+`combined_confidence < 0.5`, OR the jury does not approve on its own: the
+majority `preserves_semantics` must be true AND `jury.p_preserves >= 0.5`
+(`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic. Independently of the score, a proposal is **vetoed**
 (`test_outcome.status = 'vetoed'`, never reaches the RL gate or Executor) when
 the differential test is `divergent`, any check has `severity: 'veto'` (parse
 errors introduced by the proposal), or every persona says
