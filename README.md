@@ -245,9 +245,20 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   state across chained calls such as a missing `global`) reads as
   `equivalent` (AUDIT-12 H1/H2, AUDIT-13 H2/H3). For those edits the only
   backstop is the executor bar: the suite must run the edit and kill a
-  mutant of every changed token and carried reference, and pure deletions
-  stand on `deletions_observed`. A suite that never tests such an input can
-  still let a deletion through.
+  mutant of every changed token and of every inserted read at the place the
+  edit uses it, and pure deletions stand on `deletions_observed`. A suite
+  that never tests such an input can still let a deletion through.
+- **Per-test kills need node:test or pytest.** A mutant is killed only by a
+  test that passed unmutated and fails in both mutant runs, so the runner
+  has to report per-test results: node:test (TAP through `NODE_OPTIONS`) or
+  pytest (JUnit XML). Suites on other runners (Jest, Mocha, plain scripts,
+  `make`), and node:test suites that set their own `--test-reporter`, get no
+  kill and end `tests_insensitive`.
+- **Use-site perturbations are small value changes.** A read is perturbed
+  by number + 1, string + `~`, last list/dict entry dropped, or a skipped
+  call. Values with no such change (class instances, `Map`s, sets) never
+  differ, so an edit that inserts a read of one ends `tests_insensitive`;
+  a perturbation that throws is killed by any test that runs it.
 - **Slow suites.** Every mutant kill takes three suite runs (mutant, mutant
   again, unmutated control) inside one 60 s mutant budget, so suites slower
   than about a third of that budget end `reverted` with `mutation_budget`.

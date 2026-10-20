@@ -482,3 +482,81 @@ test('pytest runs as `python -m pytest` with or without coverage: a package the 
   assert.strictEqual(red.status, 'failed');
   assert.strictEqual(red.collection_error, undefined, 'a failing test is a real failure');
 });
+
+// ---------- SG26: per-test results, load failures ----------
+
+test('tapResults / junitResults: per-test states; a crashed test file or a failure raised from a module body is a load failure', () => {
+  const { tapResults, junitResults } = require('../src/runner/test-runner');
+  const tap = [
+    'TAP version 13', '# Subtest: a', 'ok 1 - a', '  ---', "  type: 'test'", '  ...', '# Subtest: s', '    # Subtest: x', '    not ok 1 - x', '      ---',
+    "      type: 'test'", "      failureType: 'testCodeFailure'", '      ...', '    # Subtest: y', '    ok 2 - y # SKIP', '      ---', "      type: 'test'", '      ...',
+    'not ok 2 - s', '  ---', "  type: 'suite'", "  failureType: 'subtestsFailed'", '  ...', '# Subtest: c', 'not ok 3 - c', '  ---', "  type: 'test'",
+    "  failureType: 'cancelledByParent'", '  ...', '1..3'
+  ].join('\n');
+  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 's > x': 'fail', 's > y': 'skip', c: 'error' }, load: false });
+  const lazy = tap.replace("      failureType: 'testCodeFailure'", "      failureType: 'testCodeFailure'\n      stack: |-\n        Object.<anonymous> (/r/src/a.js:1:41)\n        Module._compile (node:internal/modules/cjs/loader:1706:14)");
+  assert.strictEqual(tapResults(lazy).load, true);
+  const crashed = tap.replace("  failureType: 'cancelledByParent'", "  failureType: 'testCodeFailure'\n  exitCode: 1");
+  assert.strictEqual(tapResults(crashed).load, true);
+  assert.strictEqual(tapResults('no tap here'), null);
+  const xml = (body) => `<testsuites><testsuite><testcase classname="t.m" name="ok" /><testcase classname="t.m" name="bad">${body}</testcase></testsuite></testsuites>`;
+  assert.deepStrictEqual(junitResults(xml('<failure message="assert 1 == 2">t/m.py:5: in test_bad\n    assert 1 == 2</failure>')), { tests: { 't.m::ok': 'pass', 't.m::bad': 'fail' }, load: false });
+  assert.strictEqual(junitResults(xml('<failure message="IndexError">t/m.py:2: in test_bad\napp/m.py:2: in &lt;module&gt;\n    X = S[2]</failure>')).load, true);
+  assert.strictEqual(junitResults(xml('<error message="collection failure">t/m.py:1: in &lt;module&gt;</error>')).load, true);
+  assert.deepStrictEqual(junitResults(xml('<skipped message="x" />')).tests, { 't.m::ok': 'pass', 't.m::bad': 'skip' });
+});
+
+test('runTests: node:test per-test results; a module that throws while loading, in a test or at a test file\'s top, is a collection error (AUDIT-16 C2)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg26-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test'));
+  const good = "'use strict';\nconst P = [{ max: 3 }, { max: 4 }];\nconst MAX = P[1].max;\nmodule.exports = { f: (s) => s.slice(0, MAX) };\n";
+  fs.writeFileSync(path.join(dir, 'src/a.js'), good);
+  const nodeTest = (body) => `'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n${body}\n`;
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("test('one', () => assert.strictEqual(1, 1));\ntest('lazy', () => { assert.strictEqual(require('../src/a').f('abc'), 'abc'); });"));
+  const ok = await runTests({ repoRoot: dir });
+  assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+  assert.deepStrictEqual(ok.tests, { one: 'pass', lazy: 'pass' });
+  fs.writeFileSync(path.join(dir, 'src/a.js'), good.replace('P[1]', 'P[2]'));
+  const lazy = await runTests({ repoRoot: dir });
+  assert.strictEqual(lazy.status, 'failed');
+  assert.strictEqual(lazy.collection_error, true, JSON.stringify(lazy.tests));
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("const m = require('../src/a');\ntest('top', () => assert.strictEqual(m.f('abc'), 'abc'));"));
+  const top = await runTests({ repoRoot: dir });
+  assert.strictEqual(top.collection_error, true, JSON.stringify(top.tests));
+  fs.writeFileSync(path.join(dir, 'src/a.js'), good.replace('s.slice(0, MAX)', 's.slice(1, MAX)'));
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed');
+  assert.strictEqual(red.collection_error, undefined, 'a failing assertion is a real failure');
+  assert.deepStrictEqual(red.tests, { top: 'fail' });
+});
+
+test('runTests: pytest per-test results; an import failure is a collection error with --continue-on-collection-errors or inside a test (AUDIT-16 C2)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg26py-');
+  fs.mkdirSync(path.join(dir, 'app'));
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  const top = 'import app.m as m\n\n\ndef test_top():\n    assert m.MAX == 4\n';
+  const lazy = 'def test_lazy():\n    import app.m as m\n    assert m.MAX == 4\n';
+  for (const [ini, body] of [['[pytest]\naddopts = --continue-on-collection-errors\n', top], ['[pytest]\n', lazy]]) {
+    fs.writeFileSync(path.join(dir, 'pytest.ini'), ini);
+    fs.writeFileSync(path.join(dir, 'tests/test_m.py'), body);
+    fs.writeFileSync(path.join(dir, 'app/m.py'), 'SIZES = (1, 4)\nMAX = SIZES[1]\n');
+    const ok = await runTests({ repoRoot: dir });
+    assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+    assert.deepStrictEqual(Object.values(ok.tests), ['pass']);
+    fs.writeFileSync(path.join(dir, 'app/m.py'), 'SIZES = (1, 4)\nMAX = SIZES[2]\n');
+    const broken = await runTests({ repoRoot: dir });
+    assert.strictEqual(broken.status, 'failed');
+    assert.strictEqual(broken.exit_code, 1);
+    assert.strictEqual(broken.collection_error, true, broken.stdout);
+    fs.writeFileSync(path.join(dir, 'app/m.py'), 'SIZES = (1, 4)\nMAX = SIZES[0]\n');
+    const red = await runTests({ repoRoot: dir });
+    assert.strictEqual(red.collection_error, undefined, red.stdout);
+    assert.deepStrictEqual(Object.values(red.tests), ['fail']);
+  }
+});

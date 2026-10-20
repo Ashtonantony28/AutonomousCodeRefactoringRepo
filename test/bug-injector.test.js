@@ -122,7 +122,8 @@ test('changeHunks: line hunks with token-level changes; comments ignored; deleti
 test('editMutants with the pre-edit file: only changed tokens are mutated, tagged by hunk (AUDIT-8 C1/C2)', () => {
   const before = "function toRow(u) {\n  const n = 3;\n  return { id: u.id, name: u.name, kind: 'user', n: n };\n}\n";
   const keyOrder = "function toRow(u) {\n  const n = 3;\n  return { name: u.name, id: u.id, kind: 'user', n: n };\n}\n";
-  assert.deepStrictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }), [], "'user' and 3 are unchanged: nothing to mutate");
+  assert.deepStrictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }).map(m => m.mutation), ['use_site'],
+    "'user' and 3 are unchanged: only the moved read of u.id is mutated");
   const twoHunks = "function toRow(u) {\n  const n = 4;\n  return { id: u.id, name: u.name, kind: 'admin', n: n };\n}\n";
   const ms = bugInjector.editMutants(twoHunks, { file: 'r.js', before });
   assert.deepStrictEqual([...new Set(ms.map(m => m.hunk))], [0], 'adjacent changed lines form one hunk');
@@ -207,7 +208,7 @@ test('changeHunks groups changed tokens by the stretch between matched tokens (g
 test('editMutants: mutants per site (each mutable inserted token), tagged with the site (AUDIT-12 H3)', () => {
   const before = 'function body(s) {\n  return String(s);\n}\n';
   const after = 'function body(s) {\n  return String(s).slice(0, 1000);\n}\n';
-  const ms = bugInjector.editMutants(after, { file: 'b.js', before, max: 1 });
+  const ms = bugInjector.editMutants(after, { file: 'b.js', before, max: 1 }).filter(m => !m.ref);
   assert.deepStrictEqual(ms.map(m => after.slice(m.site, m.site + 4)), ['0, 1', '1000'], 'one mutant for each of the two literals');
   assert(ms[1].src.includes('slice(0, 1001)'));
   const many = Array.from({ length: bugInjector.EDIT_MAX_SITES + 1 }, (_, i) => `x > ${i + 1}`).join(' && ');
