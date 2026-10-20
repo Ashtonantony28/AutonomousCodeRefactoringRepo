@@ -1,0 +1,160 @@
+'use strict';
+
+require('./helpers/env');
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const diffTesting = require('../src/validation/diff-testing');
+const { assertDiffTest } = require('../src/contracts');
+
+// Python sources go through diffTesting.run with `file: *.py`.
+function run(cur, prop, { pre = '', ...opts } = {}) {
+  const r = diffTesting.run({ currentSrc: cur, proposedSrc: prop, fileSrc: `${pre}${cur}`, file: 'pkg/mod.py', ...opts });
+  assertDiffTest(r);
+  return r;
+}
+
+test('routes .py edits to the Python oracle: equivalent rewrite', () => {
+  const r = run('def total(xs):\n    s = 0\n    for x in xs:\n        s += x\n    return s\n', 'def total(xs):\n    return sum(xs)\n');
+  assert.strictEqual(r.verdict, 'equivalent');
+  assert.strictEqual(r.applicable, true);
+  assert(r.runs >= 10);
+  assert.strictEqual(r.lang, 'python');
+  assert.strictEqual(r.function_name, 'total');
+  const js = diffTesting.run({ currentSrc: 'function f(x) { return x * 2; }', proposedSrc: 'function f(x) { return x + 2; }', file: 'a.js' });
+  assert.strictEqual(js.verdict, 'divergent');
+  assert.strictEqual(js.lang, undefined, 'JS edits stay on the JS oracle');
+});
+
+test('divergent on changed return values, with a counterexample', () => {
+  const r = run('def net(gross, fee):\n    return gross - fee\n', 'def net(gross, fee):\n    return gross + fee\n');
+  assert.strictEqual(r.verdict, 'divergent');
+  assert(Array.isArray(r.counterexample.args));
+  assert.strictEqual(r.counterexample.target, 'net');
+});
+
+test('compares exception types, stdout, argument mutation and module state', () => {
+  assert.strictEqual(run('def need(x):\n    if x is None:\n        raise ValueError("x required")\n    return x\n',
+    'def need(x):\n    if x is None:\n        raise TypeError("x required")\n    return x\n').verdict, 'divergent');
+  const out = run('def charge(user, amt):\n    print("charge", user, amt)\n    return amt\n', 'def charge(user, amt):\n    return amt\n');
+  assert.strictEqual(out.verdict, 'divergent');
+  assert.match(out.counterexample.current.stdout, /charge/);
+  assert.strictEqual(run('def ordered(xs):\n    return sorted(xs)\n', 'def ordered(xs):\n    xs.sort()\n    return xs\n').verdict, 'divergent');
+  assert.strictEqual(run('def hit():\n    global CALLS\n    CALLS += 1\n    return CALLS\n', 'def hit():\n    global CALLS\n    return CALLS + 1\n', { pre: 'CALLS = 0\n' }).verdict, 'divergent');
+  assert.strictEqual(run('def add(x, acc=None):\n    acc = [] if acc is None else acc\n    acc.append(x)\n    return acc\n',
+    'def add(x, acc=[]):\n    acc.append(x)\n    return acc\n').verdict, 'divergent');
+});
+
+test('inputs are shaped by usage: defaults omitted, mined lengths, dict keys, slices', () => {
+  assert.strictEqual(run('def page(items, size=10):\n    return items[:size]\n', 'def page(items, size=20):\n    return items[:size]\n').verdict, 'divergent');
+  assert.strictEqual(run('def check(user):\n    if user.get("admin"):\n        return "full"\n    return "limited"\n',
+    'def check(user):\n    if not user.get("admin"):\n        return "full"\n    return "limited"\n').verdict, 'divergent');
+  assert.strictEqual(run('def ks(d):\n    return [k for k in d.keys()]\n', 'def ks(d):\n    return [k for k in d]\n').verdict, 'equivalent');
+  assert.strictEqual(run('def first_neg(xs):\n    found = None\n    for x in xs:\n        if x < 0:\n            found = x\n            break\n    return found\n',
+    'def first_neg(xs):\n    found = None\n    for x in xs:\n        if x < 0:\n            found = x\n            continue\n    return found\n').verdict, 'divergent');
+});
+
+test('methods, properties, constructors and changed constants', () => {
+  const cls = (body) => `class Box:\n    def __init__(self, w):\n        self.w = w\n    def area(self):\n        return ${body}\n`;
+  assert.strictEqual(run(cls('self.w * self.w'), cls('self.w ** 2')).verdict, 'equivalent');
+  assert.strictEqual(run(cls('self.w * self.w'), cls('self.w * 2')).verdict, 'divergent');
+  assert.strictEqual(run('class B:\n    def __init__(self, w):\n        self.w = w\n', 'class B:\n    def __init__(self, w):\n        self.w = abs(w)\n').verdict, 'divergent');
+  assert.strictEqual(run('RATE = 0.1\n', 'RATE = 0.2\n').verdict, 'divergent');
+  const same = run('RATE = 2 * 3\n', 'RATE = 6\n');
+  assert.strictEqual(same.verdict, 'equivalent');
+  assert.strictEqual(same.runs, 1);
+});
+
+test('a changed statement outside any callable, or nothing located, is inconclusive', () => {
+  const r = run('if True:\n    LIMIT = 3\n', 'if True:\n    LIMIT = 4\n');
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.strictEqual(r.runs, 0);
+  assert.strictEqual(r.lang, 'python');
+  assert.match(r.reason, /no callable function or constant located in the edit; a top-level statement outside a located callable changed/);
+});
+
+test('infinite loop in proposed is inconclusive via the per-call timeout, within the hard kill', () => {
+  const t0 = Date.now();
+  const r = run('def f(x):\n    return 1\n', 'def f(x):\n    while True:\n        pass\n');
+  assert(Date.now() - t0 < 3500, `took ${Date.now() - t0} ms`);
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /per-call timeout/);
+});
+
+test('hard kill bounds a sandbox that never reports', () => {
+  const t0 = Date.now();
+  const r = run('def f(x):\n    return 1\n', 'def f(x):\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n',
+    { hardKillMs: 700, budgetMs: 5000, callTimeoutMs: 5000 });
+  assert(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /hard kill/);
+});
+
+test('sandbox refuses network, processes and writes outside its cwd', () => {
+  const marker = path.join(os.tmpdir(), `pydt-escape-${process.pid}`);
+  const r = run('def f(x):\n    return 1\n', `def f(x):\n    open(${JSON.stringify(marker)}, "w").write("x")\n    return 1\n`);
+  assert.strictEqual(r.verdict, 'divergent');
+  assert.strictEqual(r.counterexample.proposed.error.name, 'PermissionError');
+  assert.strictEqual(fs.existsSync(marker), false);
+  for (const body of ['import socket\n    socket.create_connection(("127.0.0.1", 9))', 'import os\n    os.system("true")', 'import subprocess\n    subprocess.run(["true"])']) {
+    const s = run('def g(x):\n    return 1\n', `def g(x):\n    ${body}\n    return 1\n`);
+    assert.notStrictEqual(s.verdict, 'equivalent', body);
+  }
+});
+
+test('writes inside the sandbox cwd are compared between sides', () => {
+  const r = run('def log_line(p, s):\n    with open(p, "a") as f:\n        f.write(s + "\\n")\n', 'def log_line(p, s):\n    with open(p, "w") as f:\n        f.write(s + "\\n")\n');
+  assert.strictEqual(r.verdict, 'divergent');
+});
+
+test('non-stdlib imports are inert stubs: same interactions are comparable, different ones inconclusive', () => {
+  const pre = 'import requests\n';
+  assert.strictEqual(run('def f(u):\n    return requests.get(u).json()\n', 'def f(u):\n    r = requests.get(u)\n    return r.json()\n', { pre }).verdict, 'equivalent');
+  const d = run('def f(u):\n    return requests.get(u, timeout=5)\n', 'def f(u):\n    return requests.get(u)\n', { pre });
+  assert.strictEqual(d.verdict, 'inconclusive');
+  assert.match(d.reason, /dependency stubs/);
+});
+
+test('clock / environment references changed by the edit are inconclusive; nondeterminism is never divergent', () => {
+  const pre = 'import time\n';
+  const c = run('def f(x):\n    return 1\n', 'def f(x):\n    return 1 if time.time() < 4e9 else 2\n', { pre });
+  assert.strictEqual(c.verdict, 'inconclusive');
+  assert.match(c.reason, /clock/);
+  const n = run('def f(x):\n    return (time.perf_counter(), x)\n', 'def f(x):\n    t = time.perf_counter()\n    return (t, x)\n', { pre });
+  assert.strictEqual(n.verdict, 'inconclusive');
+});
+
+test('proposed failing to parse or to load is divergent; snippet without context is not', () => {
+  assert.strictEqual(run('def f(x):\n    return x\n', 'def f(x):\n    return x +\n').verdict, 'divergent');
+  assert.strictEqual(run('def f(x):\n    return x\n', 'raise RuntimeError("boom")\ndef f(x):\n    return x + 0\n').verdict, 'divergent');
+  const s = diffTesting.run({ currentSrc: 'def f(x):\n    return helper(x)\n', proposedSrc: 'def f(x):\n    return helper(x) + 0\n', file: 'm.py' });
+  assert.strictEqual(s.verdict, 'inconclusive');
+});
+
+test('async functions and generators are compared by their results', () => {
+  assert.strictEqual(run('async def f(x):\n    return x + 1\n', 'async def f(x):\n    return x + 2\n').verdict, 'divergent');
+  assert.strictEqual(run('def f(n):\n    for i in range(n):\n        yield i\n', 'def f(n):\n    yield from range(n)\n').verdict, 'equivalent');
+  assert.strictEqual(run('def f(n):\n    for i in range(n):\n        yield i\n', 'def f(n):\n    yield from range(n + 1)\n').verdict, 'divergent');
+});
+
+test('a deletion the probes saw run is observed; outside the domain differences are inconclusive', () => {
+  const r = run('def f(x):\n    unused = 42\n    return x * 2\n', 'def f(x):\n    return x * 2\n');
+  assert.strictEqual(r.verdict, 'equivalent');
+  assert.strictEqual(r.deletions_observed, true);
+  const ood = run('def f(xs):\n    return len(xs) + 1\n', 'def f(xs):\n    return len(xs) + 1 if xs is not None else 0\n');
+  assert.strictEqual(ood.verdict, 'inconclusive');
+  assert.match(ood.reason, /outside its domain/);
+});
+
+test('benign Python refactors are equivalent (AUDIT-8 NP*)', () => {
+  const cases = [
+    ['def sign(n):\n    if n < 0:\n        return "neg"\n    else:\n        return "pos"\n', 'def sign(n):\n    return "neg" if n < 0 else "pos"\n'],
+    ['def missing(x):\n    return x == None\n', 'def missing(x):\n    return x is None\n'],
+    ['def greet(n):\n    return "hi %s" % n\n', 'def greet(n):\n    return f"hi {n}"\n'],
+    ['def indexed(xs):\n    out = []\n    for i in range(len(xs)):\n        out.append((i, xs[i]))\n    return out\n', 'def indexed(xs):\n    return list(enumerate(xs))\n'],
+    ['def between(x):\n    return x > 0 and x < 10\n', 'def between(x):\n    return 0 < x < 10\n']
+  ];
+  for (const [cur, prop] of cases) assert.strictEqual(run(cur, prop).verdict, 'equivalent', prop);
+});

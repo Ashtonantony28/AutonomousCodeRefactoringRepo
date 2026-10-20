@@ -233,19 +233,67 @@ test('inconclusive diff test that ran inputs blocks even a unanimous approve (co
   assert.match(p.test_outcome.reason, /could not confirm equivalence/);
 });
 
-test('inapplicable diff test (non-JS) proceeds only with a unanimous approve and all checks passing', async (t) => {
+test('inapplicable diff test (no oracle for the language) proceeds only with a unanimous approve and all checks passing', async (t) => {
   const ctx = setup(t);
-  const cur = 'def add(a, b):\n    result = a + b\n    return result';
-  fs.writeFileSync(path.join(ctx.repo, 'm.py'), `${cur}\n`);
-  const prop = 'def add(a, b):\n    return a + b';
-  const split = await viaPipeline(ctx, makeProposal('m.py', cur, prop),
+  const cur = 'func add(a int, b int) int {\n\tresult := a + b\n\treturn result\n}';
+  fs.writeFileSync(path.join(ctx.repo, 'm.go'), `package m\n\n${cur}\n`);
+  const prop = 'func add(a int, b int) int {\n\treturn a + b\n}';
+  const split = await viaPipeline(ctx, makeProposal('m.go', cur, prop),
     perPersona(persona => persona === 'security' ? { ...base, preserves_semantics: false, p_preserves: 0.6 } : APPROVE_RAW));
   assert.strictEqual(split.diff_test.applicable, false);
   assert(split.combined_confidence >= 0.5);
   assert.strictEqual(split.test_outcome.status, 'critic_rejected');
   assert.match(split.test_outcome.reason, /2\/3 approve \(need unanimous\)/);
-  const unanimous = await viaPipeline(ctx, makeProposal('m.py', cur, prop), APPROVE_RAW);
+  const unanimous = await viaPipeline(ctx, makeProposal('m.go', cur, prop), APPROVE_RAW);
   assert.strictEqual(unanimous.test_outcome.status, 'dry_run');
+});
+
+// ---------- SG19: Python diff test in the gate ----------
+
+test('Python edits get the diff test: equivalent proceeds, divergent is vetoed', async (t) => {
+  const ctx = setup(t);
+  const cur = 'def add(a, b):\n    result = a + b\n    return result';
+  fs.writeFileSync(path.join(ctx.repo, 'm.py'), `${cur}\n`);
+  const same = await viaPipeline(ctx, makeProposal('m.py', cur, 'def add(a, b):\n    return a + b'), APPROVE_RAW);
+  assert.strictEqual(same.diff_test.verdict, 'equivalent');
+  assert(same.diff_test.runs >= 10);
+  assert.strictEqual(same.confidence_weights.diff_test, 0.2);
+  assert.strictEqual(same.test_outcome.status, 'dry_run');
+  const changed = await viaPipeline(ctx, makeProposal('m.py', cur, 'def add(a, b):\n    return a - b'), APPROVE_RAW);
+  assert.strictEqual(changed.diff_test.verdict, 'divergent');
+  assert.strictEqual(changed.test_outcome.status, 'vetoed');
+  assert.match(changed.veto.reasons.join(' '), /diff_test_divergent: add/);
+});
+
+test('a Python edit the diff test runs no input on is rejected like JS (runs=0)', async (t) => {
+  const ctx = setup(t);
+  const cur = 'if True:\n    LIMIT = 3';
+  fs.writeFileSync(path.join(ctx.repo, 'cfg.py'), `${cur}\n`);
+  const p = await viaPipeline(ctx, makeProposal('cfg.py', cur, 'if True:\n    LIMIT = 4'), APPROVE_RAW);
+  assert.strictEqual(p.diff_test.runs, 0);
+  assert.notStrictEqual(p.diff_test.verdict, 'equivalent');
+  assert.notStrictEqual(p.test_outcome.status, 'dry_run');
+});
+
+test('Python condition_change does not veto a reworded comparison the diff test shows equivalent', async (t) => {
+  const ctx = setup(t);
+  const cur = 'def between(x):\n    return x > 0 and x < 10';
+  fs.writeFileSync(path.join(ctx.repo, 'r.py'), `${cur}\n`);
+  const p = await viaPipeline(ctx, makeProposal('r.py', cur, 'def between(x):\n    return 0 < x < 10'), APPROVE_RAW);
+  const cc = p.pattern_check_results.find(c => c.check_name === 'condition_change');
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
+  assert.strictEqual(cc.passed, false);
+  assert.strictEqual(cc.severity, 'score');
+  assert.match(cc.detail, /diff test is equivalent/);
+  assert.strictEqual(p.veto, null);
+  assert.strictEqual(p.test_outcome.status, 'dry_run');
+  // guard_removal keeps its veto even when the diff test says equivalent.
+  const g = 'def sign(n):\n    if n < 0:\n        return "neg"\n    else:\n        return "pos"';
+  fs.writeFileSync(path.join(ctx.repo, 's.py'), `${g}\n`);
+  const q = await viaPipeline(ctx, makeProposal('s.py', g, 'def sign(n):\n    return "neg" if n < 0 else "pos"'), APPROVE_RAW);
+  assert.strictEqual(q.diff_test.verdict, 'equivalent');
+  assert.strictEqual(q.test_outcome.status, 'vetoed');
+  assert.match(q.veto.reasons.join(' '), /guard_removal/);
 });
 
 test('fusion and gate use only JuryVerdict / DiffTest contract fields', async (t) => {

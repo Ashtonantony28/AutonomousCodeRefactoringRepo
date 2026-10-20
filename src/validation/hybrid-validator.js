@@ -20,7 +20,8 @@ const PATTERN_WEIGHT_DEFAULT = 0.4;
 const CRITIC_WEIGHT_WITH_DT  = 0.5;
 const PATTERN_WEIGHT_WITH_DT = 0.3;
 const DT_WEIGHT              = 0.2;
-const JS_FILE = /\.(js|cjs|mjs)$/i;
+const PY_FILE = /\.py$/i;
+const DIFF_FILE = /\.(js|cjs|mjs|py)$/i;
 
 function readFileSrc(repoRoot, file) {
   if (!repoRoot || !file) return undefined;
@@ -44,17 +45,17 @@ function juryVotes(jury) {
 
 // Without an `equivalent` diff test nothing deterministic confirms the edit, so
 // it fails closed: a diff test that exercised the code (runs > 0) but could not
-// confirm equivalence blocks, and so does a JS edit (`file`) the diff test could
-// not run on (the AST checks only catch their four anti-patterns); otherwise
-// (non-JS) every persona must approve and every check, including the Python
-// lexical ones, must pass. -> reason string, or null when the edit may proceed.
+// confirm equivalence blocks, and so does a JS or Python edit (`file`) the diff
+// test could not run on (the AST checks only catch their four anti-patterns);
+// otherwise (other languages) every persona must approve and every check must
+// pass. -> reason string, or null when the edit may proceed.
 function unconfirmedBlock({ jury, checks, dt, file = null }) {
   if (dt && dt.applicable && dt.verdict === 'equivalent') return null;
   if (dt && dt.verdict === 'inconclusive' && dt.runs > 0) {
     return `diff test ran ${dt.runs} input(s) but could not confirm equivalence (${dt.reason || 'inconclusive'})`;
   }
-  if (file && JS_FILE.test(file)) {
-    return `diff test ran no input on a JS edit (${(dt && dt.reason) || 'missing'}); no deterministic check covers it`;
+  if (file && DIFF_FILE.test(file)) {
+    return `diff test ran no input on a ${PY_FILE.test(file) ? 'Python' : 'JS'} edit (${(dt && dt.reason) || 'missing'}); no deterministic check covers it`;
   }
   const votes = juryVotes(jury);
   const failed = (checks || []).filter(c => !c.passed).map(c => c.check_name);
@@ -63,6 +64,20 @@ function unconfirmedBlock({ jury, checks, dt, file = null }) {
   if (!votes.unanimous) why.push(`jury ${votes.approve}/${votes.n} approve (need unanimous)`);
   if (failed.length) why.push(`failed checks: ${failed.join(', ')}`);
   return `diff test ${dt ? dt.verdict : 'missing'} (${(dt && dt.reason) || 'not applicable'}); ${why.join('; ')}`;
+}
+
+// The Python `condition_change` check is lexical: a reworded comparison
+// (`== None` -> `is None`, chained comparisons, if/else -> conditional) looks
+// like a lost one. An `equivalent` diff test shows the behaviour is kept, so
+// the check then only lowers the score instead of vetoing.
+function relaxConditionChange(ast, dt) {
+  if (!dt || dt.verdict !== 'equivalent') return;
+  for (const c of ast.checks) {
+    if (c.check_name === 'condition_change' && !c.passed && c.severity === 'veto') {
+      c.severity = 'score';
+      c.detail = `${c.detail} (not a veto: the Python diff test is equivalent)`;
+    }
+  }
 }
 
 function vetoReasons({ jury, checks, dt }) {
@@ -98,25 +113,27 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
   ast.checks.forEach(assertCheckResult);
   proposal.pattern_check_results = ast.checks;
 
-  // Differential testing oracle (JS only), evaluated against the whole file.
+  // Differential testing oracle (JS and Python), evaluated against the whole file.
   let dt;
   t0 = performance.now();
-  if (JS_FILE.test(proposal.file)) {
+  if (DIFF_FILE.test(proposal.file)) {
     try {
       dt = diffTesting.run({
         currentSrc: proposal.current_code,
         proposedSrc: proposal.proposed_code,
-        fileSrc: readFileSrc(repoRoot, proposal.file)
+        fileSrc: readFileSrc(repoRoot, proposal.file),
+        file: proposal.file
       });
     } catch (err) {
       dt = inconclusive(`diff-test error: ${err.message}`, { duration_ms: elapsed(t0) });
     }
   } else {
-    dt = inconclusive('non-JS file');
+    dt = inconclusive('no diff test for this language');
   }
   const dtMs = elapsed(t0);
   assertDiffTest(dt);
   proposal.diff_test = dt;
+  if (PY_FILE.test(proposal.file)) relaxConditionChange(ast, dt);
 
   const pPreserves = jury.p_preserves;
   const patternScore = ast.score;
@@ -153,7 +170,7 @@ async function runHybridValidator({ proposal, tracker, repoRoot, runCritic, runI
     duration_ms: astMs,
     trace_id: traceId
   });
-  if (JS_FILE.test(proposal.file)) {
+  if (DIFF_FILE.test(proposal.file)) {
     trace(proposal, 'ast', {
       reasoning: dt.applicable
         ? `differential testing on ${dt.function_name}/${dt.arity}: ${dt.runs} runs, verdict ${dt.verdict}`
