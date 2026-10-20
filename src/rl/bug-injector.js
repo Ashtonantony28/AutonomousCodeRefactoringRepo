@@ -688,10 +688,11 @@ const EDIT_MAX_SITES = 12;
 // marked `unchecked`. Each mutant is parse-checked on the smallest statement
 // around it (jsParseCheck / parsesPython), not the file. A reference with
 // no parse-valid use-site mutant gives none, marked `unmutated_ref`.
-// A mutant that adds text carries `sham`: src with as many spaces added
-// after the mutated code (after the literal, for one inside a literal), a
-// behaviour-preserving control of the same size change.
-// -> [{ mutation, src, sham?, line, hunk, site, cover?, ref?, revert? }] (site: the token's offset in src)
+// A mutant that adds text carries `sham`: src with the site's expression
+// wrapped in redundant parentheses (at least as many characters as the
+// mutant adds) and as many spaces added after the mutated code (after the
+// literal, for one inside a literal), a behaviour-preserving control.
+// -> [{ mutation, src, sham?, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];

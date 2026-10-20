@@ -698,7 +698,7 @@ test('an unrelated token on the edited line is no evidence: a hunk with no mutab
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
   assert.strictEqual(res.reason, 'tests_insensitive');
   assert.strictEqual(res.mutation.run, 0);
-  assert.strictEqual(res.mutation.unmutated_hunk_line, 3);
+  assert.strictEqual(res.mutation.uncovered_token_line, 3);
   assertReverted(res, repo, 'src/row.js', before, kept);
 });
 

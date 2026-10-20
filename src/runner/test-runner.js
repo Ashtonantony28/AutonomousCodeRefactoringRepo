@@ -454,34 +454,72 @@ function junitResults(xml) {
 const reporterConflicts = new Set();
 const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]*--test-reporter|--test-reporter[\s\S]*ERR_INVALID_ARG_VALUE/.test(r.stderr);
 
-// Load hooks: a module body that throws is logged (to REFACTOR_LOAD_LOG),
-// however deep the throw or however the test reports it. JS: a preloaded
-// wrapper of Module._compile; pytest: a plugin wrapping __import__ (an
-// ImportError is a missing optional module, not a load failure).
+// Load hooks: a module body that throws is logged (to REFACTOR_LOAD_LOG,
+// `T <key> <file>`), however deep the throw or however the test reports it,
+// and `P <key>` marks a key that passed: a throw caught on purpose
+// (`assert.throws(() => require(...))`, `pytest.raises` around an import) is
+// no load failure. JS: a preloaded wrapper of Module._compile, key = the
+// process, passed when a node:test file process exits 0. pytest: a plugin
+// wrapping __import__ (an ImportError is a missing optional module, not a
+// load failure), key = the test or collected module, passed when every phase
+// passed; a throw outside both never passes.
 const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile;
+const key = process.pid + '.' + process.hrtime.bigint(), log = (s) => { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, s + '\\n'); } catch {} };
+let seen = false;
 M.prototype._compile = function (...a) {
-  try { return c.apply(this, a); } catch (e) { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, this.filename + '\\n'); } catch {} throw e; }
+  try { return c.apply(this, a); } catch (e) {
+    log('T\\t' + key + '\\t' + this.filename);
+    if (!seen && process.env.NODE_TEST_CONTEXT) process.on('exit', (code) => { if (code === 0) log('P\\t' + key); });
+    seen = true;
+    throw e;
+  }
 };
 `;
 const PY_LOAD_HOOK = `import builtins, os
 _imp = builtins.__import__
+_key, _n, _bad = '', 0, False
+def _log(s):
+    with open(os.environ['REFACTOR_LOAD_LOG'], 'a') as f:
+        f.write(s + '\\n')
 def _hook(name, *a, **k):
     try:
         return _imp(name, *a, **k)
     except ImportError:
         raise
     except Exception:
-        with open(os.environ['REFACTOR_LOAD_LOG'], 'a') as f:
-            f.write(name.replace('.', '/') + '.py\\n')
+        _log('T\\t%s\\t%s.py' % (_key, name.replace('.', '/')))
         raise
 builtins.__import__ = _hook
+def _start(what):
+    global _key, _n, _bad
+    _n += 1
+    _key, _bad = '%d:%s' % (_n, what), False
+def _finish(ok):
+    global _key
+    if ok and _key:
+        _log('P\\t' + _key)
+    _key = ''
+def pytest_collectstart(collector):
+    _start(collector.nodeid)
+def pytest_collectreport(report):
+    _finish(report.passed)
+def pytest_runtest_logstart(nodeid, location):
+    _start(nodeid)
+def pytest_runtest_logreport(report):
+    global _bad
+    _bad = _bad or report.failed
+def pytest_runtest_logfinish(nodeid, location):
+    _finish(not _bad)
 `;
-// Logged load failures of modules other than tests and conftest.
+// Logged load failures, not caught under a key that passed, of modules other
+// than tests and conftest.
 function loadFailed(log, repoRoot) {
   let text;
   try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
   const { isTestFile } = require('../utils/file-discovery');
-  return text.split('\n').some(f => f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f));
+  const rows = text.split('\n').map(l => l.split('\t'));
+  const passed = new Set(rows.filter(r => r[0] === 'P').map(r => r[1]));
+  return rows.some(([k, key, f]) => k === 'T' && !passed.has(key) && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f));
 }
 
 function ownsReporters(repoRoot, env) {
