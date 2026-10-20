@@ -392,7 +392,7 @@ const SLOW_PROP = 'function inc(x) {\n  return x + 1;\n}';
 test('mutant runs have their own budget: a suite that uses most of the test budget still gets a mutant run (AUDIT-9 C2)', async (t) => {
   // The main run takes ~2 s of the 4 s budget; a confirmed kill (mutant,
   // mutant again, unmutated) needs three more runs.
-  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 2000); }\nif (require('./src/inc').inc(1) !== 2) process.exit(1);");
+  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 2000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
   const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 4000 }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert(res.mutation.run === 3 && res.mutation.killed, JSON.stringify(res.mutation));
@@ -403,8 +403,8 @@ test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and
   const prop = 'function f(a, b) {\n  return a > 1 && b < 2 ? a + 1 : 3;\n}';
   const repo = nodeRepo(t, {
     'src/f.js': `'use strict';\n${cur}\nmodule.exports = { f };\n`,
-    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/f').f(1, 0), 3);\n"
-  }, 'node check.js');
+    'check.js': "require('node:test')('f', () => { const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/f').f(1, 0), 3); });\n"
+  }, 'node --test check.js');
   const before = fs.readFileSync(path.join(repo, 'src/f.js'), 'utf8');
   let kept = false;
   const res = await withoutTestContext(() => runExecutor({
@@ -419,15 +419,15 @@ test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and
   assertReverted(res, repo, 'src/f.js', before, kept);
 });
 
-// The suite never asserts; its n-th invocation (counted in a file outside
-// the repo) runs `slow` instead of finishing at once.
+// One node:test test that never asserts; its n-th invocation (counted in a
+// file outside the repo) runs `slow` instead of finishing at once.
 function countingSuite(t, slow) {
   const counter = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sg20-count-')), 'n');
   t.after(() => env.rm(path.dirname(counter)));
   return nodeRepo(t, {
     'src/inc.js': `'use strict';\n${SLOW_CUR}\nmodule.exports = { inc };\n`,
-    'check.js': `const fs = require('fs');\nconst p = ${JSON.stringify(counter)};\nconst n = (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : 0) + 1;\nfs.writeFileSync(p, String(n));\nrequire('./src/inc').inc(1);\n${slow}\n`
-  }, 'node check.js');
+    'check.js': `const fs = require('fs');\nrequire('node:test')('check', () => {\nconst p = ${JSON.stringify(counter)};\nconst n = (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : 0) + 1;\nfs.writeFileSync(p, String(n));\nrequire('./src/inc').inc(1);\n${slow}\n});\n`
+  }, 'node --test check.js');
 }
 
 test('a mutant run that times out is no kill: it is re-run once (AUDIT-9 H2)', async (t) => {
@@ -441,7 +441,7 @@ test('a mutant run that times out is no kill: it is re-run once (AUDIT-9 H2)', a
 });
 
 test('a timed-out mutant whose re-run fails is killed', async (t) => {
-  const repo = countingSuite(t, "if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }\nif (require('./src/inc').inc(1) !== 2) process.exit(1);");
+  const repo = countingSuite(t, "if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
   const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert.strictEqual(res.mutation.timeouts, 1);
@@ -462,7 +462,7 @@ test('a mutant whose re-run times out again is no kill (AUDIT-11 C5)', async (t)
 // ---------- SG24: a kill must reproduce ----------
 
 test('a mutant failure that does not reproduce is no kill: a suite failing on its first mutant run only (AUDIT-14 C1)', async (t) => {
-  const repo = countingSuite(t, 'if (n === 2) process.exit(1);');
+  const repo = countingSuite(t, "if (n === 2) throw new Error('failed');");
   let kept = false;
   const before = fs.readFileSync(path.join(repo, 'src/inc.js'), 'utf8');
   const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, onKept: () => { kept = true; } }));
@@ -475,7 +475,7 @@ test('a mutant failure that does not reproduce is no kill: a suite failing on it
 });
 
 test('a suite that also fails unmutated gives no kill: every run after the main one fails (load spike, AUDIT-14 C1)', async (t) => {
-  const repo = countingSuite(t, 'if (n > 1) process.exit(1);');
+  const repo = countingSuite(t, "if (n > 1) throw new Error('failed');");
   let kept = false;
   const before = fs.readFileSync(path.join(repo, 'src/inc.js'), 'utf8');
   const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, onKept: () => { kept = true; } }));
@@ -667,10 +667,10 @@ test('a deletion stands only on an equivalent diff test that ran the deleted cod
 });
 
 test('an unrelated token on the edited line is no evidence: a hunk with no mutable changed token is reverted (AUDIT-8 C2)', async (t) => {
-  const cur = "function toRow(u) {\n  return { id: u.id, name: u.name, kind: 'user' };\n}";
-  const prop = "function toRow(u) {\n  return { name: u.name, id: u.id, kind: 'user' };\n}";
+  const cur = "function toRow(u) {\n  return { id: null, name: null, kind: 'user' };\n}";
+  const prop = "function toRow(u) {\n  return { name: null, id: null, kind: 'user' };\n}";
   const { res, repo, before, kept } = await execOn(t, 'src/row.js', cur, prop, 'module.exports = { toRow };',
-    "const m = require('../src/row');\ntest('toRow', () => { const r = m.toRow({ id: 1, name: 'a' }); assert.strictEqual(r.id, 1); assert.strictEqual(r.kind, 'user'); });",
+    "const m = require('../src/row');\ntest('toRow', () => { const r = m.toRow({}); assert.strictEqual(r.id, null); assert.strictEqual(r.kind, 'user'); });",
     { applicable: true, verdict: 'equivalent', runs: 12, duration_ms: 1 });
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
   assert.strictEqual(res.reason, 'tests_insensitive');
@@ -722,13 +722,13 @@ test('a killed mutant counts only for the token it mutates: slice(0, 1000) kille
     "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); });");
   assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
   assert.strictEqual(weak.res.reason, 'tests_insensitive');
-  assert.strictEqual(weak.res.mutation.sites, 2);
-  assert.strictEqual(weak.res.mutation.surviving_site_line, 3, 'the 1000 site survives');
+  assert.strictEqual(weak.res.mutation.sites, 3, 'the call of slice, 0 and 1000');
+  assert.strictEqual(weak.res.mutation.surviving_site_line, 3, 'a site survives');
   assertReverted(weak.res, weak.repo, 'src/body.js', weak.before, weak.kept);
   const strong = await execOn(t, 'src/body.js', cur, prop, 'module.exports = { body };',
     "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body('x'.repeat(1001)).length, 1000); });");
   assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
-  assert.strictEqual(strong.res.mutation.run, 6, 'one confirmed kill (three runs) per site');
+  assert.strictEqual(strong.res.mutation.run, 9, 'one confirmed kill (three runs) per site');
 });
 
 // ---------- SG25: evidence relevance, Python mutant runs ----------
@@ -737,8 +737,9 @@ test('a change carried by a named constant needs a kill of that constant: slice(
   const cur = 'function body(s) {\n  return String(s);\n}';
   const prop = 'function body(s) {\n  return String(s).slice(0, MAX_BODY);\n}';
   const rest = 'const MAX_BODY = 4096;\nmodule.exports = { body };';
+  // The call and the slice start are tested, the cap is not (any cap under 5000 passes).
   const weak = await execOn(t, 'src/body.js', cur, prop, rest,
-    "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body(42), '42'); });");
+    "const m = require('../src/body');\ntest('body', () => { const r = m.body('ab' + 'x'.repeat(5000)); assert(r.startsWith('ab') && r.length < 5000); });");
   assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
   assert.strictEqual(weak.res.reason, 'tests_insensitive');
   assert.strictEqual(weak.res.mutation.surviving_ref, 'MAX_BODY');
@@ -771,21 +772,43 @@ test('a replaced method reference with nothing to mutate is no evidence: include
   assertReverted(res, repo, 'src/has.js', before, kept);
 });
 
-test('editMutants: references carried by the change add their definition sites; moved ones do not', () => {
-  const b = "'use strict';\nconst LIMIT = 500;\nfunction f(s) {\n  return s;\n}\n";
-  const a = "'use strict';\nconst LIMIT = 500;\nfunction f(s) {\n  return s.slice(0, LIMIT);\n}\n";
-  const ms = editMutants(a, { file: 'f.js', before: b });
-  assert.deepStrictEqual([...new Set(ms.filter(m => m.ref).map(m => `${m.ref}@${m.line}`))], ['LIMIT@2']);
-  const pb = 'LIMIT = 500\n\n\ndef body(s):\n    return str(s)\n';
-  const pa = 'LIMIT = 500\n\n\ndef body(s):\n    return str(s)[0:LIMIT]\n';
-  assert(editMutants(pa, { file: 'm.py', before: pb }).some(m => m.ref === 'LIMIT' && m.line === 1));
-  // A reference already in the deleted code is moved, not new.
-  const mb = "'use strict';\nconst K = 3;\nfunction g(x) {\n  return x * K;\n}\n";
-  const mv = editMutants("'use strict';\nconst K = 3;\nfunction g(x) {\n  const y = x * K;\n  return y + 1;\n}\n", { file: 'g.js', before: mb });
-  assert(!mv.some(m => m.ref) && !mv.unmutated_ref, JSON.stringify(mv.unmutated_ref));
-  // A replaced identifier with no definition here has nothing to mutate.
-  assert.deepStrictEqual(editMutants("'use strict';\nfunction t(s) {\n  return s.trimStart() + 1;\n}\n",
-    { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.trim() + 1;\n}\n" }).unmutated_ref, { name: 'trimStart', line: 3, hunk: 0 });
+// ---------- SG26: use-site relevance, per-test kills ----------
+
+test('editMutants: every inserted read gets a use-site mutant, however and wherever its name is bound (AUDIT-16 C1, H1)', () => {
+  const js = (pre, ref, body = 'String(s)') => editMutants(`'use strict';\n${pre}\nfunction f(s) {\n  return ${body}.slice(0, ${ref});\n}\n`,
+    { file: 'f.js', before: `'use strict';\n${pre}\nfunction f(s) {\n  return ${body};\n}\n` });
+  const py = (pre, ref, head = '') => editMutants(`${pre}\n\ndef f(s):\n${head}    return str(s)[0:${ref}]\n`,
+    { file: 'f.py', before: `${pre}\n\ndef f(s):\n${head}    return str(s)\n` });
+  const useOf = (ms, name) => ms.find(m => m.mutation === 'use_site' && m.ref === name);
+  for (const [pre, ref] of [['const { maxLen } = LIMITS;', 'maxLen'], ['const [A, MAX] = [1, 4096];', 'MAX'], ['let MAX;\nMAX = 4096;', 'MAX'],
+    ["const { MAX } = require('./limits');", 'MAX'], ['', 'f.MAX']]) {
+    const m = useOf(js(pre, ref), ref.split('.')[0]);
+    assert(m, `${pre} ${ref}`);
+    assert.match(m.src, new RegExp(`slice\\(0, \\(\\(v\\) => .*\\)\\(${ref.replace('.', '\\.')}\\)\\)`), 'the value is perturbed where the edit reads it');
+  }
+  assert(useOf(editMutants("'use strict';\nfunction f(s) {\n  const max = 4096;\n  return String(s).slice(0, max);\n}\n",
+    { file: 'f.js', before: "'use strict';\nfunction f(s) {\n  const max = 4096;\n  return String(s);\n}\n" }), 'max'), 'a local');
+  assert(js('class K {\n  static MAX = 4;\n  static g(s) { return s; }\n}', 'this.MAX').some(m => m.ref === 'MAX' && m.src.includes('(this.MAX))')), 'a this. member');
+  for (const [pre, ref, head] of [['MIN, MAX = 1, 4096', 'MAX'], ['try:\n    MAX = 4096\nexcept ImportError:\n    MAX = 1024', 'MAX'],
+    ['from app.limits import MAX', 'MAX'], ['', 'cfg["max"]', '    cfg = {"max": 4096}\n'], ['', 'self.MAX']]) {
+    const m = useOf(py(pre, ref, head), ref.split(/[.[]/)[0]);
+    assert(m, `${pre} ${ref}`);
+    assert(m.src.includes(`, ${ref})]`), m.src);
+  }
+  // A call is skipped: its receiver (else its first argument) takes its place.
+  const nested = editMutants('def f(s):\n    def cut(x, n=4):\n        return x[0:n]\n    return cut(str(s)) + ""\n',
+    { file: 'f.py', before: 'def f(s):\n    def cut(x, n=4):\n        return x[0:n]\n    return str(s)\n' });
+  assert(useOf(nested, 'cut').src.includes('return (str(s)) + ""'));
+  assert(useOf(js('', '4'), 'slice').src.includes('return (String(s));'));
+  // Bindings, keys and labels are no use; a replaced name also reverts on its own site, unless the code around it changed.
+  assert(!js('', '4', '{ k: s }').some(m => m.ref === 'k'));
+  const swap = editMutants("'use strict';\nfunction t(s) {\n  return s.trimStart() + 1;\n}\n", { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.trim() + 1;\n}\n" });
+  assert(swap.some(m => m.revert && m.mutation === 'revert_reference' && m.src.includes('s.trim() + 1')));
+  assert.deepStrictEqual(editMutants("'use strict';\nfunction t(s) {\n  return s.indexOf(1) !== -1;\n}\n",
+    { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.includes(1);\n}\n" }).unmutated_ref, { name: 'indexOf', line: 3, hunk: 0 });
+  // A read with no parse-valid perturbation (a match-case value pattern) is no evidence.
+  const pm = 'import enum\nclass C(enum.Enum):\n    A = 1\n    B = 2\n\n\ndef f(x):\n    match x:\n        case C.A:\n            return 1\n    return 0\n';
+  assert.deepStrictEqual(editMutants(pm.replace('case C.A:', 'case C.B:'), { file: 'f.py', before: pm }).unmutated_ref, { name: 'B', line: 9, hunk: 0 });
 });
 
 const hasPyTooling = require('../src/runner/test-runner').coverageTool('a.py', { cmd: 'pytest' }) === 'coverage.py';
@@ -819,5 +842,93 @@ test('a Python mutant that fails at import (collection) is no kill (AUDIT-13 C2)
   assert.strictEqual(res.reason, 'tests_insensitive');
   assert(res.mutation.collection_errors >= 1, JSON.stringify(res.mutation));
   assert.strictEqual(res.mutation.killed, null);
+  assertReverted(res, repo, 'app/m.py', before, kept);
+});
+
+test('a cap read where the edit uses it needs its own kill, wherever it is bound: a local, or a shared constant another tested consumer reads (AUDIT-16 H1, H2)', async (t) => {
+  const cur = 'function summary(s) {\n  const max = 4096;\n  return String(s);\n}';
+  const prop = 'function summary(s) {\n  const max = 4096;\n  return String(s).slice(0, max);\n}';
+  const weak = "const m = require('../src/s');\ntest('summary', () => { const r = m.summary('ab' + 'x'.repeat(5000)); assert(r.startsWith('ab') && r.length < 5000); });";
+  const local = await execOn(t, 'src/s.js', cur, prop, 'module.exports = { summary };', weak);
+  assert.strictEqual(local.res.status, 'reverted', JSON.stringify(local.res.mutation));
+  assert.strictEqual(local.res.reason, 'tests_insensitive');
+  assert.strictEqual(local.res.mutation.surviving_ref, 'max');
+  assertReverted(local.res, local.repo, 'src/s.js', local.before, local.kept);
+  const shared = await execOn(t, 'src/s.js', 'function summary(s) {\n  return String(s);\n}', 'function summary(s) {\n  return String(s).slice(0, MAX);\n}',
+    'const MAX = 4096;\nfunction title(s) {\n  return String(s).slice(0, MAX);\n}\nmodule.exports = { summary, title };',
+    `${weak}\ntest('title', () => { assert.strictEqual(m.title('x'.repeat(5000)).length, 4096); });`);
+  assert.strictEqual(shared.res.status, 'reverted', JSON.stringify(shared.res.mutation));
+  assert.strictEqual(shared.res.mutation.surviving_ref, 'MAX', 'the title test reads MAX elsewhere: no kill of this use');
+  const strong = await execOn(t, 'src/s.js', cur, prop, 'module.exports = { summary };',
+    "const m = require('../src/s');\ntest('summary', () => { assert.strictEqual(m.summary('ab' + 'x'.repeat(5000)), 'ab' + 'x'.repeat(4094)); });");
+  assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
+});
+
+test('a mutant that breaks module load is no kill: required at a test file\'s top or inside a test (AUDIT-16 C2)', async (t) => {
+  const cur = 'const P = [{ n: 3 }, { n: 4096 }];\nconst MAX = P[0].n;';
+  const prop = 'const P = [{ n: 3 }, { n: 4096 }];\nconst MAX = P[1].n;';
+  const rest = 'function body(s) {\n  return String(s).slice(0, MAX);\n}\nmodule.exports = { body };';
+  for (const body of ["const m = require('../src/b');\ntest('body', () => { assert.strictEqual(m.body('x'.repeat(10)).length, 10); });",
+    "test('body', () => { assert.strictEqual(require('../src/b').body('x'.repeat(10)).length, 10); });"]) {
+    const { res, repo, before, kept } = await execOn(t, 'src/b.js', cur, prop, rest, body, { ...GATE_DIFF_TEST });
+    assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+    assert.strictEqual(res.reason, 'tests_insensitive');
+    assert(res.mutation.collection_errors >= 1, JSON.stringify(res.mutation));
+    assert.strictEqual(res.mutation.killed, null);
+    assertReverted(res, repo, 'src/b.js', before, kept);
+  }
+});
+
+// The executor with runTests scripted: the main run passes and exercises the
+// edit, then each call returns the next of `runs`.
+function scriptedExecutor(runs) {
+  const runner = require('../src/runner/test-runner');
+  const execPath = require.resolve('../src/agents/executor');
+  const [orig, origExec] = [runner.runTests, require.cache[execPath]];
+  delete require.cache[execPath];
+  const seq = [{ status: 'passed', tests: { a: 'pass', b: 'pass' }, coverage: { available: true, exercised: true } }, ...runs];
+  let i = 0;
+  runner.runTests = async () => ({ framework: 'npm', command: 'npm test', stdout: '', stderr: '', execution_time_ms: 5, ...seq[Math.min(i++, seq.length - 1)] });
+  const fresh = require('../src/agents/executor');
+  runner.runTests = orig;
+  require.cache[execPath] = origExec;
+  return fresh;
+}
+
+test('a kill is a test that passed unmutated and fails in both mutant runs, with the same set of tests (AUDIT-16 C2)', async (t) => {
+  const cur = 'function inc(x) {\n  return x + 1;\n}';
+  const prop = 'function inc(x) {\n  return x + 2;\n}';
+  const pass = { status: 'passed', tests: { a: 'pass', b: 'pass' } };
+  const fail = (tests) => ({ status: 'failed', ...(tests ? { tests } : {}) });
+  const cases = [
+    ['no per-test results', [fail(), fail(), pass], 'no_failed_test'],
+    ['only a cancelled test', [fail({ a: 'error', b: 'pass' }), fail({ a: 'error', b: 'pass' }), pass], 'no_failed_test'],
+    ['a test missing from the mutant run', [fail({ a: 'fail' }), fail({ a: 'fail' }), pass], 'test_set_changed'],
+    ['a different test failing each time', [fail({ a: 'fail', b: 'pass' }), fail({ a: 'pass', b: 'fail' }), pass], 'unconfirmed']
+  ];
+  for (const [label, runs, counter] of cases) {
+    const repo = nodeRepo(t, { 'src/inc.js': `'use strict';\n${cur}\nmodule.exports = { inc };\n` });
+    const res = await scriptedExecutor(runs).runExecutor({ proposal: makeProposal('src/inc.js', cur, prop), repoRoot: repo, onKept: () => 'c1' });
+    assert.strictEqual(res.status, 'reverted', `${label}: ${JSON.stringify(res.mutation)}`);
+    assert.strictEqual(res.reason, 'tests_insensitive', label);
+    assert.strictEqual(res.mutation.killed, null, label);
+    assert(res.mutation[counter] >= 1, `${label}: ${JSON.stringify(res.mutation)}`);
+  }
+  const repo = nodeRepo(t, { 'src/inc.js': `'use strict';\n${cur}\nmodule.exports = { inc };\n` });
+  const res = await scriptedExecutor([fail({ a: 'fail', b: 'pass' }), fail({ a: 'fail', b: 'fail' }), pass]).runExecutor({ proposal: makeProposal('src/inc.js', cur, prop), repoRoot: repo, onKept: () => 'c1' });
+  assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
+  assert.strictEqual(res.mutation.killed_test, 'a');
+});
+
+test('Python: a class attribute read through self. needs its own kill at the use (AUDIT-16 H1)', { skip: hasPyTooling ? false : 'pytest + coverage.py not installed' }, async (t) => {
+  const cur = 'class Body:\n    MAX = 4096\n\n    def of(self, s):\n        return str(s)\n';
+  const prop = 'class Body:\n    MAX = 4096\n\n    def of(self, s):\n        return str(s)[0:self.MAX]\n';
+  const repo = pyPkgRepo(t, cur, 'def test_of():\n    assert m.Body().of("abc") == "abc"\n');
+  const before = fs.readFileSync(path.join(repo, 'app/m.py'), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('app/m.py', cur, prop), repoRoot: repo, onKept: () => { kept = true; return 'c1'; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.surviving_ref, 'self');
   assertReverted(res, repo, 'app/m.py', before, kept);
 });

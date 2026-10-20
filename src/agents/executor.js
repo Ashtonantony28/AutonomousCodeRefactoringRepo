@@ -10,21 +10,37 @@ const { changeHunks } = require('../utils/hunks');
 
 const MUTANT_CAP = 3;
 
+// A revert mutant (`revert`) is a site of its own next to the value
+// perturbation of the same reference.
+const siteKey = (m) => (m.revert ? `r${m.site}` : m.site);
+
+// Tests that passed in the unmutated `control` run and failed in `r`, or
+// null when the runs are not comparable: no per-test results, a load
+// failure, or a different set of tests (one missing, crashed or added).
+function failedTests(r, control) {
+  if (!r.tests || !control.tests || r.collection_error) return null;
+  const ids = Object.keys(r.tests);
+  if (ids.length !== Object.keys(control.tests).length || ids.some(id => !(id in control.tests))) return null;
+  return ids.filter(id => r.tests[id] === 'fail' && control.tests[id] === 'pass');
+}
+
 // The suite has to notice a bug in every token the edit inserted that a
 // mutation operator applies to (a site, `editMutants`): up to MUTANT_CAP
 // mutants of each site are applied one at a time and the suite re-run; the
 // first one that makes it fail is that site's evidence, and it counts for
 // that site only (a kill of `0 -> 1` in `slice(0, 1000)` says nothing about
-// `1000`). A hunk with inserted tokens but no site has no evidence. When the
-// change is carried by a reference (an inserted identifier naming a constant
-// or helper defined elsewhere in the file, or replacing another identifier),
-// every site of that definition needs its own kill too, and a reference with
-// nothing to mutate (`unmutated_ref`) is no evidence. A mutant
-// run that times out is re-run once and counts only if that run fails. A run
-// that fails at collection or import (pytest exit 2-5) is never a kill. A
-// failure is a kill only when it reproduces: the same mutant fails again and
-// the unmutated suite then passes (a mutant that passes on the second run is
-// no kill; an unmutated failure means the suite is flaky and nothing counts).
+// `1000`). A hunk with inserted tokens but no site has no evidence. Every
+// inserted identifier or member the edit reads is a site too, perturbed
+// where the edit uses it (a replaced name also reverted), and one with no
+// parse-valid use-site mutant (`unmutated_ref`) is no evidence. A mutant
+// run that times out is re-run once and counts only if that run fails. A
+// kill is per test: a test that passed in the unmutated control run fails
+// in both mutant runs, each of which ran the same tests as the control
+// (`failedTests`); a run where a module failed to load (`collection_error`),
+// without per-test results, or with a test missing, crashed or added is no
+// kill. A failure counts only when it reproduces: the same mutant fails
+// again and the unmutated suite then passes (an unmutated failure means the
+// suite is flaky and nothing counts).
 // Deleted tokens (of every hunk) have nothing to mutate: they stand when the
 // diff test is `equivalent` and executed each of them, or, for a stretch
 // that replaces them with at least as many inserted tokens holding a site,
@@ -35,7 +51,8 @@ const MUTANT_CAP = 3;
 // run's (instrumented, so an upper bound) until a surviving mutant run
 // measures it. `budget_exhausted` (also set when the edit is too large to
 // mutate) means the tests were not judged. The edited content is always
-// written back. `ok` is the verdict; `killed` names the last killing mutant.
+// written back. `ok` is the verdict; `killed` / `killed_test` name the last
+// killing mutant and its test.
 async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest, budgetMs, usedMs }) {
   const t0 = Date.now();
   const abs = path.join(repoRoot, file);
@@ -61,7 +78,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
     out.unobserved_deletion_line = unseen.line;
     return done();
   }
-  const sites = [...new Set(mutants.map(m => m.site))];
+  const sites = [...new Set(mutants.map(siteKey))];
   out.sites = sites.length;
   const runOnce = async () => {
     const left = budgetMs - spent;
@@ -82,29 +99,31 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
     if (r && r.status === 'passed') suiteMs = Math.max(1, r.execution_time_ms);
     return r;
   };
+  const count = (k) => { out[k] = (out[k] || 0) + 1; };
   try {
     for (const site of sites) {
       let killed = false;
-      for (const m of mutants.filter(x => x.site === site)) {
-        let r = await runSuite(m.src);
-        if (r && r.collection_error) { out.collection_errors = (out.collection_errors || 0) + 1; continue; }
-        if (r && r.status === 'failed') {
-          r = await runSuite(m.src);
-          if (r && (r.status !== 'failed' || r.collection_error)) { out.unconfirmed = (out.unconfirmed || 0) + 1; continue; }
-          const control = r && await runSuite(edited);
-          if (control && control.status !== 'passed') { out.flaky = true; return done(); }
-          r = control && r;
-        }
+      for (const m of mutants.filter(x => siteKey(x) === site)) {
+        const r = await runSuite(m.src);
         if (!r) { out.budget_exhausted = true; return done(); }
-        if (r.status === 'failed') {
-          out.killed = m.mutation;
-          out.killed_line = m.line;
-          killed = true;
-          break;
-        }
+        if (r.collection_error) { count('collection_errors'); continue; }
+        if (r.status !== 'failed') continue;
+        if (!r.tests || !Object.values(r.tests).includes('fail')) { count('no_failed_test'); continue; }
+        const again = await runSuite(m.src);
+        if (!again) { out.budget_exhausted = true; return done(); }
+        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }
+        const control = await runSuite(edited);
+        if (!control) { out.budget_exhausted = true; return done(); }
+        if (control.status !== 'passed') { out.flaky = true; return done(); }
+        const a = failedTests(r, control), b = failedTests(again, control);
+        const tests = a && b ? a.filter(id => b.includes(id)) : [];
+        if (!tests.length) { count(a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
+        Object.assign(out, { killed: m.mutation, killed_line: m.line, killed_test: tests[0] });
+        killed = true;
+        break;
       }
       if (!killed) {
-        const sm = mutants.find(x => x.site === site);
+        const sm = mutants.find(x => siteKey(x) === site);
         Object.assign(out, { killed: null, surviving_hunk_line: hunks[sm.hunk].line, surviving_site_line: sm.line });
         if (sm.ref) out.surviving_ref = sm.ref;
         return done();

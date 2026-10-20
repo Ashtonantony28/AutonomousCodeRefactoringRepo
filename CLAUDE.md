@@ -84,16 +84,23 @@ saturation figures are reported on the dashboard as a spend indicator only.
     site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers `0`, never
     `1000`. A hunk with inserted tokens but no site has no evidence; more
     than 12 sites in one hunk is not judged (`mutation_budget`).
-  - **Carried references.** When the change is carried by an identifier,
-    helper call or constant — an inserted identifier (not a keyword, not
-    among the hunk's deleted tokens) that names a top-level binding of the
-    file defined outside the edit, or replaces another identifier in the
-    same stretch — every site of that binding's definition is a site of the
-    hunk and needs its own kill (`slice(0, MAX_BODY)` needs a kill of
-    `MAX_BODY = 4096`; `if (isSafe(n))` a kill at every site of `isSafe`). A
-    reference with no definition in the file (`includes` → `indexOf`) or no
-    parse-valid mutant of it is no evidence (`tests_insensitive`,
-    `mutation.unmutated_ref`); a kill of another token never stands in.
+  - **Use sites.** Every inserted identifier or member the edit reads (not a
+    keyword, declaration, parameter, assignment target, key, label, import
+    name or type annotation) is a site of the hunk too, whatever binds it
+    (local, destructured, tuple, conditional, imported, `this.`/`self.`
+    attribute, nested default): one mutant perturbs the value where the
+    edit uses it (the identifier with its member/call chain: number + 1,
+    string + `~`, boolean negated, list/dict minus its last entry,
+    null/`None` → 0, function result perturbed; a call is skipped — its
+    receiver, else its first argument, takes its place; a call or read in
+    statement position is dropped). So `slice(0, MAX)` needs a kill of
+    `MAX` at this use, and a kill through another consumer of `MAX` never
+    stands in. A name that replaced another in its stretch (and is not
+    deleted elsewhere in the hunk) also needs a kill of the old name put
+    back (`revert_reference`) when every stretch of the hunk only swaps
+    names; inside changed code (`includes` → `indexOf(x) !== -1`) it is no
+    evidence. A read with no parse-valid use-site mutant is no evidence
+    (`tests_insensitive`, `mutation.unmutated_ref`).
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
@@ -107,14 +114,22 @@ saturation figures are reported on the dashboard as a spend indicator only.
     many inserted tokens holding a site stands, on that site's kill.
   Mutant and control runs use the main run's command, interpreter, import
   path and env minus coverage (pytest always runs as `<pytest's python> -m
-  pytest`, so the repo root is on `sys.path`); a run that fails at
-  collection or import (pytest exit 2–5) is never a kill.
+  pytest`, so the repo root is on `sys.path`). Kills are per test: each run
+  reports per-test results (node:test TAP to a temp file through
+  `NODE_OPTIONS`, unless the suite picks its own `--test-reporter`; pytest
+  `--junitxml` with `--tb=short`), and a mutant is killed only when a test
+  that passed in the unmutated control run fails in both mutant runs, each
+  of which ran the same set of tests as the control. A run where a module
+  failed to load (a test file process crashed, a failure raised from a
+  module body — `Module._compile` / `in <module>` — or a pytest collection
+  error, whatever the exit code), a run without per-test results (other
+  runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
   have their own 60 s budget: each gets at most 2× the plain suite time + 1 s
   (the main run's time until a surviving mutant run measures it), none after
   the first starts with less than that time + 0.5 s left. Only a failing run
   kills a mutant; a timed-out run is re-run once and counts only if that run
-  fails. A kill must reproduce: the same mutant fails a second run and the
+  fails. A kill must reproduce: the same test fails a second mutant run and the
   unmutated suite then passes (three runs per kill, all inside the same
   budget, so suites over about a third of it end `mutation_budget`); a
   mutant passing its second run is no kill, and an unmutated failure ends

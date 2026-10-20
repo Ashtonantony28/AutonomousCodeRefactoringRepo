@@ -374,8 +374,76 @@ function pyExercised(jsonPath, repoRoot, absFile, src, span, { noData = false } 
   return summarize('coverage.py', lines.length, lines.filter(n => executed.has(n)).length, { detail: key ? null : 'file never imported by the tests', groups: [...groups.values()] });
 }
 
+// Per-test results: node:test TAP (a second reporter, to a temp file, set
+// through NODE_OPTIONS unless the suite picks its own reporters) or pytest
+// JUnit XML (`--tb=short`, so a frame run by a module body reads
+// `in <module>`). -> { tests: { id: 'pass' | 'fail' | 'skip' | 'error' },
+// load } or null. `load`: a module failed to load (a test file process
+// crashed, a failure raised from a module body, a pytest collection error).
+// Only 'fail' is an assertion or exception inside a test.
+const LOAD_FRAME = /\bModule\._compile\b|\bModuleJob\.run\b/;
+function tapResults(text) {
+  const tests = {}, names = [];
+  let load = false, cur = null, yaml = null;
+  const add = (id, state) => { let k = id; for (let n = 2; k in tests; n++) k = `${id}#${n}`; tests[k] = state; };
+  for (const line of text.split('\n')) {
+    const indent = line.length - line.trimStart().length;
+    if (yaml !== null) {
+      if (line.trim() === '...' && indent === yaml) {
+        if (cur.type !== 'suite') add(cur.id, cur.state === 'fail' && cur.failureType !== 'testCodeFailure' ? 'error' : cur.state);
+        yaml = null;
+      } else {
+        const kv = line.trim().match(/^(\w+):\s*'?([\w-]*)/);
+        if (kv && indent === yaml) cur[kv[1]] = kv[2];
+        if (cur.state === 'fail' && ((kv && kv[1] === 'exitCode' && indent === yaml) || LOAD_FRAME.test(line))) load = true;
+      }
+      continue;
+    }
+    const sub = line.match(/^\s*# Subtest: (.*)$/);
+    if (sub) { names.length = indent >> 2; names.push(sub[1]); continue; }
+    const m = line.match(/^\s*(not )?ok \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
+    if (m) {
+      names.length = indent >> 2;
+      cur = { id: [...names, m[2]].join(' > '), state: m[3] ? 'skip' : m[1] ? 'fail' : 'pass' };
+      yaml = indent + 2;
+    }
+  }
+  return Object.keys(tests).length ? { tests, load } : null;
+}
+
+const unxml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&amp;/g, '&');
+function junitResults(xml) {
+  const tests = {};
+  let load = false;
+  const attr = (a, k) => { const m = a.match(new RegExp(`\\b${k}="([^"]*)"`)); return m ? unxml(m[1]) : ''; };
+  for (const m of xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
+    const body = m[2] || '';
+    let state = 'pass';
+    if (/<(?:failure|error)\b/.test(body)) {
+      state = /<failure\b/.test(body) ? 'fail' : 'error';
+      if (/<error\b[^>]*message="collection failure/.test(body) || /:\d+: in <module>$/m.test(unxml(body))) load = true;
+    } else if (/<skipped\b/.test(body)) state = 'skip';
+    const id = `${attr(m[1], 'classname')}::${attr(m[1], 'name')}`;
+    let k = id;
+    for (let n = 2; k in tests; n++) k = `${id}#${n}`;
+    tests[k] = state;
+  }
+  return Object.keys(tests).length ? { tests, load } : null;
+}
+
+// Reporters the suite picks itself cannot be extended (node needs as many
+// destinations as reporters): no per-test results then.
+function ownsReporters(repoRoot, env) {
+  if (/--test-reporter/.test(env.NODE_OPTIONS || '')) return true;
+  try { return /--test-reporter/.test(JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).scripts.test); } catch { return false; }
+}
+
 // `edit` ({ file, start, end }: the changed span of the edited file) turns on
 // execution evidence: result.coverage says whether any test ran the edit.
+// result.tests holds the per-test results when the framework reports them
+// (tapResults / junitResults); collection_error is set when a module failed
+// to load or collect, so no test judged the code.
 async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null } = {}) {
   const detected = command || detectCommand(repoRoot);
   if (!detected) {
@@ -412,12 +480,22 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     env.COVERAGE_FILE = path.join(covDir, 'data');
     args = ['-m', 'coverage', 'run', ...args];
   }
+  const pytest = detected.framework === 'pytest';
+  const report = path.join(pycDir, pytest ? 'junit.xml' : 'tests.tap');
+  const reportArgs = pytest ? [`--junitxml=${report}`, '--tb=short'] : [];
+  if (!pytest && !ownsReporters(repoRoot, env)) {
+    env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --test-reporter=tap --test-reporter-destination=stdout --test-reporter=tap "--test-reporter-destination=${report}"`.trim();
+  }
 
-  let result, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
+  let result, perTest = null, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
   const deadline = Date.now() + timeoutMs;
   let tCov = null;
   try {
-    result = await runCommand({ cmd, args, cwd: repoRoot, env, timeoutMs });
+    result = await runCommand({ cmd, args: [...args, ...reportArgs], cwd: repoRoot, env, timeoutMs });
+    try {
+      const text = fs.readFileSync(report, 'utf8');
+      perTest = pytest ? junitResults(text) : tapResults(text);
+    } catch { /* no per-test report */ }
     if (tool && !result.timedOut && !result.spawnError) {
       tCov = Date.now();
       checkDeadline(deadline);
@@ -452,7 +530,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   const counts = parseCounts(result.stdout + '\n' + result.stderr, detected.framework);
   // pytest exits 1 when tests failed; 2-5 when collection or an import broke,
   // it was interrupted, misused, or collected nothing: no test judged the code.
-  const collectionError = status === 'failed' && detected.framework === 'pytest' && result.exitCode >= 2 && result.exitCode <= 5;
+  const collectionError = status === 'failed' && ((pytest && result.exitCode >= 2 && result.exitCode <= 5) || !!(perTest && perTest.load));
   const out = {
     status,
     framework: detected.framework,
@@ -466,6 +544,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     stderr: truncate(result.stderr, 4000),
     timed_out: result.timedOut
   };
+  if (perTest) out.tests = perTest.tests;
   if (collectionError) out.collection_error = true;
   if (coverage) {
     if (tCov != null) coverage.duration_ms = Date.now() - tCov;
@@ -479,4 +558,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, changedSpan, coverageTool, TIMEOUT_MS };
+module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, TIMEOUT_MS };

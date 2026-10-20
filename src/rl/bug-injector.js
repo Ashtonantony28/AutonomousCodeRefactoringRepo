@@ -358,72 +358,173 @@ const KEYWORDS = {
     'instanceof let new return super switch this throw try typeof var void while with yield await async of static get set true false null ' +
     'undefined NaN Infinity arguments').split(' ')),
   python: new Set(('False None True and as assert async await break class continue def del elif else except finally for from global if ' +
-    'import in is lambda nonlocal not or pass raise return try while with yield self cls match case').split(' '))
+    'import in is lambda nonlocal not or pass raise return try while with yield match case').split(' '))
 };
 const IDENT = /^[A-Za-z_$][\w$]*$/;
 
-// Top-level bindings of the file -> Map(name -> [start, end) of the
-// definition): JS declarators / functions / classes (babel), Python
-// column-0 assignments, defs and classes (lexical, on the blanked source).
-function moduleBindings(src, code, lang, file) {
-  const out = new Map();
-  if (lang === 'javascript') {
-    const { ast } = require('../validation/ast-checker').parseJs(src, file);
-    for (let s of (ast && ast.program.body) || []) {
-      if (/^Export(?:Named|Default)Declaration$/.test(s.type) && s.declaration) s = s.declaration;
-      if (s.type === 'VariableDeclaration') {
-        for (const d of s.declarations) if (d.id.type === 'Identifier' && d.init) out.set(d.id.name, [d.init.start, d.init.end]);
-      } else if (/^(?:Function|Class)Declaration$/.test(s.type) && s.id) {
-        out.set(s.id.name, [s.start, s.end]);
-      }
+// ---------- Use sites of inserted references ----------
+// An inserted identifier or member the edit reads is perturbed where the
+// edit uses it, whatever binds it: its value (the identifier with its member
+// / call chain) gets P below, a call is skipped (its receiver, else its
+// first argument, takes its place), a call or read in statement position is
+// dropped. Binding positions (declarations, parameters, assignment targets,
+// keys, labels, imports) and type annotations are no use.
+const JS_PERTURB = (u) => `((v) => { const p = (v) => typeof v === 'number' ? v + 1 : typeof v === 'bigint' ? v + 1n : typeof v === 'string' ? v + '~' : ` +
+  "typeof v === 'boolean' ? !v : v == null ? 0 : Array.isArray(v) ? (v.length ? v.slice(0, -1) : [0]) : " +
+  "typeof v === 'function' && !/^class\\b/.test(Function.prototype.toString.call(v)) ? function (...a) { return p(v.apply(this, a)); } : " +
+  'v instanceof Promise ? v.then(p) : Object.getPrototypeOf(v) === Object.prototype && Object.keys(v).length ? Object.fromEntries(Object.entries(v).slice(0, -1)) : v; ' +
+  `return p(v); })(${u})`;
+const PY_PERTURB = (u) => '(lambda p, v: p(p, v))(lambda p, v: (not v) if type(v) is bool else v + 1 if type(v) in (int, float, complex) ' +
+  'else v + "~" if type(v) is str else v + b"~" if type(v) is bytes else v[:-1] if type(v) in (list, tuple) and v else type(v)([0]) if type(v) in (list, tuple) ' +
+  'else dict(list(v.items())[:-1]) if type(v) is dict and v else 0 if v is None ' +
+  `else (lambda *a, **k: p(p, v(*a, **k))) if callable(v) and not isinstance(v, type) else v, ${u})`;
+
+const BINDS = {
+  VariableDeclarator: ['id'], FunctionDeclaration: ['id', 'params'], FunctionExpression: ['id', 'params'], ArrowFunctionExpression: ['params'],
+  ObjectMethod: ['params'], ClassMethod: ['params'], ClassPrivateMethod: ['params'], ClassDeclaration: ['id'], ClassExpression: ['id'],
+  CatchClause: ['param'], ForInStatement: ['left'], ForOfStatement: ['left'], AssignmentExpression: ['left'], UpdateExpression: ['argument'],
+  LabeledStatement: ['label'], BreakStatement: ['label'], ContinueStatement: ['label'], MetaProperty: ['meta', 'property']
+};
+const TYPE_KEYS = new Set(['typeAnnotation', 'returnType', 'typeParameters', 'superTypeParameters', 'implements', 'predicate']);
+const MEMBER = /^(?:Optional)?MemberExpression$/;
+const CALL = /^(?:Optional)?CallExpression$|^NewExpression$/;
+
+// JS (babel): `toks` ([s, e) of inserted identifiers) -> Map(s -> { use: [s, e],
+// text }) for those the edit reads, or null when the file does not parse.
+function jsUses(src, file, toks) {
+  const { ast } = require('../validation/ast-checker').parseJs(src, file);
+  if (!ast) return null;
+  const want = new Map(toks.map(([s, e]) => [s, e]));
+  const up = new Map();
+  const found = [];
+  const stack = [[ast.program, null, null, false]];
+  while (stack.length) {
+    const [n, p, k, bind] = stack.pop();
+    up.set(n, [p, k]);
+    if (n.type === 'Identifier' && !bind && want.get(n.start) === n.end) found.push(n);
+    if (/^(?:Import|Export)\w*Specifier$|^TS|^JSX|TypeAnnotation$/.test(n.type)) continue;
+    for (const key of Object.keys(n)) {
+      if (AST_SKIP.has(key) || TYPE_KEYS.has(key)) continue;
+      const noRef = (BINDS[n.type] || []).includes(key) || (n.type === 'UnaryExpression' && /^(?:typeof|delete)$/.test(n.operator)) ||
+        (key === 'key' && !n.computed) || (key === 'local' || key === 'exported' || key === 'imported');
+      const b = noRef || ((n.type === 'AssignmentPattern' && key === 'right') || (key === 'key' && n.computed) ? false : bind);
+      for (const c of [].concat(n[key])) if (c && typeof c.type === 'string') stack.push([c, n, key, b]);
     }
-    return out;
   }
-  const re = /^(?:(?:async[ \t]+)?def[ \t]+(\w+)|class[ \t]+(\w+)|(\w+)[ \t]*(?::[^=\n]*)?=(?!=))/gm;
-  let m;
-  while ((m = re.exec(code))) {
-    let j = m.index + m[0].length, depth = 0;
-    if (m[3]) {
-      for (; j < code.length; j++) {
-        const c = code[j];
-        if ('([{'.includes(c)) depth++;
-        else if (')]}'.includes(c)) depth--;
-        else if (c === '\n' && depth <= 0 && code[j - 1] !== '\\') break;
-      }
-    } else {
-      const next = /\n(?=\S)/g;
-      next.lastIndex = j;
-      const n = next.exec(code);
-      j = n ? n.index : code.length;
+  const out = new Map();
+  for (const n of found) {
+    let u = n;
+    let [p, k] = up.get(u);
+    if (p.type === 'PrivateName') { u = p; [p, k] = up.get(u); }
+    if (MEMBER.test(p.type) && k === 'property' && !p.computed) { u = p; [p, k] = up.get(u); }
+    while (p && ((MEMBER.test(p.type) && k === 'object') || (CALL.test(p.type) && k === 'callee') || (p.type === 'TaggedTemplateExpression' && k === 'tag'))) {
+      u = p;
+      [p, k] = up.get(u);
     }
-    out.set(m[1] || m[2] || m[3], [m[3] ? m.index + m[0].length : m.index, j]);
+    const text = (x) => src.slice(x.start, x.end);
+    let rep;
+    if (p.type === 'ObjectProperty' && p.shorthand) rep = `${n.name}: ${JS_PERTURB(n.name)}`;
+    else if (p.type === 'ExpressionStatement') rep = 'void 0';
+    else if (CALL.test(u.type)) {
+      const c = u.callee;
+      const ns = !MEMBER.test(c.type) || /^(?:ThisExpression|Super)$/.test(c.object.type) || (c.object.type === 'Identifier' && /^[A-Z]/.test(c.object.name));
+      const arg = u.arguments[0] && u.arguments[0].type !== 'SpreadElement' ? u.arguments[0] : null;
+      const skip = ns ? arg : c.object;
+      rep = skip ? `(${text(skip)})` : JS_PERTURB(text(u));
+    } else rep = JS_PERTURB(text(u));
+    out.set(n.start, { use: [u.start, u.end], text: rep });
   }
   return out;
 }
 
-// References a hunk's behaviour change is carried by: an inserted identifier
-// (not a keyword, not named among the hunk's deleted tokens) that either
-// names a top-level binding of the file defined outside the edit (a
-// constant, a helper), or replaces another identifier in the same gap (a
-// changed call, method or variable). `h` is a changeHunks hunk of `before`
-// -> `src`. -> [{ name, at, def: [s, e) | null }]
-function carriedReferences(src, before, h, lang, bindings, inEdit) {
-  const word = (r) => src.slice(r[0], r[1]);
-  const was = (r) => before.slice(r[0], r[1]);
-  const kw = KEYWORDS[lang];
-  const isRef = (t) => IDENT.test(t) && !kw.has(t) && !/^\d/.test(t);
-  const deleted = new Set((h.deleted || []).map(was).filter(isRef));
+// Python (ast, one python3 run): as jsUses, with offsets converted from
+// UTF-8 columns. An `await` is part of the use it awaits.
+const PY_USES = `import ast, json, sys
+req = json.load(sys.stdin)
+src = req['src']
+lines = src.split('\\n')
+def u16(s):
+    return len(s.encode('utf-16-le', 'surrogatepass')) // 2
+starts = [0]
+for l in lines:
+    starts.append(starts[-1] + u16(l) + 1)
+def off(ln, col):
+    return starts[ln - 1] + u16(lines[ln - 1].encode('utf-8', 'surrogatepass')[:col].decode('utf-8', 'replace'))
+def span(n):
+    return [off(n.lineno, n.col_offset), off(n.end_lineno, n.end_col_offset)]
+try:
+    tree = ast.parse(src)
+except Exception:
+    print('null')
+    sys.exit()
+up = {}
+ann = set()
+for n in ast.walk(tree):
+    for c in ast.iter_child_nodes(n):
+        up[c] = n
+    for a in (getattr(n, 'annotation', None), getattr(n, 'returns', None)):
+        if isinstance(a, ast.expr):
+            ann.update(ast.walk(a))
+want = {tuple(t) for t in req['toks']}
+out = []
+for n in ast.walk(tree):
+    if n in ann or not isinstance(getattr(n, 'ctx', None), ast.Load):
+        continue
+    if isinstance(n, ast.Name):
+        at = span(n)
+    elif isinstance(n, ast.Attribute):
+        e = off(n.end_lineno, n.end_col_offset)
+        at = [e - len(n.attr), e]
+    else:
+        continue
+    if tuple(at) not in want:
+        continue
+    u = n
+    while True:
+        p = up.get(u)
+        if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is u and isinstance(p.ctx, ast.Load) or isinstance(p, ast.Call) and p.func is u or isinstance(p, ast.Await):
+            u = p
+        else:
+            break
+    skip = None
+    if isinstance(u, ast.Call):
+        f = u.func
+        if isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and (f.value.id in ('self', 'cls') or f.value.id[:1].isupper())):
+            skip = span(f.value)
+        elif u.args and not isinstance(u.args[0], ast.Starred):
+            skip = span(u.args[0])
+    out.append([at[0], span(u), isinstance(up.get(u), ast.Expr), skip])
+print(json.dumps(out))
+`;
+function pyUses(src, toks, timeoutMs = 10_000) {
+  const r = spawnSync('python3', ['-I', '-c', PY_USES], { input: JSON.stringify({ src, toks }), encoding: 'utf8', timeout: Math.max(1, timeoutMs), maxBuffer: 16 * 1024 * 1024 });
+  let rows;
+  try { rows = JSON.parse(r.stdout); } catch { return null; }
+  if (!Array.isArray(rows)) return null;
+  const text = ([s, e]) => src.slice(s, e);
+  return new Map(rows.map(([at, use, stmt, skip]) => [at, { use, text: stmt ? 'None' : skip ? `(${text(skip)})` : PY_PERTURB(text(use)) }]));
+}
+
+// Inserted identifier tokens of a hunk the edit may read: [{ at, end, name, was }].
+// `was` marks a replaced name (one not deleted anywhere in the hunk, in a
+// stretch that deleted identifiers): the k-th deleted identifier of the
+// stretch when every stretch of the hunk only swaps names one for one,
+// else '' (a replacement in changed code: nothing reverts it alone).
+function insertedNames(src, before, h, lang) {
+  const isName = (t) => IDENT.test(t) && !KEYWORDS[lang].has(t);
+  const text = (from) => ([s, e]) => from.slice(s, e);
+  const gaps = (h.gaps || []).map(g => ({ ins: g.ins, del: g.del.map(text(before)) }));
+  const moved = new Set(gaps.flatMap(g => g.del));
+  const swaps = gaps.every(g => g.ins.length === g.del.length && g.del.every(isName) && g.ins.map(text(src)).every(isName));
   const out = [];
-  for (const g of h.gaps || []) {
-    const replaced = g.del.map(was).some(isRef);
-    for (const r of g.ins) {
-      const name = word(r);
-      if (!isRef(name) || deleted.has(name)) continue;
-      const member = /\??\.\s*$/.test(src.slice(Math.max(0, r[0] - 8), r[0]));
-      const def = member ? null : bindings().get(name);
-      if (def && !inEdit(def)) out.push({ name, at: r[0], def });
-      else if (replaced && !def) out.push({ name, at: r[0], def: null });
-    }
+  for (const g of gaps) {
+    const del = g.del.filter(isName);
+    g.ins.forEach(([s, e], k) => {
+      const name = src.slice(s, e);
+      if (!isName(name)) return;
+      const was = del.length && !moved.has(name) ? (swaps ? g.del[k] : '') : null;
+      out.push({ at: s, end: e, name, was });
+    });
   }
   return out;
 }
@@ -438,16 +539,17 @@ const EDIT_MAX_SITES = 12;
 // edit) the hunks and their tokens come from a token diff, else [start, end)
 // is one hunk and one site. Unchanged tokens, even on an edited line, are
 // never mutated. Operators are taken round-robin, at most max * 4 candidates
-// per site. An edit over EDIT_MAX_HUNKS hunks,
-// EDIT_MAX_CHARS changed characters or EDIT_MAX_SITES sites in one hunk (or
-// one too large to diff) gets no mutants and the result is marked `capped`;
-// a Python parse check that did not finish within `timeoutMs` (default 10 s)
-// gives none either, marked `unchecked`. Each mutant is parse-checked on the
-// smallest statement around it (jsParseCheck / parsesPython), not the file.
-// A reference the hunk's change is carried by (carriedReferences) adds every
-// site of its definition (mutants marked `ref`); one with no definition in
-// the file or no parse-valid mutant of it gives none, marked `unmutated_ref`.
-// -> [{ mutation, src, line, hunk, site, ref? }] (site: the token's offset in src)
+// per site. Every inserted identifier or member the edit reads is a site
+// too (one use-site mutant, `ref`: see jsUses), and one that replaced
+// another identifier in its stretch another (`revert`: the old name back).
+// An edit over EDIT_MAX_HUNKS hunks, EDIT_MAX_CHARS changed characters or
+// EDIT_MAX_SITES sites in one hunk (or one too large to diff) gets no
+// mutants and the result is marked `capped`; a Python parse or use check
+// that did not finish within `timeoutMs` (default 10 s) gives none either,
+// marked `unchecked`. Each mutant is parse-checked on the smallest statement
+// around it (jsParseCheck / parsesPython), not the file. A reference with
+// no parse-valid use-site mutant gives none, marked `unmutated_ref`.
+// -> [{ mutation, src, line, hunk, site, ref?, revert? }] (site: the token's offset in src)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -462,11 +564,11 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= i) lo = mid; else hi = mid - 1; }
     return lo + 1;
   };
+  const names = hunks.map(h => insertedNames(src, before || '', h, lang));
+  const toks = names.flat().map(t => [t.at, t.end]);
+  const uses = !toks.length ? new Map() : lang === 'python' ? pyUses(src, toks, timeoutMs) : jsUses(src, file, toks);
+  if (!uses) return Object.assign([], { unchecked: true });
   const candidates = [];
-  let bound;
-  const bindings = () => bound || (bound = moduleBindings(src, code, lang, file));
-  const inEdit = ([s, e]) => hunks.some(h => h.ranges.some(([a, b]) => a < e && b > s));
-  const defsDone = new Set();
   const needed = [];
   for (let hi = 0; hi < hunks.length; hi++) {
     const h = hunks[hi];
@@ -494,32 +596,23 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
         if (l.length < max) l.push({ op, m, hunk: hi, site });
       }
     });
-    // A carried reference needs a kill at every site of its definition; one
-    // with no definition here, or none that mutates, has no evidence.
-    for (const ref of carriedReferences(src, before || '', h, lang, bindings, inEdit)) {
-      const key = ref.def && ref.def.join(':');
-      if (key && defsDone.has(key)) continue;
-      let found = 0;
-      if (ref.def) {
-        defsDone.add(key);
-        EDIT_OPS[lang].forEach((op, oi) => {
-          const re = new RegExp(op.re.source, op.re.flags);
-          re.lastIndex = ref.def[0];
-          let m;
-          while ((m = re.exec(code)) && m.index < ref.def[1]) {
-            if (op.to && op.to(m[0]) === m[0]) continue;
-            found++;
-            if (!sites.has(m.index)) sites.set(m.index, EDIT_OPS[lang].map(() => []));
-            const l = sites.get(m.index)[oi];
-            if (l.length < max) l.push({ op, m, hunk: hi, site: m.index, ref: ref.name });
-          }
-        });
+    // Use sites: one per distinct use, plus one per replaced name.
+    const refs = [];
+    const seen = new Set();
+    for (const t of names[hi]) {
+      const u = uses.get(t.at);
+      if (!u) continue;
+      const base = { hunk: hi, site: t.at, ref: t.name, line: lineOf(t.at) };
+      if (t.was === '') return Object.assign([], { unmutated_ref: { name: t.name, line: base.line, hunk: hi } });
+      if (!seen.has(u.use.join(':'))) {
+        seen.add(u.use.join(':'));
+        refs.push({ ...base, mutation: 'use_site', edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
       }
-      const need = { name: ref.name, line: lineOf(ref.at), hunk: hi };
-      if (!found) return Object.assign([], { unmutated_ref: need });
-      needed.push(need);
+      if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, edits: [[t.at, t.end - t.at, t.was]], lo: t.at, hi: t.end });
     }
-    if (sites.size > EDIT_MAX_SITES) return Object.assign([], { capped: true });
+    if (sites.size + refs.length > EDIT_MAX_SITES) return Object.assign([], { capped: true });
+    needed.push(...refs);
+    candidates.push(...refs.map(built => ({ built })));
     for (const perOp of sites.values()) {
       const order = [];
       for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
@@ -527,28 +620,29 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     }
   }
   const build = (c) => {
+    if (c.built) return c.built;
     const mut = mutateAt(src, code, c.op, c.m, lang);
-    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site, ...(c.ref ? { ref: c.ref } : {}) };
+    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
+  const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
   const kept = new Map();
   const out = [];
-  const take = ({ edits, lo, hi, ...c }) => { kept.set(c.site, (kept.get(c.site) || 0) + 1); out.push({ ...c, src: applyEdits(src, edits) }); };
+  const take = ({ edits, lo, hi, ...c }) => { kept.set(key(c), (kept.get(key(c)) || 0) + 1); out.push({ ...c, src: applyEdits(src, edits) }); };
   if (lang === 'python') {
     // One batch: every candidate, the first `max` that parse per site.
     const built = candidates.map(build).filter(Boolean);
     const ok = built.length ? parsesPython(src, built, lineOf, starts, timeoutMs) : [];
     if (!ok) return Object.assign([], { unchecked: true });
-    built.forEach((c, i) => { if (ok[i] && (kept.get(c.site) || 0) < max) take(c); });
+    built.forEach((c, i) => { if (ok[i] && (kept.get(key(c)) || 0) < max) take(c); });
   } else {
     const parses = jsParseCheck(src, file);
     for (const c of candidates) {
-      if ((kept.get(c.site) || 0) >= max) continue;
       const b = build(c);
-      if (b && parses(b)) take(b);
+      if (b && (kept.get(key(b)) || 0) < max && parses(b)) take(b);
     }
   }
-  const lost = needed.find(n => !out.some(m => m.ref === n.name));
-  if (lost) return Object.assign([], { unmutated_ref: lost });
+  const lost = needed.find(n => !kept.has(key(n)));
+  if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 
