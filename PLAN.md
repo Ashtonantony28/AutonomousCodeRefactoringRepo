@@ -79,6 +79,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG22 | Enforce the commit bar on deletions and per-hunk evidence | SG20 | thread worker | done |
 | SG23 | Pin every safety rule with a test | SG22 | thread worker | done |
 | SG24 | Performance, round 4 | SG23 | thread worker | proposed |
+| SG25 | Python mutant runs and evidence relevance | SG24 | thread worker | proposed |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -275,6 +276,14 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
 
+### SG25 — Python mutant runs and evidence relevance (A13-C1, A13-C2, A13-H1)
+- Mutant runs use exactly the same test command and import path as the main run (Python: `python -m pytest` semantics, repo root on `sys.path`); a mutant that fails at collection/import is not a kill; an unmutated control run must pass under the same command.
+- Python chained-comparison tails (and any other sub-expression the JS side probes) are deletion probe sites; `condition_change` stays a veto when a deletion touches the condition.
+- Relevance: when the change is carried by an identifier, helper or constant (a changed reference or a changed binding the edited code reads), a mutant of that referenced value/binding is required; a kill on an unrelated token in the same site set is not evidence.
+- Known limits, not fixed here (documented in README): diff-test inputs the generator never builds and effects the oracle cannot see (A13-H2, A13-H3; A12-H1/H2 classes); the executor bar is the backstop for them.
+- **Accept:** `node audit/13/py-mutant-import.js` ok; `node audit/13/run.js --only U01,Q15,Q21,T06,U04,R05,G05` nothing committed; audit/5, audit/8, audit/12 e2e commit nothing.
+- **Verify:** `npm test && npm run bench && node audit/11/mutants.js`
+
 ## Audits (after SG8)
 
 Separate sessions, none run by a worker that wrote the code under audit. Each writes `AUDIT-<n>.md`, findings ranked by severity, each with a repro or failing test. Critical/high findings become new SGs here. Repeat until a full round has no critical/high.
@@ -323,3 +332,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-20 | audits r4 | AUDIT-11 | AUDIT-4 highs fixed; coverage ≥ 85% in all dirs counting workers (Node's report misses diff-prep worker: validation 65.5%); 30/80 safety mutants survive → 6C/3H → SG23. |
 | 2026-10-20 | SG23 | green | Tests only, no src change: every pinned rule already held at c2ea37f (26/27 C/H mutants survived there, PJ-del already killed by SG22). 22 new tests (worktree 4, executor 3 + SIGINT test now also SIGTERM, orchestrator 1, test-runner 1, hybrid 2, diff-testing 6, py-diff 4), each fails on its mutant; `npm test` 427/427 ×2, bench ast p95 2.3 / difftest 318 / apply 24 / validator 370 ms. `node audit/11/mutants.js`: all 27 C/H killed, safety 77/80 (left: T-grace M2, G-reconcile2 L1, W-readd M5), label 6/7, redundant 5/6, control 3/3; X-hunk/X-del/X-delobs re-anchored to SG22's per-site / `observed` / `unseen` code. `npm run coverage` (new, `scripts/`, counts diff-test workers): validation 94.2%, runner 93.0%, rl 97.7%, orchestrator 94.2% lines. audit/5, 8, 12 e2e 0 committed. Open: Python harness counts a run missing from the second current side as "differs through stubs" (budget cut downgrades with a misleading reason); diff-test `arity: 1e9` OOM-kills the host process (internal option only). |
 | 2026-10-20 | audits r5 | AUDIT-14 | prior perf C/H fixed; 1C/4H/4M/5L new (flaky test failure counts as mutant kill, Python harness stalls/size limits, sync per-site mutants, per-call binding state) → SG24. |
+| 2026-10-20 | audits r5 | AUDIT-13 | prior repros all fixed; fresh corpus 81 changes, 16 committed e2e; 2C/3H/3M/1L → SG25 (C1, C2, H1); H2/H3 recorded as known oracle limits. |
