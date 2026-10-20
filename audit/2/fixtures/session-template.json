@@ -1,0 +1,573 @@
+{
+ "note": "one passed proposal (+ its test_result and RL samples) and one vetoed proposal captured from audit/2/pipeline-load.js --proposals 50 --drift",
+ "passed": {
+  "issue_id": "audit-0-1",
+  "file": "src/d0_0/mod_0.js",
+  "current_code": "function f0_1(a, b) {\n  const t1 = a * 1 + b;\n  return t1;\n}",
+  "proposed_code": "function f0_1(a, b) {\n  return a * 1 + b;\n}",
+  "reasoning": "inline temporary",
+  "risk_estimate": 0.1,
+  "critic_verdict": {
+   "proposal_id": "audit-0-1",
+   "persona": "jury",
+   "panel": [
+    {
+     "proposal_id": "audit-0-1",
+     "persona": "strict",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "strict reviewer: inlining a temporary keeps behaviour"
+    },
+    {
+     "proposal_id": "audit-0-1",
+     "persona": "permissive",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "pragmatic reviewer: inlining a temporary keeps behaviour"
+    },
+    {
+     "proposal_id": "audit-0-1",
+     "persona": "security",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "security reviewer: inlining a temporary keeps behaviour"
+    }
+   ],
+   "p_preserves": 0.9,
+   "agreement": {
+    "std": 0,
+    "unanimous": true,
+    "approval_rate": 1,
+    "verbal_entropy": 0.1452680546741555
+   },
+   "claude_confidence": 0.9,
+   "preserves_semantics": true,
+   "edge_cases": [],
+   "hallucination_flags": [],
+   "reasoning": "[strict] strict reviewer: inlining a temporary keeps behaviour [permissive] pragmatic reviewer: inlining a temporary keeps behaviour [security] security reviewer: inlining a temporary keeps behaviour"
+  },
+  "pattern_check_results": [
+   {
+    "check_name": "signature_drift",
+    "passed": true,
+    "severity": "score",
+    "detail": "no signature changes detected"
+   },
+   {
+    "check_name": "new_dependency",
+    "passed": true,
+    "severity": "score",
+    "detail": "no new external imports"
+   },
+   {
+    "check_name": "return_type_change",
+    "passed": true,
+    "severity": "score",
+    "detail": "all functions still return on all paths"
+   },
+   {
+    "check_name": "error_handling_removal",
+    "passed": true,
+    "severity": "score",
+    "detail": "before=0 after=0 (ast)"
+   }
+  ],
+  "diff_test": {
+   "verdict": "equivalent",
+   "runs": 35,
+   "compared": 35,
+   "function_name": "f0_1",
+   "arity": 2,
+   "mode": "file",
+   "duration_ms": 198.137,
+   "applicable": true,
+   "score": 1,
+   "mismatches": 0
+  },
+  "combined_confidence": 0.95,
+  "test_outcome": {
+   "status": "passed",
+   "reverted": false,
+   "passed_tests": 1,
+   "failed_tests": 0,
+   "execution_time_ms": 282,
+   "coverage_delta": null,
+   "coverage": {
+    "available": false,
+    "reason": "no c8 in target node_modules"
+   },
+   "test_command": "npm test --silent",
+   "test_framework": "npm",
+   "stdout_tail": "1 passing\n",
+   "stderr_tail": "",
+   "bytes_before": 196846,
+   "bytes_after": 196829,
+   "match_tier": "exact",
+   "match_score": null,
+   "match_delta": null,
+   "apply_duration_ms": 2.185,
+   "commit": "776fda90a45238b0d5c04738c9513dd291750d8f"
+  },
+  "decision_trace": [
+   {
+    "stage": "critic",
+    "timestamp": "2026-10-19T17:57:59.682Z",
+    "reasoning": "[strict] preserves p=0.90: strict reviewer: inlining a temporary keeps behaviour [permissive] preserves p=0.90: pragmatic reviewer: inlining a temporary keeps behaviour [security] preserves p=0.90: security reviewer: inlining a temporary keeps behaviour",
+    "confidence": 0.9,
+    "outcome": "p_preserves=0.900 approval_rate=1.00 unanimous=true",
+    "otel": {
+     "span_id": "9f795b93876e2430",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "5730f5c033403f4c",
+     "name": "invoke_agent critic-agent",
+     "timestamp": "2026-10-19T17:57:59.682Z",
+     "start": "2026-10-19T17:57:59.680Z",
+     "end": "2026-10-19T17:57:59.682Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "critic-agent",
+      "gen_ai.outcome": "p_preserves=0.900 approval_rate=1.00 unanimous=true"
+     },
+     "duration_ms": 1.525
+    },
+    "duration_ms": 1.525
+   },
+   {
+    "stage": "ast",
+    "timestamp": "2026-10-19T17:57:59.682Z",
+    "reasoning": "signature_drift:pass, new_dependency:pass, return_type_change:pass, error_handling_removal:pass",
+    "confidence": 1,
+    "outcome": "pattern_score=1.000 lang=javascript",
+    "otel": {
+     "span_id": "c756fa375ba617cd",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "5730f5c033403f4c",
+     "name": "execute_tool ast-checker",
+     "timestamp": "2026-10-19T17:57:59.682Z",
+     "start": "2026-10-19T17:57:59.390Z",
+     "end": "2026-10-19T17:57:59.682Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.agent.name": "ast-checker",
+      "gen_ai.outcome": "pattern_score=1.000 lang=javascript"
+     },
+     "duration_ms": 291.071
+    },
+    "duration_ms": 291.071
+   },
+   {
+    "stage": "ast",
+    "timestamp": "2026-10-19T17:57:59.682Z",
+    "reasoning": "differential testing on f0_1/2: 35 runs, verdict equivalent",
+    "confidence": 1,
+    "outcome": "equivalent",
+    "otel": {
+     "span_id": "be3c0c5247fcc5af",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "5730f5c033403f4c",
+     "name": "execute_tool ast-checker",
+     "timestamp": "2026-10-19T17:57:59.682Z",
+     "start": "2026-10-19T17:57:59.483Z",
+     "end": "2026-10-19T17:57:59.682Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.agent.name": "ast-checker",
+      "gen_ai.outcome": "equivalent"
+     },
+     "duration_ms": 198.655
+    },
+    "duration_ms": 198.655
+   },
+   {
+    "stage": "executor",
+    "timestamp": "2026-10-19T17:58:00.187Z",
+    "reasoning": "tests passed; committed 776fda90a452",
+    "confidence": 1,
+    "outcome": "passed",
+    "otel": {
+     "span_id": "9cc4819205acd9aa",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "5730f5c033403f4c",
+     "name": "invoke_agent executor-agent",
+     "timestamp": "2026-10-19T17:58:00.187Z",
+     "start": "2026-10-19T17:57:59.687Z",
+     "end": "2026-10-19T17:58:00.187Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "executor-agent",
+      "gen_ai.outcome": "passed"
+     },
+     "duration_ms": 499.712
+    },
+    "duration_ms": 499.712
+   },
+   {
+    "stage": "rl",
+    "timestamp": "2026-10-19T17:58:00.189Z",
+    "reasoning": "reward=0.227",
+    "confidence": 0.95,
+    "outcome": "passed",
+    "otel": {
+     "span_id": "64d4490ef79a8b17",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "5730f5c033403f4c",
+     "name": "execute_tool rl-gate",
+     "timestamp": "2026-10-19T17:58:00.189Z",
+     "start": "2026-10-19T17:58:00.189Z",
+     "end": "2026-10-19T17:58:00.189Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.agent.name": "rl-gate",
+      "gen_ai.outcome": "passed"
+     }
+    }
+   }
+  ],
+  "run_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+  "confidence_weights": {
+   "critic": 0.5,
+   "ast": 0.3,
+   "diff_test": 0.2
+  },
+  "veto": null,
+  "reward": 0.22691649846395764,
+  "reward_breakdown": {
+   "p_correct": 0.95,
+   "log_p": -0.051293293334919034,
+   "fp_penalty": 0,
+   "stage_bonus": 0.3,
+   "stage_signals": {
+    "syntax_ok": 1,
+    "ast_ok": 1,
+    "diff_test_ok": 1,
+    "applied": 1,
+    "tests_ran": 1,
+    "tests_passed": 1
+   },
+   "coverage_penalty": 0,
+   "disagreement_penalty": -0.02179020820112332,
+   "total": 0.22691649846395764
+  }
+ },
+ "test_result": {
+  "proposal_id": "audit-0-1",
+  "status": "passed",
+  "reverted": false,
+  "passed_tests": 1,
+  "failed_tests": 0,
+  "execution_time_ms": 282,
+  "coverage_delta": null,
+  "coverage": {
+   "available": false,
+   "reason": "no c8 in target node_modules"
+  },
+  "test_command": "npm test --silent",
+  "test_framework": "npm",
+  "stdout_tail": "1 passing\n",
+  "stderr_tail": "",
+  "bytes_before": 196846,
+  "bytes_after": 196829,
+  "match_tier": "exact",
+  "match_score": null,
+  "match_delta": null,
+  "apply_duration_ms": 2.185,
+  "commit": "776fda90a45238b0d5c04738c9513dd291750d8f"
+ },
+ "samples": [
+  {
+   "proposal_id": "audit-0-1",
+   "target_repo": "/tmp/audit2-repo-P0Cbvh",
+   "features": [
+    0.9,
+    1,
+    4,
+    0.1
+   ],
+   "label": 1,
+   "synthetic": false,
+   "timestamp": "2026-10-19T17:58:00.188Z"
+  },
+  {
+   "proposal_id": "audit-0-1::numeric_off_by_one",
+   "target_repo": "/tmp/audit2-repo-P0Cbvh",
+   "features": [
+    0.9,
+    1,
+    4,
+    0.1
+   ],
+   "label": 0,
+   "synthetic": true,
+   "mutation": "numeric_off_by_one",
+   "timestamp": "2026-10-19T17:58:00.600Z"
+  },
+  {
+   "proposal_id": "audit-0-1::drop_return",
+   "target_repo": "/tmp/audit2-repo-P0Cbvh",
+   "features": [
+    0.9,
+    0.75,
+    4,
+    0.1
+   ],
+   "label": 0,
+   "synthetic": true,
+   "mutation": "drop_return",
+   "timestamp": "2026-10-19T17:58:00.980Z"
+  }
+ ],
+ "vetoed": {
+  "issue_id": "audit-drift-normalize",
+  "file": "src/core/normalize.js",
+  "current_code": "function normalize(a, b) {\n  const s = Number(a) + Number(b);\n  return s;\n}",
+  "proposed_code": "function normalize(a, b, c = 0) {\n  return Number(a) + Number(b) + c;\n}",
+  "reasoning": "add optional offset",
+  "risk_estimate": 0.3,
+  "critic_verdict": {
+   "proposal_id": "audit-drift-normalize",
+   "persona": "jury",
+   "panel": [
+    {
+     "proposal_id": "audit-drift-normalize",
+     "persona": "strict",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "strict reviewer: inlining a temporary keeps behaviour"
+    },
+    {
+     "proposal_id": "audit-drift-normalize",
+     "persona": "permissive",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "pragmatic reviewer: inlining a temporary keeps behaviour"
+    },
+    {
+     "proposal_id": "audit-drift-normalize",
+     "persona": "security",
+     "preserves_semantics": true,
+     "p_preserves": 0.9,
+     "edge_cases": [],
+     "hallucination_flags": [],
+     "reasoning": "security reviewer: inlining a temporary keeps behaviour"
+    }
+   ],
+   "p_preserves": 0.9,
+   "agreement": {
+    "std": 0,
+    "unanimous": true,
+    "approval_rate": 1,
+    "verbal_entropy": 0.1452680546741555
+   },
+   "claude_confidence": 0.9,
+   "preserves_semantics": true,
+   "edge_cases": [],
+   "hallucination_flags": [],
+   "reasoning": "[strict] strict reviewer: inlining a temporary keeps behaviour [permissive] pragmatic reviewer: inlining a temporary keeps behaviour [security] security reviewer: inlining a temporary keeps behaviour"
+  },
+  "pattern_check_results": [
+   {
+    "check_name": "signature_drift",
+    "passed": false,
+    "severity": "score",
+    "detail": "normalize: 2→3 args; call sites outside edit: normalize in src/d0_6/mod_132.js (1), normalize in src/d0_6/mod_216.js (1), normalize in src/d0_6/mod_300.js (1), normalize in src/d0_6/mod_384.js (1), normalize in src/d0_6/mod_468.js (1), normalize in src/d0_6/mod_48.js (1), normalize in src/d0_6/d1_0/mod_13.js (1), normalize in src/d0_6/d1_0/mod_181.js (1), normalize in src/d0_6/d1_0/mod_265.js (1), normalize in src/d0_6/d1_0/mod_349.js (1), normalize in src/d0_6/d1_0/mod_433.js (1), normalize in src/d0_6/d1_0/mod_97.js (1), normalize in src/d0_6/d1_0/d2_1/mod_146.js (1), normalize in src/d0_6/d1_0/d2_1/mod_230.js (1), normalize in src/d0_6/d1_0/d2_1/mod_314.js (1), normalize in src/d0_6/d1_0/d2_1/mod_398.js (1), normalize in src/d0_6/d1_0/d2_1/mod_482.js (1), normalize in src/d0_6/d1_0/d2_1/mod_62.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_111.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_195.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_27.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_279.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_363.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/mod_447.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_160.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_244.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_328.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_412.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_496.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/mod_76.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_125.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_209.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_293.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_377.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_41.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/mod_461.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_174.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_258.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_342.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_426.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_6.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/mod_90.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_139.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_223.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_307.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_391.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_475.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/mod_55.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_104.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_188.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_20.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_272.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_356.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/mod_440.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_153.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_237.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_321.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_405.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_489.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/mod_69.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_118.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_202.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_286.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_34.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_370.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/mod_454.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/d11_3/mod_167.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/d11_3/mod_251.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/d11_3/mod_335.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/d11_3/mod_419.js (1), normalize in src/d0_6/d1_0/d2_1/d3_2/d4_3/d5_4/d6_5/d7_6/d8_0/d9_1/d10_2/d11_3/mod_83.js (1), normalize in src/d0_5/mod_12.js (1), normalize in src/d0_5/mod_180.js (1), normalize in src/d0_5/mod_264.js (1), normalize in src/d0_5/mod_348.js (1), normalize in src/d0_5/mod_432.js (1), normalize in src/d0_5/mod_96.js (1), normalize in src/d0_5/d1_6/mod_145.js (1), normalize in src/d0_5/d1_6/mod_229.js (1), normalize in src/d0_5/d1_6/mod_313.js (1), normalize in src/d0_5/d1_6/mod_397.js (1), normalize in src/d0_5/d1_6/mod_481.js (1), normalize in src/d0_5/d1_6/mod_61.js (1), normalize in src/d0_5/d1_6/d2_0/mod_110.js (1), normalize in src/d0_5/d1_6/d2_0/mod_194.js (1), normalize in src/d0_5/d1_6/d2_0/mod_26.js (1), normalize in src/d0_5/d1_6/d2_0/mod_278.js (1), normalize in src/d0_5/d1_6/d2_0/mod_362.js (1), normalize in src/d0_5/d1_6/d2_0/mod_446.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_159.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_243.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_327.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_411.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_495.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/mod_75.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_124.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_208.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_292.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_376.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_40.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/mod_460.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_173.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_257.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_341.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_425.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_5.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/mod_89.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_138.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_222.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_306.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_390.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_474.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/mod_54.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_103.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_187.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_19.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_271.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_355.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/mod_439.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_152.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_236.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_320.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_404.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_488.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/mod_68.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_117.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_201.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_285.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_33.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_369.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/mod_453.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/mod_166.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/mod_250.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/mod_334.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/mod_418.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/mod_82.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_131.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_215.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_299.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_383.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_467.js (1), normalize in src/d0_5/d1_6/d2_0/d3_1/d4_2/d5_3/d6_4/d7_5/d8_6/d9_0/d10_1/d11_2/mod_47.js (1), normalize in src/d0_4/mod_144.js (1), normalize in src/d0_4/mod_228.js (1), normalize in src/d0_4/mod_312.js (1), normalize in src/d0_4/mod_396.js (1), normalize in src/d0_4/mod_480.js (1), normalize in src/d0_4/mod_60.js (1), normalize in src/d0_4/d1_5/mod_109.js (1), normalize in src/d0_4/d1_5/mod_193.js (1), normalize in src/d0_4/d1_5/mod_25.js (1), normalize in src/d0_4/d1_5/mod_277.js (1), normalize in src/d0_4/d1_5/mod_361.js (1), normalize in src/d0_4/d1_5/mod_445.js (1), normalize in src/d0_4/d1_5/d2_6/mod_158.js (1), normalize in src/d0_4/d1_5/d2_6/mod_242.js (1), normalize in src/d0_4/d1_5/d2_6/mod_326.js (1), normalize in src/d0_4/d1_5/d2_6/mod_410.js (1), normalize in src/d0_4/d1_5/d2_6/mod_494.js (1), normalize in src/d0_4/d1_5/d2_6/mod_74.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_123.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_207.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_291.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_375.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_39.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/mod_459.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_172.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_256.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_340.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_4.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_424.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/mod_88.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_137.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_221.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_305.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_389.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_473.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/mod_53.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_102.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_18.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_186.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_270.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_354.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/mod_438.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_151.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_235.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_319.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_403.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_487.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/mod_67.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_116.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_200.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_284.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_32.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_368.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/mod_452.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/mod_165.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/mod_249.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/mod_333.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/mod_417.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/mod_81.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_130.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_214.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_298.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_382.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_46.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/mod_466.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_11.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_179.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_263.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_347.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_431.js (1), normalize in src/d0_4/d1_5/d2_6/d3_0/d4_1/d5_2/d6_3/d7_4/d8_5/d9_6/d10_0/d11_1/mod_95.js (1), normalize in src/d0_3/mod_108.js (1), normalize in src/d0_3/mod_192.js (1), normalize in src/d0_3/mod_24.js (1), normalize in src/d0_3/mod_276.js (1), normalize in src/d0_3/mod_360.js (1), normalize in src/d0_3/mod_444.js (1), normalize in src/d0_3/d1_4/mod_157.js (1), normalize in src/d0_3/d1_4/mod_241.js (1), normalize in src/d0_3/d1_4/mod_325.js (1), normalize in src/d0_3/d1_4/mod_409.js (1), normalize in src/d0_3/d1_4/mod_493.js (1), normalize in src/d0_3/d1_4/mod_73.js (1), normalize in src/d0_3/d1_4/d2_5/mod_122.js (1), normalize in src/d0_3/d1_4/d2_5/mod_206.js (1), normalize in src/d0_3/d1_4/d2_5/mod_290.js (1), normalize in src/d0_3/d1_4/d2_5/mod_374.js (1), normalize in src/d0_3/d1_4/d2_5/mod_38.js (1), normalize in src/d0_3/d1_4/d2_5/mod_458.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_171.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_255.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_3.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_339.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_423.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/mod_87.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_136.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_220.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_304.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_388.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_472.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/mod_52.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_101.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_17.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_185.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_269.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_353.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/mod_437.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_150.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_234.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_318.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_402.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_486.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/mod_66.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_115.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_199.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_283.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_31.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_367.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/mod_451.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/mod_164.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/mod_248.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/mod_332.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/mod_416.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/mod_80.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_129.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_213.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_297.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_381.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_45.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/mod_465.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_10.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_178.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_262.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_346.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_430.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/mod_94.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_143.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_227.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_311.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_395.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_479.js (1), normalize in src/d0_3/d1_4/d2_5/d3_6/d4_0/d5_1/d6_2/d7_3/d8_4/d9_5/d10_6/d11_0/mod_59.js (1), normalize in src/d0_2/mod_156.js (1), normalize in src/d0_2/mod_240.js (1), normalize in src/d0_2/mod_324.js (1), normalize in src/d0_2/mod_408.js (1), normalize in src/d0_2/mod_492.js (1), normalize in src/d0_2/mod_72.js (1), normalize in src/d0_2/d1_3/mod_121.js (1), normalize in src/d0_2/d1_3/mod_205.js (1), normalize in src/d0_2/d1_3/mod_289.js (1), normalize in src/d0_2/d1_3/mod_37.js (1), normalize in src/d0_2/d1_3/mod_373.js (1), normalize in src/d0_2/d1_3/mod_457.js (1), normalize in src/d0_2/d1_3/d2_4/mod_170.js (1), normalize in src/d0_2/d1_3/d2_4/mod_2.js (1), normalize in src/d0_2/d1_3/d2_4/mod_254.js (1), normalize in src/d0_2/d1_3/d2_4/mod_338.js (1), normalize in src/d0_2/d1_3/d2_4/mod_422.js (1), normalize in src/d0_2/d1_3/d2_4/mod_86.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_135.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_219.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_303.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_387.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_471.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/mod_51.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_100.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_16.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_184.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_268.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_352.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/mod_436.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_149.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_233.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_317.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_401.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_485.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/mod_65.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_114.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_198.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_282.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_30.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_366.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/mod_450.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_163.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_247.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_331.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_415.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_499.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/mod_79.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_128.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_212.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_296.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_380.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_44.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/mod_464.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_177.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_261.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_345.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_429.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_9.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/mod_93.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_142.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_226.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_310.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_394.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_478.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/mod_58.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_107.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_191.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_23.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_275.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_359.js (1), normalize in src/d0_2/d1_3/d2_4/d3_5/d4_6/d5_0/d6_1/d7_2/d8_3/d9_4/d10_5/d11_6/mod_443.js (1), normalize in src/d0_1/mod_120.js (1), normalize in src/d0_1/mod_204.js (1), normalize in src/d0_1/mod_288.js (1), normalize in src/d0_1/mod_36.js (1), normalize in src/d0_1/mod_372.js (1), normalize in src/d0_1/mod_456.js (1), normalize in src/d0_1/d1_2/mod_1.js (1), normalize in src/d0_1/d1_2/mod_169.js (1), normalize in src/d0_1/d1_2/mod_253.js (1), normalize in src/d0_1/d1_2/mod_337.js (1), normalize in src/d0_1/d1_2/mod_421.js (1), normalize in src/d0_1/d1_2/mod_85.js (1), normalize in src/d0_1/d1_2/d2_3/mod_134.js (1), normalize in src/d0_1/d1_2/d2_3/mod_218.js (1), normalize in src/d0_1/d1_2/d2_3/mod_302.js (1), normalize in src/d0_1/d1_2/d2_3/mod_386.js (1), normalize in src/d0_1/d1_2/d2_3/mod_470.js (1), normalize in src/d0_1/d1_2/d2_3/mod_50.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_15.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_183.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_267.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_351.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_435.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/mod_99.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_148.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_232.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_316.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_400.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_484.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/mod_64.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_113.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_197.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_281.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_29.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_365.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/mod_449.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_162.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_246.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_330.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_414.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_498.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/mod_78.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_127.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_211.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_295.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_379.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_43.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/mod_463.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_176.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_260.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_344.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_428.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_8.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/mod_92.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_141.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_225.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_309.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_393.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_477.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/mod_57.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_106.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_190.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_22.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_274.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_358.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/mod_442.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_155.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_239.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_323.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_407.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_491.js (1), normalize in src/d0_1/d1_2/d2_3/d3_4/d4_5/d5_6/d6_0/d7_1/d8_2/d9_3/d10_4/d11_5/mod_71.js (1), normalize in src/d0_0/mod_0.js (1), normalize in src/d0_0/mod_168.js (1), normalize in src/d0_0/mod_252.js (1), normalize in src/d0_0/mod_336.js (1), normalize in src/d0_0/mod_420.js (1), normalize in src/d0_0/mod_84.js (1), normalize in src/d0_0/d1_1/mod_133.js (1), normalize in src/d0_0/d1_1/mod_217.js (1), normalize in src/d0_0/d1_1/mod_301.js (1), normalize in src/d0_0/d1_1/mod_385.js (1), normalize in src/d0_0/d1_1/mod_469.js (1), normalize in src/d0_0/d1_1/mod_49.js (1), normalize in src/d0_0/d1_1/d2_2/mod_14.js (1), normalize in src/d0_0/d1_1/d2_2/mod_182.js (1), normalize in src/d0_0/d1_1/d2_2/mod_266.js (1), normalize in src/d0_0/d1_1/d2_2/mod_350.js (1), normalize in src/d0_0/d1_1/d2_2/mod_434.js (1), normalize in src/d0_0/d1_1/d2_2/mod_98.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_147.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_231.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_315.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_399.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_483.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/mod_63.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_112.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_196.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_28.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_280.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_364.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/mod_448.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_161.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_245.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_329.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_413.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_497.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/mod_77.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_126.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_210.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_294.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_378.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_42.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/mod_462.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_175.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_259.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_343.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_427.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_7.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/mod_91.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_140.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_224.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_308.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_392.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_476.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/mod_56.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_105.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_189.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_21.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_273.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_357.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/mod_441.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_154.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_238.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_322.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_406.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_490.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/mod_70.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/d11_4/mod_119.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/d11_4/mod_203.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/d11_4/mod_287.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/d11_4/mod_35.js (1), normalize in src/d0_0/d1_1/d2_2/d3_3/d4_4/d5_5/d6_6/d7_0/d8_1/d9_2/d10_3/d11_4/mod_371.js (1)"
+   },
+   {
+    "check_name": "new_dependency",
+    "passed": true,
+    "severity": "score",
+    "detail": "no new external imports"
+   },
+   {
+    "check_name": "return_type_change",
+    "passed": true,
+    "severity": "score",
+    "detail": "all functions still return on all paths"
+   },
+   {
+    "check_name": "error_handling_removal",
+    "passed": true,
+    "severity": "score",
+    "detail": "before=0 after=0 (ast)"
+   }
+  ],
+  "diff_test": {
+   "verdict": "divergent",
+   "runs": 4,
+   "reason": "outputs differ",
+   "counterexample": {
+    "index": 3,
+    "input": "[\"\", \"\", \"\"]",
+    "current": {
+     "kind": "value",
+     "async": false,
+     "value": 0,
+     "args": {
+      "t": "arr",
+      "len": 3,
+      "v": [
+       "",
+       "",
+       ""
+      ]
+     }
+    },
+    "proposed": {
+     "kind": "value",
+     "async": false,
+     "value": "0",
+     "args": {
+      "t": "arr",
+      "len": 3,
+      "v": [
+       "",
+       "",
+       ""
+      ]
+     }
+    },
+    "args": [
+     "",
+     "",
+     ""
+    ]
+   },
+   "function_name": "normalize",
+   "arity": 3,
+   "mode": "file",
+   "duration_ms": 112.744,
+   "applicable": true,
+   "score": 0,
+   "mismatches": 1
+  },
+  "combined_confidence": 0.675,
+  "test_outcome": {
+   "status": "vetoed",
+   "reasons": [
+    "diff_test_divergent: normalize differs on input [\"\",\"\",\"\"]"
+   ]
+  },
+  "decision_trace": [
+   {
+    "stage": "critic",
+    "timestamp": "2026-10-19T17:57:59.185Z",
+    "reasoning": "[strict] preserves p=0.90: strict reviewer: inlining a temporary keeps behaviour [permissive] preserves p=0.90: pragmatic reviewer: inlining a temporary keeps behaviour [security] preserves p=0.90: security reviewer: inlining a temporary keeps behaviour",
+    "confidence": 0.9,
+    "outcome": "p_preserves=0.900 approval_rate=1.00 unanimous=true",
+    "otel": {
+     "span_id": "a4ebf453d631977a",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "ecd5edd97451e54b",
+     "name": "invoke_agent critic-agent",
+     "timestamp": "2026-10-19T17:57:59.185Z",
+     "start": "2026-10-19T17:57:59.182Z",
+     "end": "2026-10-19T17:57:59.185Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "critic-agent",
+      "gen_ai.outcome": "p_preserves=0.900 approval_rate=1.00 unanimous=true"
+     },
+     "duration_ms": 2.62
+    },
+    "duration_ms": 2.62
+   },
+   {
+    "stage": "ast",
+    "timestamp": "2026-10-19T17:57:59.187Z",
+    "reasoning": "signature_drift:fail, new_dependency:pass, return_type_change:pass, error_handling_removal:pass",
+    "confidence": 0.75,
+    "outcome": "pattern_score=0.750 lang=javascript",
+    "otel": {
+     "span_id": "a5058a20f911e2be",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "ecd5edd97451e54b",
+     "name": "execute_tool ast-checker",
+     "timestamp": "2026-10-19T17:57:59.187Z",
+     "start": "2026-10-19T17:57:51.031Z",
+     "end": "2026-10-19T17:57:59.187Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.agent.name": "ast-checker",
+      "gen_ai.outcome": "pattern_score=0.750 lang=javascript"
+     },
+     "duration_ms": 8155.352
+    },
+    "duration_ms": 8155.352
+   },
+   {
+    "stage": "ast",
+    "timestamp": "2026-10-19T17:57:59.187Z",
+    "reasoning": "differential testing on normalize/3: 4 runs, verdict divergent",
+    "confidence": 0,
+    "outcome": "divergent: [\"\",\"\",\"\"]",
+    "otel": {
+     "span_id": "41cba4c773271f16",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "ecd5edd97451e54b",
+     "name": "execute_tool ast-checker",
+     "timestamp": "2026-10-19T17:57:59.187Z",
+     "start": "2026-10-19T17:57:59.073Z",
+     "end": "2026-10-19T17:57:59.187Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.agent.name": "ast-checker",
+      "gen_ai.outcome": "divergent: [\"\",\"\",\"\"]"
+     },
+     "duration_ms": 113.168
+    },
+    "duration_ms": 113.168
+   },
+   {
+    "stage": "critic",
+    "timestamp": "2026-10-19T17:57:59.189Z",
+    "reasoning": "vetoed: diff_test_divergent: normalize differs on input [\"\",\"\",\"\"]",
+    "confidence": 0.675,
+    "outcome": "vetoed",
+    "otel": {
+     "span_id": "bf498413842a1087",
+     "trace_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+     "parent_id": "ecd5edd97451e54b",
+     "name": "invoke_agent critic-agent",
+     "timestamp": "2026-10-19T17:57:59.189Z",
+     "start": "2026-10-19T17:57:59.189Z",
+     "end": "2026-10-19T17:57:59.189Z",
+     "attrs": {
+      "gen_ai.system": "anthropic",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "critic-agent",
+      "gen_ai.outcome": "vetoed"
+     }
+    }
+   }
+  ],
+  "run_id": "91ff2eea-3524-46fd-b79f-c4272602718e",
+  "confidence_weights": {
+   "critic": 0.5,
+   "ast": 0.3,
+   "diff_test": 0.2
+  },
+  "veto": {
+   "vetoed": true,
+   "reasons": [
+    "diff_test_divergent: normalize differs on input [\"\",\"\",\"\"]"
+   ]
+  }
+ }
+}

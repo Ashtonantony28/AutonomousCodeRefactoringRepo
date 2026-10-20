@@ -1,10 +1,12 @@
 'use strict';
 
 // Tiny stdlib HTTP server that:
-//   GET /                 -> serves dashboard.html
+//   GET /                 -> dashboard HTML rendered from the current session
+//                            on every request (falls back to dashboard.html)
 //   GET /session.json     -> serves the current session
 //   GET /events           -> Server-Sent Events stream; emits a `state`
-//                            event whenever session.json mtime changes
+//                            event whenever session.json changes; the page
+//                            then refetches / and swaps its content
 //   GET /calibration.json -> isotonic calibration model + reliability bins
 //   GET /clusters.json    -> failure clusters
 //
@@ -14,13 +16,13 @@
 
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..', '..');
-const SESSION_PATH = path.join(ROOT, 'state', 'session.json');
-const DASHBOARD_HTML = path.join(ROOT, 'dashboard', 'dashboard.html');
-const CALIB_PATH = path.join(ROOT, 'state', 'calibration.json');
-const RL_WEIGHTS_PATH = path.join(ROOT, 'state', 'rl-weights.json');
+const { sessionPath } = require('../utils/checkpoint');
+const { weightsPath } = require('../rl/classifier');
+const { modelPath } = require('../rl/calibration');
+const { dashboardPath, renderHtml } = require('./dashboard');
+
+const WATCH_INTERVAL_MS = 250;
 
 function sendJSON(res, body, code = 200) {
   const buf = Buffer.from(JSON.stringify(body));
@@ -62,6 +64,7 @@ function startSse(req, res, state) {
   res.write(': connected\n\n');
   clientsOf(state).add(res);
   const keepAlive = setInterval(() => res.write(': keepalive\n\n'), 25_000);
+  if (!state.keepAlive) keepAlive.unref();
   req.on('close', () => {
     clearInterval(keepAlive);
     clientsOf(state).delete(res);
@@ -75,63 +78,108 @@ function broadcast(state, event, data) {
   }
 }
 
-function watchSession(state) {
-  if (!fs.existsSync(path.dirname(SESSION_PATH))) return;
-  let lastMtime = 0;
+function readJson(file) {
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+function serveDashboard(res, sessFile) {
+  let session = null;
+  try { session = readJson(sessFile); } catch { session = null; }
+  if (!session && fs.existsSync(dashboardPath())) return sendFile(res, dashboardPath(), 'text/html; charset=utf-8');
+  let html;
+  try { html = renderHtml(session || { proposals: [] }); }
+  catch (err) { res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`render failed: ${err.message}`); return; }
+  const buf = Buffer.from(html);
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+  res.end(buf);
+}
+
+// Polls (rather than fs.watch) so it works on every platform and catches up
+// as soon as the event loop is free again, e.g. after a synchronous diff test.
+function watchSession(state, intervalMs) {
+  let last = null;
   const tick = () => {
     try {
-      if (!fs.existsSync(SESSION_PATH)) return;
-      const m = fs.statSync(SESSION_PATH).mtimeMs;
-      if (m === lastMtime) return;
-      lastMtime = m;
-      const session = JSON.parse(fs.readFileSync(SESSION_PATH, 'utf8'));
-      broadcast(state, 'state', { updated_at: session.updated_at, proposals: session.proposals.length });
-    } catch { /* swallow */ }
+      const file = sessionPath(state.targetRepo);
+      if (!fs.existsSync(file)) return;
+      const st = fs.statSync(file);
+      const key = `${st.ino}:${st.mtimeMs}:${st.size}`;
+      if (key === last) return;
+      last = key;
+      const session = JSON.parse(fs.readFileSync(file, 'utf8'));
+      broadcast(state, 'state', { updated_at: session.updated_at, proposals: (session.proposals || []).length });
+    } catch { /* partial write or bad JSON: retry next tick */ }
   };
-  state.watchTimer = setInterval(tick, 1000);
+  state.watchTimer = setInterval(tick, intervalMs);
+  if (!state.keepAlive) state.watchTimer.unref();
   tick();
 }
 
-function start({ port = 4173, open = false } = {}) {
-  const state = {};
-  const server = http.createServer((req, res) => {
-    const url = req.url.split('?')[0];
-    if (url === '/' || url === '/index.html') return sendFile(res, DASHBOARD_HTML, 'text/html; charset=utf-8');
-    if (url === '/session.json') {
-      if (!fs.existsSync(SESSION_PATH)) return sendJSON(res, { proposals: [] });
-      try { return sendJSON(res, JSON.parse(fs.readFileSync(SESSION_PATH, 'utf8'))); }
-      catch (err) { return sendJSON(res, { error: err.message }, 500); }
-    }
-    if (url === '/calibration.json') {
-      if (!fs.existsSync(CALIB_PATH)) return sendJSON(res, null);
-      try { return sendJSON(res, JSON.parse(fs.readFileSync(CALIB_PATH, 'utf8'))); }
-      catch (err) { return sendJSON(res, { error: err.message }, 500); }
-    }
-    if (url === '/rl-weights.json') {
-      if (!fs.existsSync(RL_WEIGHTS_PATH)) return sendJSON(res, null);
-      try { return sendJSON(res, JSON.parse(fs.readFileSync(RL_WEIGHTS_PATH, 'utf8'))); }
-      catch (err) { return sendJSON(res, { error: err.message }, 500); }
-    }
-    if (url === '/clusters.json') {
-      try {
-        const { clusterFailures } = require('./clustering');
-        const sess = fs.existsSync(SESSION_PATH) ? JSON.parse(fs.readFileSync(SESSION_PATH, 'utf8')) : { proposals: [] };
-        return sendJSON(res, clusterFailures(sess.proposals || []));
-      } catch (err) { return sendJSON(res, { error: err.message }, 500); }
-    }
-    if (url === '/events') return startSse(req, res, state);
-    if (url === '/healthz') return sendJSON(res, { ok: true });
-    res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found');
+function route(req, res, state) {
+  const url = req.url.split('?')[0];
+  // The served target's session, else the most recently written one.
+  const sessFile = sessionPath(state.targetRepo);
+  if (url === '/' || url === '/index.html') return serveDashboard(res, sessFile);
+  // Learned-gate state is per target repo.
+  let target = state.targetRepo;
+  if (!target && (url === '/calibration.json' || url === '/rl-weights.json')) {
+    try { target = (readJson(sessFile) || {}).target_repo || null; } catch { target = null; }
+  }
+  const jsonFiles = {
+    '/session.json': [sessFile, { proposals: [] }],
+    '/calibration.json': [modelPath(target), null],
+    '/rl-weights.json': [weightsPath(target), null]
+  };
+  if (jsonFiles[url]) {
+    const [file, empty] = jsonFiles[url];
+    try { const v = readJson(file); return sendJSON(res, v == null ? empty : v); }
+    catch (err) { return sendJSON(res, { error: err.message }, 500); }
+  }
+  if (url === '/clusters.json') {
+    try {
+      const { clusterFailures } = require('./clustering');
+      const sess = readJson(sessFile) || { proposals: [] };
+      return sendJSON(res, clusterFailures(sess.proposals || []));
+    } catch (err) { return sendJSON(res, { error: err.message }, 500); }
+  }
+  if (url === '/events') return startSse(req, res, state);
+  if (url === '/healthz') return sendJSON(res, { ok: true });
+  res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found');
+}
+
+// keepAlive=false (the default for programmatic use, e.g. `--serve`) unrefs
+// the server, its sockets and timers so the host process exits when its own
+// work is done. The standalone CLI below passes keepAlive=true.
+function start({ port = 4173, open = false, keepAlive = false, watchIntervalMs = WATCH_INTERVAL_MS, quiet = false, targetRepo = null } = {}) {
+  const state = { keepAlive, targetRepo };
+  const sockets = new Set();
+  const server = http.createServer((req, res) => route(req, res, state));
+  server.on('connection', (sock) => {
+    sockets.add(sock);
+    if (!keepAlive) sock.unref();
+    sock.on('close', () => sockets.delete(sock));
   });
+
+  function close() {
+    clearInterval(state.watchTimer);
+    return new Promise((resolve) => {
+      for (const c of clientsOf(state)) { try { c.end(); } catch { /* */ } }
+      clientsOf(state).clear();
+      server.close(() => resolve());
+      for (const sock of sockets) sock.destroy();
+    });
+  }
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {
-      watchSession(state);
-      const url = `http://127.0.0.1:${port}/`;
-      console.log(`[dashboard] live at ${url}`);
+      if (!keepAlive) server.unref();
+      watchSession(state, watchIntervalMs);
+      const url = `http://127.0.0.1:${server.address().port}/`;
+      if (!quiet) console.log(`[dashboard] live at ${url}`);
       if (open) tryOpen(url);
-      resolve({ server, state, url });
+      resolve({ server, state, url, close });
     });
   });
 }
@@ -147,7 +195,9 @@ function tryOpen(url) {
 if (require.main === module) {
   const portArg = process.argv.indexOf('--port');
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : 4173;
-  start({ port, open: process.argv.includes('--open') }).catch((err) => {
+  const repoArg = process.argv.indexOf('--repo');
+  const targetRepo = repoArg !== -1 ? require('path').resolve(process.argv[repoArg + 1]) : null;
+  start({ port, open: process.argv.includes('--open'), keepAlive: true, targetRepo }).catch((err) => {
     console.error('dashboard server failed:', err);
     process.exit(1);
   });

@@ -13,6 +13,15 @@ const MODEL = 'claude-sonnet-4-20250514';
 const DEFAULT_MAX_TOKENS = 4000;
 const RATE_LIMIT_BACKOFF_MS = 10_000;
 
+let injected = null;
+
+function setClient(fn) {
+  if (typeof fn !== 'function') throw new Error('setClient expects a function');
+  injected = fn;
+}
+
+function resetClient() { injected = null; }
+
 function getClient() {
   if (!Anthropic) {
     throw new Error('@anthropic-ai/sdk is not installed. Run: npm install');
@@ -42,6 +51,10 @@ async function callClaude({ system, user, maxTokens = DEFAULT_MAX_TOKENS, temper
   if (cacheTag) params._cache_tag = cacheTag;
 
   return cache.wrap(params, async () => {
+    if (injected) {
+      const out = await injected({ system, user, cacheTag });
+      return { text: String((out && out.text) || ''), usage: (out && out.usage) || {} };
+    }
     const client = getClient();
     const req = {
       model: MODEL,
@@ -91,4 +104,4 @@ function extractJsonBlock(text) {
   return null;
 }
 
-module.exports = { callClaude, extractJsonBlock, MODEL, DEFAULT_MAX_TOKENS };
+module.exports = { callClaude, extractJsonBlock, setClient, resetClient, MODEL, DEFAULT_MAX_TOKENS };

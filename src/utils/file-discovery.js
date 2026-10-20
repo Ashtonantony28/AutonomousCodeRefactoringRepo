@@ -15,6 +15,13 @@ const CODE_EXT = new Set([
 
 const MAX_FILE_BYTES = 200_000;
 
+// Test code is never a refactoring target: an edit there can weaken the
+// assertion that would catch it.
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]*\.py$|_test\.(py|go)$/i;
+function isTestFile(rel) {
+  return TEST_FILE_RE.test(String(rel || '').replace(/\\/g, '/'));
+}
+
 function isBinary(buf) {
   const len = Math.min(buf.length, 8000);
   for (let i = 0; i < len; i++) {
@@ -74,4 +81,4 @@ function discover(root, opts = {}) {
   return withContent;
 }
 
-module.exports = { walk, discover, readFileSafe, SKIP_DIRS, CODE_EXT, MAX_FILE_BYTES };
+module.exports = { walk, discover, readFileSafe, isTestFile, SKIP_DIRS, CODE_EXT, MAX_FILE_BYTES };

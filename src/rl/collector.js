@@ -2,53 +2,96 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_DIR } = require('../utils/checkpoint');
+const crypto = require('crypto');
+const { stateDir, stateDirFor } = require('../utils/checkpoint');
+const { extractFeatures } = require('./features');
 
-const SAMPLES_PATH = path.join(STATE_DIR, 'rl-samples.json');
+// Outcomes that say something about the edit itself. Environment problems,
+// apply failures and untested edits are not labels.
+const LABELED_STATUSES = ['passed', 'failed', 'reverted'];
+// `reverted` because no test ran the edit, no mutant of it failed the suite,
+// or no mutant could run in budget: the tests never judged it.
+const UNTESTED_REASONS = ['edit_not_exercised', 'no_coverage_tool', 'coverage_timeout', 'tests_insensitive', 'mutation_budget'];
 
-function proposalComplexity(p) {
-  const cur = (p.current_code || '').split('\n').length;
-  const prop = (p.proposed_code || '').split('\n').length;
-  return Math.max(cur, prop);
+function isLabeled(outcome) {
+  return !!outcome && LABELED_STATUSES.includes(outcome.status) && !UNTESTED_REASONS.includes(outcome.reason);
 }
 
-function buildSample(proposal) {
-  const ast = proposal.pattern_check_results || [];
-  const passed = ast.filter(c => c.passed).length;
-  const patternScore = ast.length ? passed / ast.length : 0.5;
-  const claudeConf = proposal.critic_verdict ? (proposal.critic_verdict.claude_confidence || 0) : 0;
+// Learning state lives per target repo (stateDirFor); without a target the
+// legacy global state dir is used.
+function learningDir(targetRepo) {
+  return targetRepo ? stateDirFor(targetRepo) : stateDir();
+}
+
+function samplesPath(targetRepo = null) { return path.join(learningDir(targetRepo), 'rl-samples.json'); }
+
+// issue_id names the snippet being replaced; the edit is that plus what
+// replaces it, so a different edit of the same snippet is a different sample.
+function editId(proposal) {
+  const h = crypto.createHash('sha256').update(String(proposal.proposed_code || '')).digest('hex').slice(0, 16);
+  return `${proposal.issue_id}:${h}`;
+}
+
+function buildSample(proposal, targetRepo = null) {
   const outcome = proposal.test_outcome ? proposal.test_outcome.status : null;
   return {
     proposal_id: proposal.issue_id,
-    file: proposal.file,
-    critic_confidence: claudeConf,
-    pattern_score: patternScore,
-    combined_confidence: proposal.combined_confidence || 0,
-    proposal_complexity: proposalComplexity(proposal),
-    files_changed: 1,
-    risk_estimate: proposal.risk_estimate || 0,
-    test_passed: outcome === 'passed',
-    outcome,
+    edit_id: editId(proposal),
+    target_repo: targetRepo,
+    features: extractFeatures(proposal),
+    label: outcome === 'passed' ? 1 : 0,
+    synthetic: false,
     timestamp: new Date().toISOString()
   };
 }
 
-function loadSamples() {
-  if (!fs.existsSync(SAMPLES_PATH)) return [];
-  try { return JSON.parse(fs.readFileSync(SAMPLES_PATH, 'utf8')); } catch { return []; }
+// Timestamp-free identity: the same edit (or the same mutant of it) is one
+// sample however many times it is collected. Samples stored before edit_id
+// existed keep their proposal_id key.
+function sampleKey(s) {
+  return `${s.edit_id || s.proposal_id}|${s.synthetic ? 'synthetic' : 'real'}|${s.mutation || ''}`;
 }
 
-function persistSamples(samples) {
-  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(SAMPLES_PATH, JSON.stringify(samples, null, 2));
+function loadSamples(targetRepo = null) {
+  const p = samplesPath(targetRepo);
+  if (!fs.existsSync(p)) return [];
+  try {
+    const all = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return Array.isArray(all) ? all : [];
+  } catch { return []; }
 }
 
-function collectSample(proposal) {
-  const sample = buildSample(proposal);
-  const all = loadSamples();
-  all.push(sample);
-  persistSamples(all);
+function persistSamples(samples, targetRepo = null) {
+  const dir = learningDir(targetRepo);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const p = samplesPath(targetRepo);
+  fs.writeFileSync(p + '.tmp', JSON.stringify(samples, null, 2));
+  fs.renameSync(p + '.tmp', p);
+}
+
+// Merge into the persisted set; a later sample with the same key replaces the earlier one.
+function appendSamples(samples, targetRepo = null) {
+  const all = loadSamples(targetRepo);
+  const index = new Map(all.map((s, i) => [sampleKey(s), i]));
+  for (const s of samples) {
+    const k = sampleKey(s);
+    if (index.has(k)) all[index.get(k)] = s;
+    else { index.set(k, all.length); all.push(s); }
+  }
+  persistSamples(all, targetRepo);
+  return all;
+}
+
+// Returns null when the outcome carries no label.
+function collectSample(proposal, targetRepo = null) {
+  if (!isLabeled(proposal.test_outcome)) return null;
+  const sample = buildSample(proposal, targetRepo);
+  appendSamples([sample], targetRepo);
   return sample;
 }
 
-module.exports = { collectSample, buildSample, loadSamples, persistSamples, SAMPLES_PATH };
+module.exports = {
+  collectSample, buildSample, editId, loadSamples, persistSamples, appendSamples, sampleKey,
+  samplesPath, learningDir, LABELED_STATUSES, UNTESTED_REASONS, isLabeled
+};
+Object.defineProperty(module.exports, 'SAMPLES_PATH', { enumerable: true, get: () => samplesPath() });

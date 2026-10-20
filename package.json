@@ -6,7 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/orchestrator.js",
-    "test": "node test/smoke.js"
+    "test": "node --test test/*.test.js",
+    "bench": "node bench/run.js",
+    "coverage": "node scripts/coverage.js"
   },
   "bin": {
     "refactor": "src/orchestrator.js"

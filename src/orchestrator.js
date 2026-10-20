@@ -7,103 +7,184 @@ const { Command } = require('commander');
 let chalk;
 try { chalk = require('chalk'); } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, gray: s => s, bold: s => s }; }
 
-const { loadOrInit, saveSession } = require('./utils/checkpoint');
+const { loadOrInit, saveSession, inflightPath, worktreesDir } = require('./utils/checkpoint');
 const { TokenTracker } = require('./utils/token-tracker');
-const { discover } = require('./utils/file-discovery');
+const { discover, isTestFile } = require('./utils/file-discovery');
 const apiCache = require('./utils/api-cache');
 
 const { runAnalyzer } = require('./agents/analyzer');
 const { runCritic } = require('./agents/critic');
-const { runHybridValidator } = require('./validation/hybrid-validator');
+const { runHybridValidator, unconfirmedBlock, juryVotes } = require('./validation/hybrid-validator');
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
+const { FileSnapshot, resolveEdit } = require('./runner/reverter');
+const { killActive, removeLiveDirs } = require('./runner/test-runner');
+const worktree = require('./runner/worktree');
 
-const { collectSample } = require('./rl/collector');
-const { trainIfReady, loadClassifier } = require('./rl/classifier');
+const { collectSample, isLabeled } = require('./rl/collector');
+const { trainIfReady, loadClassifier, RL_GATE_THRESHOLD } = require('./rl/classifier');
 const { computeReward, rollingWarning, rewardBreakdown } = require('./rl/reward');
 const calibration = require('./rl/calibration');
 const bugInjector = require('./rl/bug-injector');
+const { extractFeatures } = require('./rl/features');
 
 const { trace, classifyFailure, persistRunSpans } = require('./interpretability/tracer');
 const { renderDashboard } = require('./interpretability/dashboard');
 
-const RL_GATE_THRESHOLD = 0.4;
 const REJECT_THRESHOLD = 0.5;
+const MIN_CRITIC_P = 0.5;
+const MIN_PERSONA_P = 0.2;
 
 function logInfo(msg) { console.log(chalk.cyan('[orch] ') + msg); }
 function logWarn(msg) { console.log(chalk.yellow('[orch] ') + msg); }
 function logErr(msg)  { console.log(chalk.red('[orch] ')  + msg); }
 function logOk(msg)   { console.log(chalk.green('[orch] ')+ msg); }
 
-function summarizeProposal(p) {
-  return {
-    issue_id: p.issue_id,
-    file: p.file,
-    risk_estimate: p.risk_estimate,
-    combined_confidence: p.combined_confidence,
-    outcome: p.test_outcome ? p.test_outcome.status : null
-  };
-}
-
-function pruneContext(agentName, proposals, tracker) {
-  if (!tracker.shouldPrune(agentName)) return proposals;
-  logWarn(`pruning context for ${agentName} (saturation ${(tracker.saturationOf(agentName) * 100).toFixed(1)}%)`);
-  return proposals.map(summarizeProposal);
+// Revert any in-flight edit (killing its test process group first), flush
+// state, exit. Exported so tests can drive it without delivering a signal.
+function handleSignal(signal, session, { exit = process.exit } = {}) {
+  logWarn(`${signal} — reverting in-flight edit and flushing state`);
+  try { killActive(); removeLiveDirs(); } catch { /* */ }
+  try {
+    const n = FileSnapshot.restoreLive();
+    if (n) logWarn(`restored ${n} in-flight file(s)`);
+  } catch (e) { logErr(`restore failed: ${e.message}`); }
+  try { if (session) saveSession(session); } catch { /* */ }
+  exit(signal === 'uncaughtException' ? 1 : 0);
 }
 
 function installSignalHandlers(session) {
-  const flush = (code) => {
-    try { saveSession(session); } catch (e) { /* */ }
-    process.exit(code);
-  };
-  process.on('SIGINT', () => { logWarn('SIGINT — flushing state'); flush(0); });
-  process.on('SIGTERM', () => { logWarn('SIGTERM — flushing state'); flush(0); });
-  process.on('uncaughtException', (e) => { logErr(`uncaught: ${e.message}`); flush(1); });
+  process.on('SIGINT', () => handleSignal('SIGINT', session));
+  process.on('SIGTERM', () => handleSignal('SIGTERM', session));
+  process.on('uncaughtException', (e) => { logErr(`uncaught: ${e.message}`); handleSignal('uncaughtException', session); });
 }
 
 function featuresFor(p) {
-  const ast = p.pattern_check_results || [];
-  const passed = ast.filter(c => c.passed).length;
-  const patternScore = ast.length ? passed / ast.length : 0.5;
-  const claudeConf = p.critic_verdict ? (p.critic_verdict.claude_confidence || 0) : 0;
-  const complexity = Math.max(
-    (p.proposed_code || '').split('\n').length,
-    (p.current_code || '').split('\n').length
-  );
-  return [claudeConf, patternScore, complexity, 1, p.risk_estimate || 0];
+  return extractFeatures(p);
 }
 
-async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, allowRepair = true, attemptIdx = 0 }) {
-  // Hybrid critic + AST + diff-testing
+function testFileReason(proposal) {
+  return isTestFile(proposal.file) ? `test file ${proposal.file}: test code is never edited` : null;
+}
+
+// Pre-RL gate (the commit bar) on contract fields only: every persona
+// approves with p_preserves >= MIN_PERSONA_P and names no behaviour-changing
+// edge case, and the diff test confirms the edit (unconfirmedBlock).
+// -> rejection reason, or null to proceed.
+function criticGate(proposal) {
+  const testFile = testFileReason(proposal);
+  if (testFile) return testFile;
+  const jury = proposal.critic_verdict;
+  const votes = juryVotes(jury);
+  const p = jury && typeof jury.p_preserves === 'number' ? jury.p_preserves : null;
+  if (!votes.majority || p === null || p < MIN_CRITIC_P) {
+    return `critic jury does not approve (${votes.approve}/${votes.n} preserves_semantics, p_preserves=${p === null ? 'n/a' : p}, need majority and >= ${MIN_CRITIC_P})`;
+  }
+  if (!votes.unanimous) return `critic jury ${votes.approve}/${votes.n} approve (need unanimous)`;
+  const low = jury.panel.filter(v => !(v.p_preserves >= MIN_PERSONA_P));
+  if (low.length) return `persona p_preserves below ${MIN_PERSONA_P}: ${low.map(v => `${v.persona}=${v.p_preserves}`).join(', ')}`;
+  const edge = jury.panel.filter(v => Array.isArray(v.edge_cases) && v.edge_cases.length);
+  if (edge.length) return `persona(s) name behaviour-changing edge cases: ${edge.map(v => `${v.persona}: ${v.edge_cases.join('; ')}`).join(' | ').slice(0, 300)}`;
+  if (!(proposal.combined_confidence >= REJECT_THRESHOLD)) return `combined_confidence < ${REJECT_THRESHOLD}`;
+  const block = unconfirmedBlock({ jury, checks: proposal.pattern_check_results, dt: proposal.diff_test, file: proposal.file });
+  return block ? `unconfirmed edit: ${block}` : null;
+}
+
+// The validators judge exactly what the executor will replace. The anchor is
+// resolved first (`validated_region`, which the executor requires to match
+// again); unless it is `current_code` verbatim, validation runs on a view
+// holding the matched region and the re-indented replacement (from the line
+// start when only indentation precedes the region). -> view, or null.
+function regionView(proposal, root) {
+  delete proposal.validated_region;
+  if (!proposal.decision_trace) proposal.decision_trace = [];
+  let r;
+  let src;
   try {
-    await runHybridValidator({ proposal, tracker, repoRoot: absRepo, runCritic });
+    src = fs.readFileSync(path.join(root, proposal.file), 'utf8');
+    r = resolveEdit({ src, relPath: proposal.file, currentCode: proposal.current_code, proposedCode: proposal.proposed_code });
+  } catch {
+    return null; // the executor reports the anchor failure as apply_failed
+  }
+  proposal.validated_region = { tier: r.match.tier, start: r.match.start, end: r.match.end, text: r.region };
+  if (r.region === proposal.current_code && r.replacement === proposal.proposed_code) return null;
+  const before = src.slice(src.lastIndexOf('\n', r.match.start - 1) + 1, r.match.start);
+  const lead = /^[ \t]*$/.test(before) ? before : '';
+  return { ...proposal, current_code: lead + r.region, proposed_code: lead + r.replacement };
+}
+
+function adoptValidation(proposal, view) {
+  if (!view) return;
+  for (const [k, v] of Object.entries(view)) {
+    if (k !== 'current_code' && k !== 'proposed_code') proposal[k] = v;
+  }
+}
+
+// `work` = { root, info, snapshotPath }: where edits are validated, applied
+// and tested (the run's worktree, or the target itself in dry-run / non-git
+// fallback). `absRepo` is the target, used only as the sample label.
+async function processProposal({ proposal, session, tracker, classifier, dryRun, absRepo, work = null, allowRepair = true, attemptIdx = 0 }) {
+  const trace_id = session.run_id;
+  if (!work) work = { root: absRepo, info: null, snapshotPath: inflightPath(absRepo) };
+  proposal.run_id = session.run_id;
+  const testFile = testFileReason(proposal);
+  if (testFile) {
+    proposal.test_outcome = { status: 'critic_rejected', reason: testFile };
+    trace(proposal, 'critic', { reasoning: `${testFile}; rejecting without review`, confidence: 0, outcome: 'critic_rejected', trace_id });
+    saveSession(session);
+    return proposal;
+  }
+  // Hybrid critic + AST + diff-testing, on the region the executor will replace
+  const view = regionView(proposal, work.root);
+  try {
+    await runHybridValidator({ proposal: view || proposal, tracker, repoRoot: work.root, runCritic, runId: session.run_id });
+    adoptValidation(proposal, view);
   } catch (err) {
+    adoptValidation(proposal, view);
     logErr(`hybrid validator error on ${proposal.file}: ${err.message}`);
-    trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error' });
+    trace(proposal, 'critic', { reasoning: `validator error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
     proposal.combined_confidence = 0;
+    proposal.veto = null;
   }
   saveSession(session);
 
-  if ((proposal.combined_confidence || 0) < REJECT_THRESHOLD) {
-    proposal.test_outcome = { status: 'critic_rejected', reason: 'combined_confidence below threshold' };
+  if (proposal.veto && proposal.veto.vetoed) {
+    proposal.test_outcome = { status: 'vetoed', reasons: proposal.veto.reasons };
     trace(proposal, 'critic', {
-      reasoning: 'combined_confidence < 0.5; rejecting',
+      reasoning: `vetoed: ${proposal.veto.reasons.join('; ')}`,
       confidence: proposal.combined_confidence,
-      outcome: 'critic_rejected'
+      outcome: 'vetoed',
+      trace_id
+    });
+    saveSession(session);
+    return proposal;
+  }
+
+  const reason = criticGate(proposal);
+  if (reason) {
+    proposal.test_outcome = { status: 'critic_rejected', reason };
+    trace(proposal, 'critic', {
+      reasoning: `${reason}; rejecting`,
+      confidence: proposal.combined_confidence,
+      outcome: 'critic_rejected',
+      trace_id
     });
     saveSession(session);
     return proposal;
   }
 
   // RL gate
-  if (classifier.isTrained()) {
-    const features = featuresFor(proposal);
-    const pPass = classifier.predict(features);
+  const t0 = performance.now();
+  const gate = classifier.gate(proposal);
+  if (gate.gated) {
+    const pPass = gate.p_pass;
     proposal.rl_prediction = pPass;
     trace(proposal, 'rl', {
-      reasoning: `predicted p_pass=${pPass.toFixed(3)}`,
+      reasoning: `predicted p_pass=${pPass.toFixed(3)} (${gate.source})`,
       confidence: pPass,
-      outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved'
+      outcome: pPass < RL_GATE_THRESHOLD ? 'rl_rejected' : 'rl_approved',
+      duration_ms: Number((performance.now() - t0).toFixed(3)),
+      trace_id
     });
     if (pPass < RL_GATE_THRESHOLD) {
       proposal.test_outcome = { status: 'rl_rejected', p_pass: pPass };
@@ -114,35 +195,52 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
 
   if (dryRun) {
     proposal.test_outcome = { status: 'dry_run' };
-    trace(proposal, 'executor', { reasoning: 'dry-run; skipping executor', confidence: 0, outcome: 'dry_run' });
+    trace(proposal, 'executor', { reasoning: 'dry-run; skipping executor', confidence: 0, outcome: 'dry_run', trace_id });
     saveSession(session);
     return proposal;
   }
 
   // Executor
   let result;
+  const tExec = performance.now();
   try {
-    result = await runExecutor({ proposal, tracker, repoRoot: absRepo });
+    result = await runExecutor({
+      proposal,
+      repoRoot: work.root,
+      snapshotPath: work.snapshotPath,
+      onKept: () => worktree.commitProposal(work.info, proposal)
+    });
   } catch (err) {
     logErr(`executor failed on ${proposal.file}: ${err.message}`);
-    trace(proposal, 'executor', { reasoning: `executor error: ${err.message}`, confidence: 0, outcome: 'error' });
+    trace(proposal, 'executor', { reasoning: `executor error: ${err.message}`, confidence: 0, outcome: 'error', trace_id });
     proposal.test_outcome = { status: 'error', error: err.message };
     saveSession(session);
     return proposal;
   }
   proposal.test_outcome = result;
   session.test_results.push({ proposal_id: proposal.issue_id, ...result });
+  trace(proposal, 'executor', {
+    reasoning: result.reason || `tests ${result.status}${result.commit ? `; committed ${result.commit.slice(0, 12)}` : ''}`,
+    confidence: result.status === 'passed' ? 1 : 0,
+    outcome: result.status,
+    duration_ms: Number((performance.now() - tExec).toFixed(3)),
+    trace_id
+  });
+  if (result.status === 'skipped_no_tests' || (result.status === 'reverted' && !isLabeled(result))) {
+    saveSession(session);
+    return proposal; // no test judged the edit: no reward signal, no sample, no repair
+  }
 
   // Reward / RL sample
-  const sample = collectSample(proposal);
-  session.rl_samples.push(sample);
-  proposal.reward = computeReward(proposal);
-  proposal.reward_breakdown = rewardBreakdown(proposal);
-  trace(proposal, 'rl', { reasoning: `reward=${proposal.reward.toFixed(3)}`, confidence: proposal.combined_confidence, outcome: result.status });
+  const sample = collectSample(proposal, absRepo);
+  if (sample) session.rl_samples.push(sample);
+  proposal.reward = computeReward(proposal, absRepo);
+  proposal.reward_breakdown = rewardBreakdown(proposal, absRepo);
+  trace(proposal, 'rl', { reasoning: `reward=${proposal.reward.toFixed(3)}`, confidence: proposal.combined_confidence, outcome: result.status, trace_id });
 
   // Synthetic negatives (CriticGPT-style) when the proposal passed cleanly
   if (result.status === 'passed') {
-    const negatives = bugInjector.syntheticNegatives(proposal);
+    const negatives = bugInjector.syntheticNegatives(proposal, absRepo);
     if (negatives.length) {
       session.rl_samples.push(...negatives);
     }
@@ -156,14 +254,15 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
     if (allowRepair && attemptIdx < reflexion.MAX_RETRIES &&
         ['failed', 'reverted', 'apply_failed'].includes(result.status)) {
       const repaired = await reflexion.repair({
-        proposal, failure: result, tracker, attemptIdx: attemptIdx + 1
+        proposal, failure: result, tracker, attemptIdx: attemptIdx + 1,
+        takenIds: new Set(session.proposals.map(p => p.issue_id))
       });
       if (repaired) {
         logInfo(`reflexion: emitted repair attempt ${repaired.attempt} for ${proposal.file}`);
         session.proposals.push(repaired);
         saveSession(session);
         await processProposal({
-          proposal: repaired, session, tracker, classifier, dryRun, absRepo,
+          proposal: repaired, session, tracker, classifier, dryRun, absRepo, work,
           allowRepair: true, attemptIdx: repaired.attempt
         });
       }
@@ -174,25 +273,48 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   return proposal;
 }
 
-async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarchical = true, serveDashboard = false, dashboardPort = 4173 }) {
+async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarchical = true, serveDashboard = false, dashboardPort = 4173, cli = false }) {
   const absRepo = path.resolve(repo);
   if (!fs.existsSync(absRepo)) {
     logErr(`target repo does not exist: ${absRepo}`);
-    process.exit(2);
+    if (cli) process.exit(2);
+    const err = new Error(`target repo does not exist: ${absRepo}`);
+    err.code = 'ENOREPO';
+    throw err;
   }
   apiCache.setMode(cache);
 
+  // A previous process died mid-edit: put the file back before anything else.
+  // A snapshot whose edit is already committed (crash right after the
+  // commit) is dropped: the branch holds the edit and resume reconciles it.
+  const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo), {
+    committed: (d) => worktree.headCommitOf(d.repo_root, d.meta && d.meta.issue_id, Object.keys(d.files))
+  });
+  if (crashed && crashed.discarded) logWarn(`discarded in-flight snapshot from a previous run (${crashed.files.join(', ')}): ${crashed.discarded}`);
+  else if (crashed) logWarn(`restored in-flight edit from a previous run: ${crashed.files.join(', ')} in ${crashed.repo_root}`);
+
   const session = loadOrInit(absRepo, { resume });
-  installSignalHandlers(session);
+  if (cli) installSignalHandlers(session);
   const tracker = new TokenTracker(session);
-  const classifier = loadClassifier();
+  const classifier = loadClassifier(absRepo);
 
   logInfo(`run_id=${session.run_id} repo=${absRepo} dry_run=${!!dryRun} cache=${cache} hierarchical=${hierarchical}`);
+
+  let work;
+  try {
+    work = setupWorkspace({ session, absRepo, dryRun });
+  } catch (err) {
+    logErr(err.message);
+    if (cli && err.code === 'EWORKTREE') process.exit(2);
+    throw err;
+  }
+  if (resume) reconcileWithBranch({ session, info: session.worktree, absRepo });
+  saveSession(session);
 
   // Optional: start the live dashboard server up-front so refreshes are visible.
   if (serveDashboard) {
     const { start } = require('./interpretability/server');
-    try { await start({ port: dashboardPort }); } catch (err) { logWarn(`dashboard server failed: ${err.message}`); }
+    try { await start({ port: dashboardPort, targetRepo: absRepo }); } catch (err) { logWarn(`dashboard server failed: ${err.message}`); }
   }
 
   const files = discover(absRepo);
@@ -201,39 +323,49 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
     logWarn('no source files to analyze; nothing to do');
     saveSession(session);
     renderDashboard(session);
-    return;
+    return session;
   }
 
-  let analyzerProposals;
-  try {
-    analyzerProposals = await runAnalyzer({ files, tracker, hierarchical });
-  } catch (err) {
-    logErr(`analyzer failed: ${err.message}`);
+  if (resume && session.proposals.length) {
+    logInfo(`resume: ${session.proposals.length} proposals in session; skipping analyzer`);
+  } else {
+    let analyzerProposals;
+    try {
+      analyzerProposals = await runAnalyzer({ files, tracker, hierarchical, takenIds: session.proposals.map(p => p.issue_id) });
+    } catch (err) {
+      logErr(`analyzer failed: ${err.message}`);
+      saveSession(session);
+      renderDashboard(session);
+      return session;
+    }
+    for (const p of analyzerProposals) {
+      p.decision_trace = p.decision_trace || [];
+      p.run_id = session.run_id;
+      trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed', trace_id: session.run_id });
+      session.proposals.push(p);
+    }
     saveSession(session);
-    renderDashboard(session);
-    return;
+    logOk(`analyzer produced ${analyzerProposals.length} proposals`);
   }
-  for (const p of analyzerProposals) {
-    p.decision_trace = p.decision_trace || [];
-    trace(p, 'analyzer', { reasoning: p.reasoning, confidence: 1 - (p.risk_estimate || 0), outcome: 'proposed' });
-    session.proposals.push(p);
-  }
-  saveSession(session);
-  logOk(`analyzer produced ${analyzerProposals.length} proposals`);
 
+  // Unfinished proposals, including Reflexion repairs left pending by an
+  // interrupted run. Repairs emitted during this loop are processed by their
+  // parent and are not in this snapshot of the list.
   for (const proposal of [...session.proposals]) {
-    if (proposal.test_outcome) continue; // already processed (resume)
-    if (proposal.parent_issue_id) continue; // repair attempts processed by parent
-    await processProposal({ proposal, session, tracker, classifier, dryRun, absRepo });
+    if (proposal.test_outcome) continue;
+    await processProposal({
+      proposal, session, tracker, classifier, dryRun, absRepo, work,
+      attemptIdx: proposal.parent_issue_id ? (proposal.attempt || 1) : 0
+    });
   }
 
   // Train RL + calibration after the run
   try {
-    const trained = trainIfReady(session.rl_samples);
-    if (trained) logOk(`RL classifier retrained on ${session.rl_samples.length} samples`);
+    const trained = trainIfReady(absRepo);
+    if (trained) logOk('RL classifier retrained on all persisted samples for this target');
   } catch (err) { logWarn(`RL training skipped: ${err.message}`); }
   try {
-    const calRes = calibration.fitFromProposals(session.proposals);
+    const calRes = calibration.fitFromProposals(session.proposals, absRepo);
     if (calRes.trained) logOk(`calibration refit (n=${calRes.n} ECE_before=${calRes.ece_before.toFixed(3)})`);
   } catch (err) { logWarn(`calibration skipped: ${err.message}`); }
 
@@ -243,22 +375,72 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   // Persist OTel-style spans and dashboard
   try { persistRunSpans(session.run_id, session.proposals); } catch (err) { /* */ }
-  renderDashboard(session);
-  logOk('dashboard written: dashboard/dashboard.html');
+  const dashFile = renderDashboard(session);
+  logOk(`dashboard written: ${path.relative(process.cwd(), dashFile) || dashFile}`);
 
   const stats = summarizeRun(session);
-  logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected}`);
+  logInfo(`done. proposals=${stats.total} passed=${stats.passed} failed=${stats.failed} rl_rejected=${stats.rl_rejected} critic_rejected=${stats.critic_rejected} vetoed=${stats.vetoed}`);
+  if (work.info && work.info.mode === 'worktree') {
+    const commits = worktree.commitsSinceBase(work.info);
+    logOk(`branch ${work.info.branch} (${commits.length} commit${commits.length === 1 ? '' : 's'}) in worktree ${work.info.path}`);
+  }
   saveSession(session);
+  return session;
+}
+
+// Executor isolation: a git worktree on refactor/<run_id> (or refactor-run/…
+// when that name is blocked) under the state dir.
+// Dry runs never write, so they validate against the target directly. A
+// recorded worktree that cannot be re-attached throws (resumeWorktree) and
+// leaves session.worktree as it was; only a fresh run (or a recorded in-place
+// run) gets createWorktree, whose in-place mode is only for non-git or
+// no-commit targets; on a git target it throws EWORKTREE instead.
+function setupWorkspace({ session, absRepo, dryRun }) {
+  const snapshotPath = inflightPath(absRepo);
+  if (dryRun) return { root: absRepo, info: null, snapshotPath };
+  let info = session.worktree && session.worktree.mode === 'worktree'
+    ? worktree.resumeWorktree({ targetRepo: absRepo, info: session.worktree })
+    : null;
+  if (!info) info = worktree.createWorktree({ targetRepo: absRepo, runId: session.run_id, baseDir: worktreesDir(absRepo) });
+  if (info.mode !== 'worktree') {
+    logWarn(`${info.reason}; executor will edit the target in place`);
+  } else {
+    logInfo(`worktree ${info.path} on branch ${info.branch}`);
+  }
+  session.worktree = info;
+  return { root: info.root, info, snapshotPath };
+}
+
+// A crash between the executor's commit and the next saveSession leaves a
+// committed proposal without a test_outcome: take the outcome from the branch.
+function reconcileWithBranch({ session, info, absRepo }) {
+  const committed = worktree.committedIssues(info);
+  let n = 0;
+  for (const p of session.proposals) {
+    const sha = committed.get(p.issue_id);
+    if (p.test_outcome || !sha) continue;
+    p.test_outcome = { status: 'passed', reverted: false, commit: sha, reason: 'reconciled from branch commit' };
+    session.test_results.push({ proposal_id: p.issue_id, ...p.test_outcome });
+    trace(p, 'executor', { reasoning: `committed ${sha.slice(0, 12)} before the previous run stopped`, confidence: 1, outcome: 'passed', trace_id: session.run_id });
+    try {
+      const sample = collectSample(p, absRepo);
+      if (sample) session.rl_samples.push(sample);
+    } catch (err) { logWarn(`sample for ${p.issue_id} skipped: ${err.message}`); }
+    n++;
+  }
+  if (n) logInfo(`resume: ${n} proposal(s) already committed on ${info.branch}; marked passed`);
+  return n;
 }
 
 function summarizeRun(session) {
-  const out = { total: session.proposals.length, passed: 0, failed: 0, rl_rejected: 0, critic_rejected: 0, dry_run: 0, error: 0 };
+  const out = { total: session.proposals.length, passed: 0, failed: 0, rl_rejected: 0, critic_rejected: 0, vetoed: 0, dry_run: 0, error: 0 };
   for (const p of session.proposals) {
     const s = p.test_outcome ? p.test_outcome.status : null;
     if (s === 'passed') out.passed++;
     else if (s === 'failed' || s === 'reverted') out.failed++;
     else if (s === 'rl_rejected') out.rl_rejected++;
     else if (s === 'critic_rejected') out.critic_rejected++;
+    else if (s === 'vetoed') out.vetoed++;
     else if (s === 'dry_run') out.dry_run++;
     else if (s === 'error') out.error++;
   }
@@ -291,11 +473,12 @@ if (require.main === module) {
     cache: opts.cache,
     hierarchical: opts.hierarchical !== false,
     serveDashboard: opts.serve,
-    dashboardPort: Number(opts.port) || 4173
+    dashboardPort: Number(opts.port) || 4173,
+    cli: true
   }).catch((err) => {
     console.error(chalk.red('[orch] fatal: '), err);
     process.exit(1);
   });
 }
 
-module.exports = { runPipeline, processProposal, pruneContext, summarizeProposal, featuresFor, summarizeRun };
+module.exports = { runPipeline, processProposal, criticGate, handleSignal, setupWorkspace, reconcileWithBranch, REJECT_THRESHOLD, MIN_CRITIC_P, MIN_PERSONA_P, featuresFor, summarizeRun };

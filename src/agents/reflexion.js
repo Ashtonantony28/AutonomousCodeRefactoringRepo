@@ -1,7 +1,7 @@
 'use strict';
 
 const { callClaude, extractJsonBlock } = require('../utils/claude-client');
-const { v4: uuidv4 } = require('uuid');
+const { uniqueProposalId } = require('./analyzer');
 
 const MAX_RETRIES = 2;
 
@@ -16,7 +16,6 @@ const SYSTEM_PROMPT = [
   'You receive the original proposal AND the failure output.',
   'Produce a corrected proposal as one JSON object:',
   '{',
-  '  "issue_id": "<new uuid>",',
   '  "file": "<relative path>",',
   '  "current_code": "<the exact snippet to replace in the CURRENT file content>",',
   '  "proposed_code": "<your corrected refactor>",',
@@ -54,7 +53,7 @@ function renderFailureContext(proposal, failure) {
   ].join('\n');
 }
 
-async function repair({ proposal, failure, tracker, attemptIdx = 1 }) {
+async function repair({ proposal, failure, tracker, attemptIdx = 1, takenIds = null }) {
   if (attemptIdx > MAX_RETRIES) return null;
 
   let resp;
@@ -79,7 +78,7 @@ async function repair({ proposal, failure, tracker, attemptIdx = 1 }) {
 
   const risk = Number(parsed.risk_estimate);
   return {
-    issue_id: parsed.issue_id || uuidv4(),
+    issue_id: uniqueProposalId(proposal.file, current, takenIds),
     parent_issue_id: proposal.issue_id,
     attempt: attemptIdx,
     file: proposal.file,
@@ -89,6 +88,7 @@ async function repair({ proposal, failure, tracker, attemptIdx = 1 }) {
     risk_estimate: Number.isFinite(risk) ? Math.max(0, Math.min(1, risk)) : 0.5,
     critic_verdict: null,
     pattern_check_results: [],
+    diff_test: null,
     combined_confidence: null,
     test_outcome: null,
     decision_trace: [{

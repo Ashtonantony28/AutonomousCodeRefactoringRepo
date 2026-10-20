@@ -1,41 +1,24 @@
 'use strict';
 
-const { loadClassifier, sampleToFeatures } = require('./classifier');
+const { loadClassifier, RL_GATE_THRESHOLD } = require('./classifier');
+const { FEATURE_NAMES, extractFeatures } = require('./features');
 
 // Counterfactual feature attribution: for each feature, compute what value
 // it would need to take (within the feature's empirical range) to flip the
-// RL gate decision. Plus a closed-form linear-coefficient attribution for
+// learned gate decision (classifier term). Plus a closed-form linear-coefficient attribution for
 // the *current* prediction.
 //
 // Cheap and exact for logistic regression with linear weights — no MC
 // sampling needed. Surfaced on the dashboard as "what-if" sliders.
 
-const FEATURE_NAMES = [
-  'critic_confidence',
-  'pattern_score',
-  'proposal_complexity',
-  'files_changed',
-  'risk_estimate'
-];
-
 function featuresOf(proposal) {
-  // Same shape as the orchestrator's featuresFor (kept in lockstep here so
-  // the counterfactual matches what the gate actually sees).
-  const ast = proposal.pattern_check_results || [];
-  const passed = ast.filter(c => c.passed).length;
-  const patternScore = ast.length ? passed / ast.length : 0.5;
-  const claudeConf = proposal.critic_verdict ? (proposal.critic_verdict.claude_confidence || 0) : 0;
-  const complexity = Math.max(
-    (proposal.proposed_code || '').split('\n').length,
-    (proposal.current_code || '').split('\n').length
-  );
-  return [claudeConf, patternScore, complexity, 1, proposal.risk_estimate || 0];
+  return extractFeatures(proposal);
 }
 
 // Direct contribution = w_j * (x_j - mean_j) / std_j, expressed back in
 // the original feature units for readability.
-function attribute(proposal) {
-  const cls = loadClassifier();
+function attribute(proposal, targetRepo = null) {
+  const cls = loadClassifier(targetRepo);
   if (!cls.isTrained() || !cls.weights) {
     return { trained: false, contributions: [], p_pass: null };
   }
@@ -63,8 +46,8 @@ function attribute(proposal) {
 // Counterfactual: what value would feature j need to flip the decision
 // at threshold tau? Closed-form: solve for x_j such that the new logit
 // crosses logit(tau).
-function counterfactuals(proposal, threshold = 0.4) {
-  const cls = loadClassifier();
+function counterfactuals(proposal, threshold = RL_GATE_THRESHOLD, targetRepo = null) {
+  const cls = loadClassifier(targetRepo);
   if (!cls.isTrained() || !cls.weights) return [];
   const w = cls.weights;
   const feats = featuresOf(proposal);

@@ -1,0 +1,11 @@
+[
+  {
+    "issue_id": "no-tests-double",
+    "file": "src/util.js",
+    "current_code": "function double(x) {\n  const out = x * 2;\n  return out;\n}",
+    "proposed_code": "function double(x) {\n  return x * 2;\n}",
+    "reasoning": "Inline the temporary variable.",
+    "risk_estimate": 0.1,
+    "expected_status": "skipped_no_tests"
+  }
+]

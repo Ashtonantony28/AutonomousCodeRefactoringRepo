@@ -8,14 +8,16 @@ const STAGE_SIGNAL_WEIGHT = 0.3;
 const COVERAGE_PENALTY_WEIGHT = 0.5;
 const DISAGREEMENT_PENALTY_WEIGHT = 1.0;
 
-function calibrated(x) {
-  const p = loadPredictor();
+// Diagnostic only: the reward is logged and charted, never trained on.
+// `calibrated` uses the target repo's isotonic calibration when it is trained.
+function calibrated(x, targetRepo = null) {
+  const p = loadPredictor(targetRepo);
   return p.isTrained() ? p.predict(x) : x;
 }
 
-function pCorrect(proposal) {
+function pCorrect(proposal, targetRepo = null) {
   const raw = Number(proposal.combined_confidence) || 0;
-  const conf = calibrated(raw);
+  const conf = calibrated(raw, targetRepo);
   const passed = proposal.test_outcome && proposal.test_outcome.status === 'passed';
   return passed ? conf : 1 - conf;
 }
@@ -40,7 +42,7 @@ function stageSignals(proposal) {
     const passed = ast.filter(c => c.passed).length;
     sig.ast_ok = ast.length ? passed / ast.length : 0;
   }
-  if (proposal.diff_test && proposal.diff_test.applicable) sig.diff_test_ok = proposal.diff_test.score || 0;
+  if (proposal.diff_test && proposal.diff_test.applicable) sig.diff_test_ok = proposal.diff_test.verdict === 'equivalent' ? 1 : 0;
   const status = proposal.test_outcome && proposal.test_outcome.status;
   if (status && status !== 'apply_failed' && status !== 'error') sig.applied = 1;
   if (['passed', 'failed', 'reverted', 'applied_no_tests'].includes(status)) sig.tests_ran = 1;
@@ -61,14 +63,15 @@ function disagreementPenalty(proposal) {
   if (!a) return 0;
   // Higher std + non-unanimous + verbal entropy = more disagreement = more penalty.
   let p = 0;
-  if (typeof a.std_confidence === 'number') p += Math.min(1, a.std_confidence * 2);
-  if (a.unanimous_approval === false) p += 0.5;
+  const std = typeof a.std === 'number' ? a.std : a.std_confidence;
+  if (typeof std === 'number') p += Math.min(1, std * 2);
+  if (a.unanimous === false || a.unanimous_approval === false) p += 0.5;
   if (typeof a.verbal_entropy === 'number') p += a.verbal_entropy * 0.3;
   return Math.min(1, p / 2);
 }
 
-function computeReward(proposal) {
-  const p = pCorrect(proposal);
+function computeReward(proposal, targetRepo = null) {
+  const p = pCorrect(proposal, targetRepo);
   const fp = falsePositive(proposal);
   const stage = stageSignals(proposal);
   const cov = coveragePenalty(proposal);
@@ -83,8 +86,8 @@ function computeReward(proposal) {
 }
 
 // Returns the per-term breakdown for interpretability / dashboard.
-function rewardBreakdown(proposal) {
-  const p = pCorrect(proposal);
+function rewardBreakdown(proposal, targetRepo = null) {
+  const p = pCorrect(proposal, targetRepo);
   const fp = falsePositive(proposal);
   const stage = stageSignals(proposal);
   const cov = coveragePenalty(proposal);
@@ -97,7 +100,7 @@ function rewardBreakdown(proposal) {
     stage_signals: stage.signals,
     coverage_penalty: -COVERAGE_PENALTY_WEIGHT * cov,
     disagreement_penalty: -DISAGREEMENT_PENALTY_WEIGHT * dis,
-    total: computeReward(proposal)
+    total: computeReward(proposal, targetRepo)
   };
 }
 

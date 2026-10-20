@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_DIR } = require('../utils/checkpoint');
+const { learningDir, isLabeled, editId } = require('./collector');
 
 // Isotonic regression via pool-adjacent-violators (PAVA). Non-parametric,
 // monotone, robust to mis-calibrated linear blends. Used to map raw
@@ -11,12 +11,16 @@ const { STATE_DIR } = require('../utils/checkpoint');
 // Also exposes reliability-diagram bin computation and Expected Calibration
 // Error (ECE) so the dashboard can show the calibration plot.
 
-const MODEL_PATH = path.join(STATE_DIR, 'calibration.json');
+// Per target repo (see collector.learningDir): the fitted model plus the
+// (combined_confidence, passed) points of every executed proposal so far.
+function modelPath(targetRepo = null) { return path.join(learningDir(targetRepo), 'calibration.json'); }
+function pointsPath(targetRepo = null) { return path.join(learningDir(targetRepo), 'calibration-points.json'); }
 const MIN_SAMPLES = 20;
 const N_BINS = 10;
 
-function ensureDir() {
-  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+function ensureDir(targetRepo = null) {
+  const dir = learningDir(targetRepo);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 // Sort (x,y) by x, then run PAVA on y. Returns sorted xs and isotonized ys.
@@ -66,20 +70,33 @@ function buildPredictor(fit) {
   };
 }
 
-function save(fit) {
-  ensureDir();
-  fs.writeFileSync(MODEL_PATH, JSON.stringify({
+function save(fit, targetRepo = null) {
+  ensureDir(targetRepo);
+  fs.writeFileSync(modelPath(targetRepo), JSON.stringify({
     xs: fit.xs, ys: fit.ys, fitted_at: new Date().toISOString(), n: fit.xs.length
   }, null, 2));
 }
 
-function load() {
-  if (!fs.existsSync(MODEL_PATH)) return null;
-  try { return JSON.parse(fs.readFileSync(MODEL_PATH, 'utf8')); } catch { return null; }
+function load(targetRepo = null) {
+  const p = modelPath(targetRepo);
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-function loadPredictor() {
-  const fit = load();
+function loadPoints(targetRepo = null) {
+  try {
+    const pts = JSON.parse(fs.readFileSync(pointsPath(targetRepo), 'utf8'));
+    return Array.isArray(pts) ? pts : [];
+  } catch { return []; }
+}
+
+function savePoints(points, targetRepo = null) {
+  ensureDir(targetRepo);
+  fs.writeFileSync(pointsPath(targetRepo), JSON.stringify(points, null, 2));
+}
+
+function loadPredictor(targetRepo = null) {
+  const fit = load(targetRepo);
   if (!fit || !fit.xs || !fit.xs.length) return { predict: x => x, isTrained: () => false, raw: null };
   const predict = buildPredictor(fit);
   return { predict, isTrained: () => true, raw: fit };
@@ -116,18 +133,34 @@ function expectedCalibrationError(xs, ys, nBins = N_BINS) {
   return ece;
 }
 
-function fitFromProposals(proposals) {
-  const xs = [], ys = [];
-  for (const p of proposals) {
+function executedPoints(proposals) {
+  const out = [];
+  for (const p of proposals || []) {
     const s = p.test_outcome && p.test_outcome.status;
-    if (s !== 'passed' && s !== 'failed' && s !== 'reverted') continue;
+    if (!isLabeled(p.test_outcome)) continue;
     if (typeof p.combined_confidence !== 'number') continue;
-    xs.push(p.combined_confidence);
-    ys.push(s === 'passed' ? 1 : 0);
+    out.push({ proposal_id: p.issue_id, edit_id: editId(p), x: p.combined_confidence, y: s === 'passed' ? 1 : 0 });
   }
+  return out;
+}
+
+// With a targetRepo the session's executed proposals are merged (by edit_id;
+// points stored before it existed by proposal_id) into that target's
+// persisted points and the fit uses all of them; without one only the given
+// proposals are used.
+function fitFromProposals(proposals, targetRepo = null) {
+  let points = executedPoints(proposals);
+  if (targetRepo) {
+    const key = pt => pt.edit_id || pt.proposal_id;
+    const byId = new Map(loadPoints(targetRepo).map(pt => [key(pt), pt]));
+    for (const pt of points) byId.set(key(pt), pt);
+    points = [...byId.values()];
+    savePoints(points, targetRepo);
+  }
+  const xs = points.map(pt => pt.x), ys = points.map(pt => pt.y);
   if (xs.length < MIN_SAMPLES) return { trained: false, n: xs.length };
   const fit = fitIsotonic(xs, ys);
-  save(fit);
+  save(fit, targetRepo);
   return { trained: true, n: xs.length, ece_before: expectedCalibrationError(xs, ys), bins_before: reliabilityBins(xs, ys) };
 }
 
@@ -138,8 +171,12 @@ module.exports = {
   load,
   save,
   fitFromProposals,
+  executedPoints,
+  loadPoints,
+  pointsPath,
   reliabilityBins,
   expectedCalibrationError,
-  MODEL_PATH,
+  modelPath,
   MIN_SAMPLES
 };
+Object.defineProperty(module.exports, 'MODEL_PATH', { enumerable: true, get: () => modelPath() });

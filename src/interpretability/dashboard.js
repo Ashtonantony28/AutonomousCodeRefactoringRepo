@@ -4,9 +4,16 @@ const fs = require('fs');
 const path = require('path');
 const calibration = require('../rl/calibration');
 const { clusterFailures } = require('./clustering');
+const { trainProbe, PROBE_FEATURE_NAMES } = require('./probe');
+const { RL_GATE_THRESHOLD } = require('../rl/classifier');
+const { APPROVAL_THRESHOLD } = require('../rl/reward');
 
-const DASHBOARD_DIR = path.resolve(__dirname, '..', '..', 'dashboard');
-const DASHBOARD_PATH = path.join(DASHBOARD_DIR, 'dashboard.html');
+const DEFAULT_DASHBOARD_DIR = path.resolve(__dirname, '..', '..', 'dashboard');
+
+function dashboardDir() {
+  return process.env.REFACTOR_DASHBOARD_DIR ? path.resolve(process.env.REFACTOR_DASHBOARD_DIR) : DEFAULT_DASHBOARD_DIR;
+}
+function dashboardPath() { return path.join(dashboardDir(), 'dashboard.html'); }
 
 function htmlEscape(s) {
   return String(s == null ? '' : s)
@@ -14,11 +21,25 @@ function htmlEscape(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// JSON safe to inline in <script>: no `</script>`, `<!--`, or JS line breaks.
+function safeJson(value) {
+  return JSON.stringify(value === undefined ? null : value)
+    .replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
+function domId(s) { return String(s == null ? '' : s).replace(/[^A-Za-z0-9_-]/g, '_'); }
+
+function criticConfidence(v) {
+  if (!v) return null;
+  return typeof v.p_preserves === 'number' ? v.p_preserves : v.claude_confidence;
+}
+
 function rowClass(status) {
   if (status === 'passed' || status === 'applied_no_tests') return 'row-pass';
   if (status === 'failed' || status === 'reverted' || status === 'apply_failed' ||
       status === 'timeout' || status === 'environment_error') return 'row-fail';
-  if (status === 'rl_rejected' || status === 'critic_rejected') return 'row-skip';
+  if (status === 'rl_rejected' || status === 'critic_rejected' || status === 'vetoed') return 'row-skip';
   return 'row-other';
 }
 
@@ -41,7 +62,7 @@ function aggregateStats(session) {
     if (typeof p.combined_confidence === 'number') { confSum += p.combined_confidence; confN++; }
     if (typeof p.rl_prediction === 'number' && ['passed', 'failed', 'reverted'].includes(s)) {
       rlN++;
-      const predictedPass = p.rl_prediction >= 0.5;
+      const predictedPass = p.rl_prediction >= RL_GATE_THRESHOLD;
       const actualPass = s === 'passed';
       if (predictedPass === actualPass) rlCorrect++;
     }
@@ -70,20 +91,47 @@ function reliability(session) {
   return { bins, ece, n: xs.length };
 }
 
+function statusOf(p) { return p.test_outcome ? p.test_outcome.status : null; }
+
+// Ground truth where we have it: executed tests, else a divergent diff test.
+function knownOutcome(p) {
+  const s = statusOf(p);
+  if (s === 'passed') return 'passed';
+  if (s === 'failed' || s === 'reverted') return 'failed';
+  if (p.diff_test && p.diff_test.verdict === 'divergent') return 'failed';
+  return null;
+}
+
+function criticApproved(p) {
+  const s = statusOf(p);
+  if (s === 'critic_rejected' || s === 'vetoed') return false;
+  if (p.veto && p.veto.vetoed !== false) return false;
+  return (p.combined_confidence || 0) >= APPROVAL_THRESHOLD;
+}
+
 function agreementMatrix(session) {
-  // 2x2: critic-approved (combined >= 0.5) × test outcome (pass/fail)
-  const cells = { tp: 0, fp: 0, fn: 0, tn: 0 };
+  // critic decision (approved / rejected incl. vetoes) x known outcome
+  const cells = { tp: 0, fp: 0, fn: 0, tn: 0, approved_untested: 0, rejected_untested: 0, not_approved: 0 };
   for (const p of session.proposals || []) {
-    const s = p.test_outcome && p.test_outcome.status;
-    if (!['passed', 'failed', 'reverted'].includes(s)) continue;
-    const approved = (p.combined_confidence || 0) >= 0.5;
-    const passed = s === 'passed';
+    if (!statusOf(p)) continue;
+    const approved = criticApproved(p);
+    const outcome = knownOutcome(p);
+    if (!approved) cells.not_approved++;
+    if (outcome == null) { cells[approved ? 'approved_untested' : 'rejected_untested']++; continue; }
+    const passed = outcome === 'passed';
     if (approved && passed) cells.tp++;
-    else if (approved && !passed) cells.fp++;
-    else if (!approved && passed) cells.fn++;
+    else if (approved) cells.fp++;
+    else if (passed) cells.fn++;
     else cells.tn++;
   }
   return cells;
+}
+
+function probePanel(proposals) {
+  let w = null;
+  try { w = trainProbe(proposals); } catch { w = null; }
+  if (!w) return { trained: false, weights: [] };
+  return { trained: true, bias: w.b, weights: PROBE_FEATURE_NAMES.map((name, j) => ({ feature: name, weight: w.w[j] })) };
 }
 
 function renderRow(p, idx) {
@@ -91,7 +139,7 @@ function renderRow(p, idx) {
   const klass = rowClass(status);
   const file = htmlEscape(p.file);
   const risk = fmtNum(p.risk_estimate, 2);
-  const critic = p.critic_verdict ? fmtNum(p.critic_verdict.claude_confidence, 2) : '—';
+  const critic = p.critic_verdict ? fmtNum(criticConfidence(p.critic_verdict), 2) : '—';
   const rlPred = typeof p.rl_prediction === 'number' ? fmtNum(p.rl_prediction, 2) : '—';
   const failClass = p.failure_class ? `<span class="tag tag-${p.failure_class}">${p.failure_class}</span>` : '';
   const repair = p.parent_issue_id ? `<span class="tag tag-repair">repair #${p.attempt || ''}</span>` : '';
@@ -115,7 +163,7 @@ function renderRow(p, idx) {
         ${p.critic_verdict.panel.map(v => `<tr>
           <td>${htmlEscape(v.persona)}</td>
           <td>${v.preserves_semantics ? '✓' : '✗'}</td>
-          <td>${fmtNum(v.claude_confidence, 2)}</td>
+          <td>${fmtNum(criticConfidence(v), 2)}</td>
           <td>${htmlEscape((v.reasoning || '').slice(0, 240))}</td>
         </tr>`).join('')}
       </tbody>
@@ -123,7 +171,7 @@ function renderRow(p, idx) {
   const diff = p.diff_test && p.diff_test.applicable
     ? `<h4>Differential testing</h4><pre>${htmlEscape(JSON.stringify(p.diff_test, null, 2))}</pre>`
     : '';
-  const detailsId = `details-${idx}`;
+  const detailsId = `details-${domId(p.issue_id || idx)}`;
   return `
     <tr class="${klass}" data-toggle="${detailsId}">
       <td>${idx + 1}</td>
@@ -168,14 +216,16 @@ function renderHtml(session) {
   const agree = agreementMatrix(session);
   let clusters = { clusters: [] };
   try { clusters = clusterFailures(session.proposals || []); } catch { /* */ }
-  const calibModel = calibration.load();
+  const calibModel = calibration.load(session.target_repo || null);
+  const probe = probePanel(session.proposals || []);
 
   const inline = {
     session: { proposals: session.proposals || [], updated_at: updatedAt },
     reliability: rel,
     agreement: agree,
     clusters,
-    calibration: calibModel
+    calibration: calibModel,
+    probe
   };
 
   return `<!doctype html>
@@ -255,6 +305,7 @@ function renderHtml(session) {
 </head>
 <body>
   <h1>Multi-Agent Refactoring — Dashboard <span class="live-dot" id="live-dot"></span><span id="live-text" style="font-size:12px;color:#8b949e">offline</span></h1>
+  <main id="app">
   <div class="meta">
     run_id: <code>${htmlEscape(session.run_id || '')}</code> ·
     target: <code>${htmlEscape(session.target_repo || '')}</code> ·
@@ -290,17 +341,27 @@ function renderHtml(session) {
         <div class="agree-cell fn"><div class="count" id="ag-fn">${agree.fn}</div><div class="lbl">rejected · would have passed</div></div>
         <div class="agree-cell tn"><div class="count" id="ag-tn">${agree.tn}</div><div class="lbl">rejected · would have failed</div></div>
       </div>
+      <div style="font-size:11px;color:#8b949e;margin-top:6px">
+        not approved (incl. vetoes): <b id="ag-na">${agree.not_approved}</b> ·
+        rejected, outcome unknown: <b id="ag-ru">${agree.rejected_untested}</b> ·
+        approved, untested: <b id="ag-au">${agree.approved_untested}</b>
+      </div>
     </div>
     <div class="panel">
       <h3>What-if · RL gate</h3>
       <div class="what-if">
         <div>predicted p_pass: <span class="p-pass" id="wi-ppass">—</span></div>
-        <label>critic_confidence <input id="wi-f0" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v0">0.70</span></label>
+        <label>p_preserves      <input id="wi-f0" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v0">0.70</span></label>
         <label>pattern_score    <input id="wi-f1" type="range" min="0" max="1" step="0.01" value="0.7"><span id="wi-v1">0.70</span></label>
         <label>complexity (LOC) <input id="wi-f2" type="range" min="1" max="200" step="1" value="20"><span id="wi-v2">20</span></label>
-        <label>files_changed    <input id="wi-f3" type="range" min="1" max="20" step="1" value="1"><span id="wi-v3">1</span></label>
-        <label>risk_estimate    <input id="wi-f4" type="range" min="0" max="1" step="0.01" value="0.3"><span id="wi-v4">0.30</span></label>
+        <label>risk_estimate    <input id="wi-f3" type="range" min="0" max="1" step="0.01" value="0.3"><span id="wi-v3">0.30</span></label>
       </div>
+    </div>
+    <div class="panel">
+      <h3>Probe (diagnostic, never gates)</h3>
+      ${probe.trained ? `<table class="jury" id="probe-weights"><thead><tr><th>feature</th><th>weight</th></tr></thead><tbody>
+        ${probe.weights.map(x => `<tr><td>${htmlEscape(x.feature)}</td><td>${fmtNum(x.weight, 3)}</td></tr>`).join('')}
+      </tbody></table>` : '<div style="color:#8b949e;font-size:12px" id="probe-empty">Needs ≥ 10 executed proposals with both outcomes.</div>'}
     </div>
     <div class="panel">
       <h3>Failure clusters</h3>
@@ -319,10 +380,17 @@ function renderHtml(session) {
     </tbody>
   </table>
 
-  <footer>Auto-refreshes via SSE when served from <code>node src/interpretability/server.js</code>; otherwise polls every 30 s.</footer>
+  <footer>Live when served from <code>node src/interpretability/server.js</code> (SSE, re-rendered per request); otherwise a static snapshot.</footer>
+  <script type="application/json" id="inline-data">${safeJson(inline)}</script>
+  </main>
 
 <script>
-const INLINE = ${JSON.stringify(inline)};
+const RL_GATE_THRESHOLD = ${safeJson(RL_GATE_THRESHOLD)};
+function readInline(root) {
+  const el = (root || document).getElementById('inline-data');
+  try { return el ? JSON.parse(el.textContent) : null; } catch (e) { return null; }
+}
+let INLINE = readInline(document);
 
 function drawReliability(rel) {
   const cnv = document.getElementById('reliability');
@@ -354,7 +422,7 @@ function drawReliability(rel) {
 
 function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
 function predictPpass(weights, x) {
-  if (!weights || !weights.w) return null;
+  if (!weights || !weights.w || weights.w.length !== x.length) return null;
   let z = weights.b;
   for (let j = 0; j < weights.w.length; j++) {
     const xs = (x[j] - weights.means[j]) / (weights.stds[j] || 1);
@@ -364,80 +432,85 @@ function predictPpass(weights, x) {
 }
 
 function wireWhatIf() {
-  const f = [0,1,2,3,4].map(i => document.getElementById('wi-f'+i));
-  const v = [0,1,2,3,4].map(i => document.getElementById('wi-v'+i));
+  const f = [0,1,2,3].map(i => document.getElementById('wi-f'+i));
+  const v = [0,1,2,3].map(i => document.getElementById('wi-v'+i));
   const out = document.getElementById('wi-ppass');
   function read() { return f.map(el => Number(el.value)); }
-  function fmt(j) { return j === 2 || j === 3 ? String(read()[j]) : read()[j].toFixed(2); }
+  function fmt(j) { return j === 2 ? String(read()[j]) : read()[j].toFixed(2); }
   function update() {
     const x = read();
-    for (let j = 0; j < 5; j++) v[j].textContent = fmt(j);
+    for (let j = 0; j < f.length; j++) v[j].textContent = fmt(j);
     fetch('/rl-weights.json').then(r => r.ok ? r.json() : null).then(w => {
       const p = predictPpass(w, x);
       out.textContent = p == null ? '—' : p.toFixed(3);
-      out.style.color = p == null ? '#8b949e' : (p >= 0.4 ? '#56d364' : '#ff7b72');
+      out.style.color = p == null ? '#8b949e' : (p >= RL_GATE_THRESHOLD ? '#56d364' : '#ff7b72');
     }).catch(() => { out.textContent = '—'; });
   }
   for (const el of f) el.addEventListener('input', update);
   update();
 }
 
-function refreshFrom(session, rel, clusters) {
-  const tbody = document.getElementById('props-tbody');
-  // We don't re-render the row HTML client-side; we just bump KPIs.
-  // Full rebuild happens via window.location.reload() when SSE fires.
-  document.getElementById('kpi-total').textContent = (session.proposals || []).length;
-  document.getElementById('updated').textContent = session.updated_at || '';
-  if (rel) {
-    document.getElementById('kpi-ece').textContent = rel.ece != null ? rel.ece.toFixed(3) : '—';
-    drawReliability(rel);
-  }
-}
-
-drawReliability(INLINE.reliability);
-wireWhatIf();
-
-document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
-  tr.addEventListener('click', function () {
+function wireToggles(open) {
+  document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
     const id = tr.getAttribute('data-toggle');
     const d = document.getElementById(id);
-    if (!d) return;
-    d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+    if (d && open && open.has(id)) d.style.display = 'table-row';
+    tr.addEventListener('click', function () {
+      if (!d) return;
+      d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
+    });
   });
-});
+}
+
+function init(open) {
+  drawReliability(INLINE && INLINE.reliability);
+  wireWhatIf();
+  wireToggles(open);
+}
+
+// Live refresh: fetch the per-request render of '/' and swap #app in place,
+// keeping open detail rows and slider positions.
+let inflight = false, again = false;
+function refresh() {
+  if (inflight) { again = true; return; }
+  inflight = true;
+  fetch(window.location.pathname + '?ts=' + Date.now(), { cache: 'no-store' })
+    .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(html => {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const next = doc.getElementById('app');
+      const cur = document.getElementById('app');
+      if (!next || !cur) return;
+      const open = new Set();
+      document.querySelectorAll('tr.details-row').forEach(d => { if (d.style.display !== 'none') open.add(d.id); });
+      const sliders = {};
+      document.querySelectorAll('.what-if input').forEach(el => { sliders[el.id] = el.value; });
+      cur.innerHTML = next.innerHTML;
+      for (const id in sliders) { const el = document.getElementById(id); if (el) el.value = sliders[id]; }
+      INLINE = readInline(document);
+      init(open);
+    })
+    .catch(() => {})
+    .finally(() => { inflight = false; if (again) { again = false; refresh(); } });
+}
+
+init();
 
 (function liveOrPoll() {
   const dot = document.getElementById('live-dot');
   const lbl = document.getElementById('live-text');
+  if (window.location.protocol === 'file:') { lbl.textContent = 'static snapshot'; return; }
   if (typeof EventSource !== 'undefined') {
     try {
       const es = new EventSource('/events');
       es.onopen = () => { dot.classList.add('on'); lbl.textContent = 'live'; };
-      es.addEventListener('state', () => {
-        Promise.all([
-          fetch('/session.json').then(r => r.json()),
-          fetch('/calibration.json').then(r => r.ok ? r.json() : null).catch(() => null),
-          fetch('/clusters.json').then(r => r.ok ? r.json() : null).catch(() => null)
-        ]).then(([s, c, cl]) => {
-          // Trigger a full reload on real state change so the table is rebuilt server-side.
-          window.location.reload();
-        });
-      });
+      es.addEventListener('state', refresh);
       es.onerror = () => { dot.classList.remove('on'); lbl.textContent = 'reconnecting'; };
       return;
     } catch (e) { /* fall through */ }
   }
-  // No SSE — degrade to polling
   lbl.textContent = 'polling';
-  let last = ${JSON.stringify(updatedAt)};
-  setInterval(() => {
-    fetch(window.location.pathname + '?ts=' + Date.now(), { cache: 'no-store' })
-      .then(r => r.text())
-      .then(html => {
-        const m = html.match(/id="updated">([^<]+)</);
-        if (m && m[1] && m[1] !== last) window.location.reload();
-      }).catch(() => {});
-  }, 30000);
+  setInterval(refresh, 5000);
 }());
 </script>
 </body>
@@ -445,10 +518,13 @@ document.querySelectorAll('tr[data-toggle]').forEach(function (tr) {
 }
 
 function renderDashboard(session) {
-  if (!fs.existsSync(DASHBOARD_DIR)) fs.mkdirSync(DASHBOARD_DIR, { recursive: true });
+  const dir = dashboardDir();
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const html = renderHtml(session);
-  fs.writeFileSync(DASHBOARD_PATH, html);
-  return DASHBOARD_PATH;
+  const out = dashboardPath();
+  fs.writeFileSync(out, html);
+  return out;
 }
 
-module.exports = { renderDashboard, renderHtml, aggregateStats, reliability, agreementMatrix, DASHBOARD_PATH };
+module.exports = { renderDashboard, renderHtml, aggregateStats, reliability, agreementMatrix, probePanel, safeJson, dashboardDir, dashboardPath };
+Object.defineProperty(module.exports, 'DASHBOARD_PATH', { enumerable: true, get: dashboardPath });
