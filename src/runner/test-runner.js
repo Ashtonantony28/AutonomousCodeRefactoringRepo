@@ -63,6 +63,9 @@ function parseCounts(stdout, framework) {
 // Test commands run detached in their own process group so a timeout (or a
 // SIGINT of the orchestrator) can kill the whole tree, grandchildren included.
 const active = new Set();
+// Temp dirs of the runs in flight, removed by removeLiveDirs on a signal
+// (process.exit skips runTests' finally).
+const liveDirs = new Set();
 
 function killGroup(proc, signal = 'SIGKILL') {
   if (!proc || proc.pid == null) return;
@@ -76,6 +79,11 @@ function killActive(signal = 'SIGKILL') {
   let n = 0;
   for (const proc of active) { killGroup(proc, signal); n++; }
   return n;
+}
+
+function removeLiveDirs() {
+  for (const dir of liveDirs) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* */ } }
+  liveDirs.clear();
 }
 
 // Resolves on the child's `exit` (or the timeout), not on stdio `close`: a
@@ -433,8 +441,15 @@ function junitResults(xml) {
 }
 
 // Reporters the suite picks itself cannot be extended (node needs as many
-// destinations as reporters): no per-test results then.
+// destinations as reporters): no per-test results then. A suite that picks
+// them out of sight (a delegated script, .npmrc) makes node refuse to start
+// with ours added: that run is repeated without them, and so is every later
+// run in that repo.
+const reporterConflicts = new Set();
+const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]*--test-reporter|--test-reporter[\s\S]*ERR_INVALID_ARG_VALUE/.test(r.stderr);
+
 function ownsReporters(repoRoot, env) {
+  if (reporterConflicts.has(repoRoot)) return true;
   if (/--test-reporter/.test(env.NODE_OPTIONS || '')) return true;
   try { return /--test-reporter/.test(JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).scripts.test); } catch { return false; }
 }
@@ -466,6 +481,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   // A fresh bytecode cache per run: a same-size rewrite within the same second
   // (an edit, a mutant) must not be served a stale .pyc.
   const pycDir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-pyc-'));
+  for (const d of [covDir, pycDir]) if (d) liveDirs.add(d);
   const env = { ...process.env, CI: '1', PYTHONPYCACHEPREFIX: pycDir };
   // Coverage is collected only when it is evaluated (an inherited
   // NODE_V8_COVERAGE would make every run, mutant runs included, pay for it;
@@ -483,7 +499,9 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   const pytest = detected.framework === 'pytest';
   const report = path.join(pycDir, pytest ? 'junit.xml' : 'tests.tap');
   const reportArgs = pytest ? [`--junitxml=${report}`, '--tb=short'] : [];
-  if (!pytest && !ownsReporters(repoRoot, env)) {
+  const baseOptions = env.NODE_OPTIONS;
+  const reporters = !pytest && !ownsReporters(repoRoot, env);
+  if (reporters) {
     env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --test-reporter=tap --test-reporter-destination=stdout --test-reporter=tap "--test-reporter-destination=${report}"`.trim();
   }
 
@@ -492,6 +510,12 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   let tCov = null;
   try {
     result = await runCommand({ cmd, args: [...args, ...reportArgs], cwd: repoRoot, env, timeoutMs });
+    if (reporters && !result.timedOut && reporterConflict(result)) {
+      reporterConflicts.add(repoRoot);
+      if (baseOptions === undefined) delete env.NODE_OPTIONS; else env.NODE_OPTIONS = baseOptions;
+      if (covDir) { fs.rmSync(covDir, { recursive: true, force: true }); fs.mkdirSync(covDir); }
+      result = await runCommand({ cmd, args: [...args, ...reportArgs], cwd: repoRoot, env, timeoutMs: Math.max(1, deadline - Date.now()) });
+    }
     try {
       const text = fs.readFileSync(report, 'utf8');
       perTest = pytest ? junitResults(text) : tapResults(text);
@@ -517,8 +541,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
       ? { available: true, tool, exercised: false, reason: 'coverage_timeout', detail: `${err.message} (${timeoutMs} ms)` }
       : { available: true, tool, exercised: false, reason: 'edit_not_exercised', detail: `coverage unreadable: ${err.message}` };
   } finally {
-    if (covDir) fs.rmSync(covDir, { recursive: true, force: true });
-    fs.rmSync(pycDir, { recursive: true, force: true });
+    for (const d of [covDir, pycDir]) if (d) { fs.rmSync(d, { recursive: true, force: true }); liveDirs.delete(d); }
   }
 
   let status;
@@ -558,4 +581,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, TIMEOUT_MS };
+module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, TIMEOUT_MS };

@@ -560,3 +560,19 @@ test('runTests: pytest per-test results; an import failure is a collection error
     assert.deepStrictEqual(Object.values(red.tests), ['fail']);
   }
 });
+
+test('runTests: a delegated script with its own --test-reporter runs green without per-test results, here and in later runs (AUDIT-18 H1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg28-');
+  const scripts = { test: 'npm run unit --silent', unit: 'node --test --test-reporter=dot test/a.test.js' };
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts }));
+  fs.mkdirSync(path.join(dir, 'test'));
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), "'use strict';\nconst test = require('node:test');\ntest('one', () => {});\n");
+  for (let i = 0; i < 2; i++) {
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'passed', r.stdout + r.stderr);
+    assert.strictEqual(r.tests, undefined);
+  }
+});

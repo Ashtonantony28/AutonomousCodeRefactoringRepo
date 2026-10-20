@@ -372,7 +372,36 @@ def const_kind(n, int_vars):
         return 'num'
     if isinstance(n, ast.Call) and call_name(n.func) in ('len', 'int', 'float', 'abs', 'round', 'sum'):
         return 'num'
+    if isinstance(n, ast.BinOp) and const_kind(n.left, int_vars) == 'num' and const_kind(n.right, int_vars) == 'num':
+        return 'num'
     return None
+
+
+def bound_names(n):
+    if isinstance(n, ast.Name):
+        return [] if isinstance(n.ctx, ast.Load) else [n.id]
+    if isinstance(n, ast.arg):
+        return [n.arg]
+    if isinstance(n, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name).split('.')[0] for a in n.names]
+    if isinstance(n, (ast.Global, ast.Nonlocal)):
+        return n.names
+    nm = getattr(n, 'name', None) or getattr(n, 'rest', None)  # def/class, except-as, match captures
+    return [nm] if isinstance(nm, str) else []
+
+
+def module_nums(tree):
+    """Top-level names bound once, by `NAME = <numeric constant expression>`, and nowhere else."""
+    bound = {}
+    for n in ast.walk(tree):
+        for x in bound_names(n):
+            bound[x] = bound.get(x, 0) + 1
+    out = set()
+    for s in tree.body:
+        tg = s.targets[0] if isinstance(s, ast.Assign) and len(s.targets) == 1 else s.target if isinstance(s, ast.AnnAssign) and s.value else None
+        if isinstance(tg, ast.Name) and bound.get(tg.id) == 1 and const_kind(s.value, out) == 'num':
+            out.add(tg.id)
+    return out
 
 
 def use(h, n, int_vars):
@@ -464,11 +493,12 @@ def use(h, n, int_vars):
         h.kinds.add('any')
 
 
-def analyze(fn, params, extra=None):
-    """Hints per parameter (and per `self.attr` path when `extra` maps them)."""
+def analyze(fn, params, extra=None, nums=()):
+    """Hints per parameter (and per `self.attr` path when `extra` maps them);
+    `nums`: module_nums of the module."""
     hints = {p: Hint() for p in params}
     alias = {p: (p, 0) for p in params}
-    int_vars = set()
+    int_vars = set(nums)
     for n in ast.walk(fn):
         if isinstance(n, (ast.For, ast.comprehension)):
             it, tg = n.iter, n.target
@@ -1293,6 +1323,7 @@ def main(req):
         set_parents(node)
     lits = literals([cur_tree, prop_tree] if small else [cf[q][1] for q in changed] + [pf[q][1] for q in changed])
     P = pools_from(lits)
+    nums = module_nums(cur_tree) & module_nums(prop_tree)
     rng = random.Random(SEED)
     plan = []
     for q in changed:
@@ -1306,10 +1337,10 @@ def main(req):
                         for tg in n.targets:
                             if isinstance(tg, ast.Attribute) and isinstance(tg.value, ast.Name) and tg.value.id == 'self':
                                 attr_map[tg.attr] = n.value.id
-                ih = analyze(init, signature(init, True)[0] + [n for n, _ in signature(init, True)[2]])
+                ih = analyze(init, signature(init, True)[0] + [n for n, _ in signature(init, True)[2]], nums=nums)
                 for m in cls.body:
                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m is not init and attr_map:
-                        for p, h in analyze(m, [], attr_map).items():
+                        for p, h in analyze(m, [], attr_map, nums).items():
                             ih.setdefault(p, Hint()).kinds |= h.kinds
                 inits = build_inputs(init, True, ih, P, rng)
             else:
@@ -1320,13 +1351,13 @@ def main(req):
                 inputs = [(a, (), {}) for a, kw in inits if not kw]
             else:
                 pos, _, kwonly, _ = signature(fn, True)
-                own = build_inputs(fn, True, analyze(fn, pos + [n for n, _ in kwonly]), P, rng)
+                own = build_inputs(fn, True, analyze(fn, pos + [n for n, _ in kwonly], nums=nums), P, rng)
                 m = max(len(own), min(len(inits), MAX_INPUTS))
                 inputs = [(inits[i % len(inits)][0],) + own[i % len(own)] for i in range(m)]
         else:
             skip = kind == 'classmethod'
             pos, _, kwonly, _ = signature(fn, skip)
-            inputs = [((), a, kw) for a, kw in build_inputs(fn, skip, analyze(fn, pos + [n for n, _ in kwonly]), P, rng)]
+            inputs = [((), a, kw) for a, kw in build_inputs(fn, skip, analyze(fn, pos + [n for n, _ in kwonly], nums=nums), P, rng)]
         inputs = inputs or [((), (), {})]
         n = len(inputs)
         sched = []

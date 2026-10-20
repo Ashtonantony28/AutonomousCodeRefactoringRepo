@@ -322,3 +322,24 @@ test('a later generator of a comprehension and a match guard are probe sites of 
   assert.strictEqual(guard.verdict, 'equivalent', guard.reason);
   assert.strictEqual(guard.deletions_observed, false);
 });
+
+// ---------- SG27 ----------
+
+test('a constant numeric expression or module constant is a number: scaled-unit code is judged in budget (AUDIT-17 H1)', () => {
+  const inline = (e) => [`def conv(s):\n    t = ${e}\n    return t\n`, `def conv(s):\n    return ${e}\n`];
+  for (const [e, pre] of [['s * 10 ** 9', ''], ['s * NS_PER_S', 'NS_PER_S = 10 ** 9\n']]) {
+    const r = run(...inline(e), { pre });
+    assert.strictEqual(r.verdict, 'equivalent', `${e}: ${r.reason}`);
+    assert(r.duration_ms < 2000, `${e}: ${r.duration_ms} ms`);
+  }
+  assert.strictEqual(run('def conv(s):\n    return s * 10 ** 9\n', 'def conv(s):\n    return s * 10 ** 6\n').verdict, 'divergent');
+  const pre = 'NS_PER_S = 1000000000\n';
+  assert.strictEqual(run('def conv(s):\n    return s * NS_PER_S\n', 'def conv(s):\n    return s * NS_PER_S + 1\n', { pre }).verdict, 'divergent');
+});
+
+test('only a module name bound once, to a numeric constant expression, counts as a number (AUDIT-17 H1)', () => {
+  const src = ['A = 10 ** 9', 'B: int = A * 2', 'C = 5', 'C += 1', 'D = 3', 'def f():', '    global D', '    D = "x"',
+    'E = "s"', 'F = 4', 'def g(F):', '    return F', 'G = 7', 'for G in (): pass', 'H = len("ab")', 'I = 2', 'import I'].join('\n');
+  const patch = `import ast\nprint(json.dumps(sorted(H.module_nums(ast.parse(${JSON.stringify(src)})))))\nsys.exit(0)`;
+  assert.deepStrictEqual(harness({}, patch), ['A', 'B', 'H']);
+});
