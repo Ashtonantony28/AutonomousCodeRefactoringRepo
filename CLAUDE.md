@@ -163,7 +163,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
   module body — `Module._compile` / `in <module>`, or logged by the load
   hooks every run installs: a preloaded `Module._compile` wrapper, a pytest
   plugin wrapping `__import__` (not `ImportError`); test files and
-  `conftest.py` excluded — or a pytest collection error, whatever the exit
+  `conftest.py` excluded, and a throw caught on purpose is none: logged in a
+  node:test file process that exits 0, or in a pytest test or collected
+  module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
@@ -180,8 +182,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
   with reason `edit_not_exercised` / `no_coverage_tool` (no test ran the
   edit, whether the suite passed or failed), `coverage_timeout` (coverage
   post-processing overran the test budget), `tests_insensitive` (a site
-  survived, a hunk has no site, or a deleted token is neither observed nor
-  replaced) or `mutation_budget` (the mutant runs did not fit their budget,
+  survived, its failing runs being load failures, `collection_errors`, or
+  failing its sham, `sham_failed`; a hunk has no site; an inserted token no
+  mutant covers, `uncovered_token`; a read with no use-site mutant,
+  `unmutated_ref`; or a deleted token is neither observed nor replaced) or `mutation_budget` (the mutant runs did not fit their budget,
   the edit is over 16 change hunks / 32,000 changed characters, or the
   mutants' parse check did not finish). These five reasons are untested
   outcomes: no sample, calibration point, reward or Reflexion repair.

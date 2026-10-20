@@ -634,6 +634,49 @@ test('runTests: pytest: an import inside a test that reports pytest.fail(pytrace
   assert.strictEqual(red.collection_error, undefined, red.stdout);
 });
 
+// ---------- SG33: a load failure a test catches on purpose ----------
+
+test('runTests: a module body throw that a passing test expects (in a test or at a test file\'s top) is no collection error; a failing assertion elsewhere is a real failure (AUDIT-24 H1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg33-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test'));
+  const nodeTest = (body) => `'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n${body}\n`;
+  fs.writeFileSync(path.join(dir, 'src/config.js'), "'use strict';\nif (!process.env.SG33_KEY) throw new Error('SG33_KEY required');\nmodule.exports = {};\n");
+  fs.writeFileSync(path.join(dir, 'src/a.js'), "'use strict';\nmodule.exports = { f: (s) => s.slice(1) };\n");
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("test('f', () => assert.strictEqual(require('../src/a').f('abc'), 'abc'));"));
+  for (const body of ["test('config', () => assert.throws(() => require('../src/config'), /SG33_KEY/));", "assert.throws(() => require('../src/config'));\ntest('config', () => {});"]) {
+    fs.writeFileSync(path.join(dir, 'test/config.test.js'), nodeTest(body));
+    const red = await runTests({ repoRoot: dir });
+    assert.strictEqual(red.status, 'failed');
+    assert.strictEqual(red.collection_error, undefined, body);
+    assert.deepStrictEqual(red.tests, { f: 'fail', config: 'pass' });
+  }
+});
+
+test('runTests: pytest: pytest.raises around an import (in a test or at a test module\'s top) is no collection error; a failing assertion elsewhere is a real failure (AUDIT-24 H1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg33py-');
+  fs.mkdirSync(path.join(dir, 'app'));
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/config.py'), "import os\n\nif not os.environ.get('SG33_KEY'):\n    raise RuntimeError('SG33_KEY required')\n");
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'def f(s):\n    return s[1:]\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_m.py'), 'from app.m import f\n\n\ndef test_f():\n    assert f("abc") == "abc"\n');
+  const inTest = 'import pytest\n\n\ndef test_config():\n    with pytest.raises(RuntimeError):\n        import app.config  # noqa: F401\n';
+  const atTop = 'import pytest\n\nwith pytest.raises(RuntimeError):\n    import app.config  # noqa: F401\n\n\ndef test_config():\n    pass\n';
+  for (const body of [inTest, atTop]) {
+    fs.writeFileSync(path.join(dir, 'tests/test_config.py'), body);
+    const red = await runTests({ repoRoot: dir });
+    assert.strictEqual(red.status, 'failed');
+    assert.strictEqual(red.collection_error, undefined, red.stdout);
+    assert.deepStrictEqual(red.tests, { 'tests.test_config::test_config': 'pass', 'tests.test_m::test_f': 'fail' });
+  }
+});
+
 test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered #2, #3 … (AUDIT-22 C1)', () => {
   const { tapResults, junitResults } = require('../src/runner/test-runner');
   const n = 20_000;

@@ -41,7 +41,8 @@ function failedTests(r, control) {
 // kill. A failure counts only when it reproduces: the same mutant fails
 // again and the unmutated suite then passes (an unmutated failure means the
 // suite is flaky and nothing counts). For a mutant that adds text, that
-// third run is its sham (the edit with as many spaces added at the site):
+// third run is its sham (the edit with the site wrapped in redundant
+// parentheses and as many spaces added after it, editMutants):
 // a test that fails on the sham reads the source, not the value, and is no
 // kill (`sham_failed` when none is left). An inserted token no mutant covers
 // (`uncovered_token`, editMutants) is no evidence.
@@ -70,7 +71,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   if (mutants.capped) { out.budget_exhausted = true; out.edit_too_large = true; return done(); }
   if (mutants.unchecked) { out.budget_exhausted = true; out.parse_check_failed = true; return done(); }
   if (mutants.unmutated_ref) { out.unmutated_ref = mutants.unmutated_ref.name; out.unmutated_hunk_line = mutants.unmutated_ref.line; return done(); }
-  if (mutants.uncovered) { out.uncovered_token = mutants.uncovered.text; out.unmutated_hunk_line = mutants.uncovered.line; return done(); }
+  if (mutants.uncovered) { out.uncovered_token = mutants.uncovered.text; out.uncovered_token_line = mutants.uncovered.line; return done(); }
   const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));
   if (!hunks.length || bare >= 0) {
     if (bare >= 0) out.unmutated_hunk_line = hunks[bare].line;

@@ -87,8 +87,8 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG30 | Fail closed per inserted token, sham-mutant control | SG29 | thread worker | done |
 | SG31 | Literal-aware lines, operator and keyword sites, non-whitespace sham | SG30 | thread worker | done |
 | SG32 | Linear per-test parsing, charge parse time to the mutant budget | SG31 | thread worker (with SG31) | done |
-| SG33 | Caught load failures are not collection errors | SG32 | thread worker | in progress |
-| SG34 | Same-text mutant switch, structural changes, continued strings | SG33 | thread worker | in progress |
+| SG33 | Caught load failures are not collection errors | SG32 | thread worker | done |
+| SG34 | Same-text mutant switch, structural changes, continued strings | SG33 | thread worker | done |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -424,3 +424,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-21 | SG32 | green | TAP / JUnit duplicate ids numbered with a per-id counter (`adder`), kill intersection set-based, each mutant run charged its whole `runTests` wall time (parsing included). dup-budget 20000 ok (mutant phase 53.6 s, stall 498 ms); report-parse 5000/20000 + e2e 5000 ok (uncharged overhead 37 ms). Per-test kill unchanged (EX-pertest, EX-repro, TR-dup, TR-judup re-anchored and killed); EX-wall, TR-dupnext killed. 2 new tests fail on the old code. |
 | 2026-10-21 | audits r9 | AUDIT-24 | prior contract C/H fixed (A18-H1 ok); 0C/1H/8M(carried)/3L: load hooks count caught module-body throws as collection errors, so no kill is possible on such targets → SG33. |
 | 2026-10-21 | audits r9 | AUDIT-23 | prior repros held (audit/13 down to 6); fresh corpus 41, 26 committed, 1C/3H/6M/1L: backslash-continued strings, structural tokens uncovered, word-count source tests beat the sham, wrapper use site covers `typeof` → SG34 (same-text mutant switch). |
+| 2026-10-21 | SG33 | green | Load hooks log each module-body throw under a key (`T`) and mark keys that passed (`P`); `loadFailed` ignores a throw under a passed key. JS key: the process, passed when a node:test file process exits 0; pytest key: the test (logstart..logfinish, every phase passed) or the collected module (collectreport passed); a throw outside both never passes. caught-load-failure a–d ok; load-detect, audit/16 collection-error ok; audit/20 1 (D09), audit/21 2 (T02 T07, same as a5df527). L1/L2 docs fixed (sham comments, `editMutants` shape with `span`, `mutation.uncovered_token_line`), CLAUDE.md `tests_insensitive` causes and caught-throw rule; L3 contracts part open (no `src/contracts.js` change). Mutants TR-caught, TR-jspass, TR-pypass killed; `--check` 166/166. npm test 488/488 ×2; bench ok; coverage validation 94.21 / runner 93.74 / rl 98.89 / orchestrator 94.25. 2 new tests fail on the old code. |
