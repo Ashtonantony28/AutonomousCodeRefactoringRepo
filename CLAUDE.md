@@ -42,7 +42,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   (`<state>/targets/<sha256(repo)>/session.json`). A legacy global
   `<state>/session.json` is moved there on first read, only for its own target.
 - On `SIGINT`/`SIGTERM` the in-flight edit is reverted (its test process
-  group killed), state is flushed and the process exits 0. The pre-edit
+  group killed, its coverage and bytecode temp dirs removed), state is
+  flushed and the process exits 0. The pre-edit
   snapshot is also persisted (`<state>/targets/<sha256(repo)>/inflight.json`)
   so after a crash the next start restores it before doing anything else
   (a snapshot whose worktree no longer exists, or whose edit is already the
@@ -116,7 +117,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
   path and env minus coverage (pytest always runs as `<pytest's python> -m
   pytest`, so the repo root is on `sys.path`). Kills are per test: each run
   reports per-test results (node:test TAP to a temp file through
-  `NODE_OPTIONS`, unless the suite picks its own `--test-reporter`; pytest
+  `NODE_OPTIONS`, unless the suite picks its own `--test-reporter`, or node
+  refuses the added reporter, e.g. a delegated script sets one, and the run
+  is repeated without it; pytest
   `--junitxml` with `--tb=short`), and a mutant is killed only when a test
   that passed in the unmutated control run fails in both mutant runs, each
   of which ran the same set of tests as the control. A run where a module
@@ -318,7 +321,7 @@ same snippet in a later run adds a sample/point. Entries stored without
 - Every Claude API call: retry once on rate limit (10 s backoff), then fail
   gracefully — never let one bad proposal crash the pipeline.
 - File ops: wrap in try/catch, log, continue.
-- `SIGINT`/`SIGTERM`: revert the in-flight edit, flush state, exit 0.
+- `SIGINT`/`SIGTERM`: revert the in-flight edit, remove its temp dirs, flush state, exit 0.
 
 ---
 
