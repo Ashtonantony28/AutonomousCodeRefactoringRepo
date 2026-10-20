@@ -162,7 +162,7 @@ test('benign Python refactors are equivalent (AUDIT-8 NP*)', () => {
 // ---------- SG22 ----------
 
 test('a deletion is observed only if the deleted expression ran: if-expression branch, and/or operand (AUDIT-12 C1)', () => {
-  const ifexp = run('def note(s):\n    s = s[:3000] if len(s) > 3000 else s\n    return s.strip()\n', 'def note(s):\n    return s.strip()\n');
+  const ifexp = run('def note(s):\n    s = s[:30000] if len(s) > 30000 else s\n    return s.strip()\n', 'def note(s):\n    return s.strip()\n');
   assert.strictEqual(ifexp.verdict, 'equivalent', ifexp.reason);
   assert.strictEqual(ifexp.deletions_observed, false, 'the assignment ran, the slice branch never did');
   const operand = run('def norm(n):\n    n = isinstance(n, complex) and abs(n) or n\n    return n\n', 'def norm(n):\n    return n\n');
@@ -305,9 +305,9 @@ test('input preparation that overruns the hard kill says so; Python never gets a
 // ---------- SG25 ----------
 
 test('a deleted chained-comparison tail is observed only if it ran, like a JS && operand (AUDIT-13 C1, U01)', () => {
-  const never = run('def needs_bigint(n):\n    return 2 ** 53 < n <= 2 ** 64\n', 'def needs_bigint(n):\n    return 2 ** 53 < n\n');
+  const never = run('def needs_bigint(n):\n    return 2 ** 70 < n <= 2 ** 80\n', 'def needs_bigint(n):\n    return 2 ** 70 < n\n');
   assert.strictEqual(never.verdict, 'equivalent', never.reason);
-  assert.strictEqual(never.deletions_observed, false, 'n <= 2 ** 64 never ran: 2 ** 53 < n was always false');
+  assert.strictEqual(never.deletions_observed, false, 'n <= 2 ** 80 never ran: 2 ** 70 < n was always false');
   const ran = run('def f(n):\n    return 0 <= n <= 10 ** 30\n', 'def f(n):\n    return 0 <= n\n');
   assert.strictEqual(ran.verdict, 'equivalent', ran.reason);
   assert.strictEqual(ran.deletions_observed, true);
@@ -342,4 +342,19 @@ test('only a module name bound once, to a numeric constant expression, counts as
     'E = "s"', 'F = 4', 'def g(F):', '    return F', 'G = 7', 'for G in (): pass', 'H = len("ab")', 'I = 2', 'import I'].join('\n');
   const patch = `import ast\nprint(json.dumps(sorted(H.module_nums(ast.parse(${JSON.stringify(src)})))))\nsys.exit(0)`;
   assert.deepStrictEqual(harness({}, patch), ['A', 'B', 'H']);
+});
+
+test('integer-width, tab, long-string and long-list boundaries are always tried (AUDIT-21 H1)', () => {
+  for (const [cur, prop] of [
+    ['def half(a):\n    return int(a / 2)\n', 'def half(a):\n    return a // 2\n'],
+    ['def avg(a, b):\n    return int((a + b) / 2)\n', 'def avg(a, b):\n    return (a + b) // 2\n'],
+    ['import math\n\n\ndef pages(a, b):\n    return math.ceil(a / b)\n', 'import math\n\n\ndef pages(a, b):\n    return -(-a // b)\n'],
+    ['import math\n\n\ndef sq(n):\n    return int(math.pow(n, 2))\n', 'import math\n\n\ndef sq(n):\n    return n ** 2\n'],
+    ['def head(s):\n    return str(s)[:0x1000]\n', 'def head(s):\n    return str(s)[-0x1000:]\n'],
+    ['def quote(s):\n    return str(s).expandtabs(4)\n', 'def quote(s):\n    return str(s).expandtabs(-4)\n'],
+    ['def first(xs):\n    return list(xs)[:100][0]\n', 'def first(xs):\n    return list(xs)[-100:][0]\n']
+  ]) {
+    const r = run(cur, prop);
+    assert.strictEqual(r.verdict, 'divergent', `${prop}: ${r.reason}`);
+  }
 });

@@ -240,7 +240,8 @@ test('editMutants (JS) parses each mutant on its own statement: no whole-file pa
   assert(muts.length >= 16, `${muts.length} mutants`);
   assert(chars < 2 * after.length + 20000, `parsed ${chars} chars for a ${after.length}-char file and ${muts.length} mutants`);
   // Checked in its statement, `return function () {}` without `return` is still no valid mutant.
-  const fnMuts = bugInjector.editMutants('function mk(a) {\n  return function () { return a; };\n}\n', { file: 'src/mk.js', before: 'function mk(a) {\n  a;\n}\n' });
+  const mk = 'function mk(a) {\n  return function () { return a; };\n}\n';
+  const fnMuts = bugInjector.editMutants(mk, { file: 'src/mk.js', start: mk.indexOf('return'), end: mk.indexOf('};') });
   assert(fnMuts.some(m => m.src.includes('function () { a; }')), 'the inner return is dropped');
   assert(!fnMuts.some(m => m.src.includes('\n  function () {')), JSON.stringify(fnMuts.map(m => m.src)));
 });
@@ -339,13 +340,17 @@ test('editMutants: a called name is skipped at its own call; a namespace call pa
   assert.match(js('', '  return String(s).trim() + Date.now();')[0], /^return String\(s\)\.trim\(\) \+ \(\(v\) => .*\)\(Date\.now\(\)\);$/, 'no argument: the call value is perturbed');
 });
 
-test('editMutants: a mutant that adds text carries a sham of the same size: spaces after the site (SG30)', () => {
+test('editMutants: a mutant that adds text carries a sham: its site wrapped in as many non-space characters, plus as many spaces (SG30, AUDIT-21 H2)', () => {
   const { ms, after } = sg30('js', '  return String(s).slice(1);', '  return String(s).slice(1, n);');
   const u = ms.find(m => m.ref === 'n');
-  assert.strictEqual(u.sham.length, u.src.length);
-  assert.strictEqual(u.sham, after.replace('slice(1, n)', `slice(1, n${' '.repeat(u.src.length - after.length)})`), 'only spaces, after the site');
+  const grow = u.src.length - after.length;
+  const solid = (x) => x.replace(/\s+/g, '').length;
+  assert.match(u.sham, new RegExp(`slice\\(1, \\(10+,n\\) {${grow}}\\);`), 'past 16 characters a number pads a comma expression');
+  assert(solid(u.sham) - solid(after) >= solid(u.src) - solid(after), 'at least as many non-space characters as the mutant adds');
   const str = sg30('js', "  return 'a' + t;", "  return 'b' + t;").ms[0];
-  assert(str.src.includes("'bx' + t") && str.sham.includes("'b'  + t"), 'a string site pads after the literal');
+  assert(str.src.includes("'bx' + t") && str.sham.includes("('b')  + t"), 'a string site: parentheses around the literal, a space after it');
+  const py = sg30('py', '    return str(s)[1:]', '    return str(s)[1:n]').ms.find(m => m.ref === 'n');
+  assert.match(py.sham, /\[1:\(10+,n\)\[1\] +\]/, 'Python: a tuple subscript');
   assert(!sg30('js', '  return t + 1;', '  return t + 2;').ms[0].sham, 'no sham for a same-size mutant');
 });
 
@@ -388,4 +393,56 @@ test('editMutants (Python): a use check that does not finish gives no mutants, m
   const ms = fresh.editMutants('MAX = 9\n\n\ndef f(s):\n    return s[0:MAX]\n', { file: 'f.py', before: 'MAX = 9\n\n\ndef f(s):\n    return s\n' });
   assert.strictEqual(ms.length, 0);
   assert.strictEqual(ms.unchecked, true);
+});
+
+// ---------- SG31: literal context, operator and keyword sites ----------
+
+test('changeHunks: a line inside or closing a multi-line literal gets the literal\'s tokens, not one quote-to-quote token (AUDIT-21 C1)', () => {
+  const { changeHunks } = require('../src/utils/hunks');
+  const ins = (b, a, file) => changeHunks(b, a, file).flatMap(h => h.ranges).map(([s, e]) => a.slice(s, e));
+  const tpl = (x) => `function card(u) {\n  return \`\n<a href="\${String(u)${x}}">It's</a>\n\`.trim()${x} + "!";\n}\n`;
+  assert.deepStrictEqual(ins(tpl(''), tpl('.slice(0, 0x800)'), 'a.js'), ['.', 'slice', '(', '0', ',', '0x800', ')', '.', 'slice', '(', '0', ',', '0x800', ')']);
+  const py = (n) => `def note(s):\n    return """\nnote:\n""".strip() + " " + str(s).expandtabs(${n})\n`;
+  assert.deepStrictEqual(ins(py('4'), py('-4'), 'a.py'), ['-']);
+  assert.deepStrictEqual(ins('f(String(s).trim());\n', "f(String(s).normalize('NFKC').trim());\n", 'a.js'), ['.', 'normalize', '(', "'NFKC'", ')'], 'an insertion slides left');
+});
+
+test('lexView always advances: a Python string right after a word (`return"x"`) is a string (AUDIT-21 M2)', () => {
+  const code = "const { lexView } = require('./src/utils/hunks'); const v = lexView('def k(s):\\n    return\"text\" if s else\"empty\"\\n', 'python');" +
+    'process.stdout.write(JSON.stringify(v.lits.map(l => l.kind)));';
+  const r = require('child_process').spawnSync(process.execPath, ['-e', code], { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 5000 });
+  assert.strictEqual(r.stdout, '["string","string"]', r.error ? 'lexView did not return' : r.stderr);
+});
+
+test('editMutants: every inserted operator and keyword is a site of its own; one with no mutant is uncovered (AUDIT-21 H1)', () => {
+  const at = (r, a, text) => r.after.indexOf(text, r.after.indexOf(a.trim()) + 6);
+  for (const [lang, b, a, text, mutation, mutated] of [
+    ['js', "  return 'h' + t.slice(0, 9);", "  return 'h' + t.slice(-9);", '-', 'swap_arith', 'slice(+9)'],
+    ['js', '  return Math.trunc(n);', '  return n | 0;', '|', 'swap_arith', 'n & 0'],
+    ['js', '  return Math.floor(n / 2);', '  return n >> 1;', '>>', 'swap_arith', 'n << 1'],
+    ['js', '  return n * 2;', '  return n ** 2;', '**', 'swap_arith', 'n * 2'],
+    ['js', '  return n || 1;', '  return n ?? 1;', '??', 'swap_logical', 'n || 1'],
+    ['js', "  return s === '';", "  return !(s === '');", '!', 'drop_unary', "return (s === '')"],
+    ['js', '  return typeof t[n] === "number";', '  return n in t;', 'in', 'negate_in', 'return !(n in t)'],
+    ['js', '  return JSON.stringify(xs);', '  return JSON.stringify(xs, null);', 'null', 'null_value', 'JSON.stringify(xs, 0)'],
+    ['js', '  return s || 2;', '  return s ? s : 2;', '?', 'negate_ternary', 'return !(s) ? s : 2'],
+    ['js', '  return t + 1;', '  return t++;', '++', 'swap_arith', 't--;'],
+    ['py', '    return int(n / 2)', '    return n // 2', '//', 'swap_arith', 'n / 2'],
+    ['py', '    return k in s', '    return k not in s', 'not', 'negate_in', 'k in s'],
+    ['py', '    return n == k', '    return n is k', 'is', 'negate_in', 'n is not k'],
+    ['py', '    return n', '    return not n', 'not', 'drop_not', 'return n'],
+    ['py', "    return s.split(' ')", '    return s.split(None)', 'None', 'null_value', 's.split(0)']
+  ]) {
+    const r = sg30(lang, b, a);
+    assert(!r.ms.uncovered, `${a}: ${JSON.stringify(r.ms.uncovered)}`);
+    const site = at(r, a, text);
+    const m = r.ms.find(x => x.site === site && x.mutation === mutation);
+    assert(m, `${a}: no ${mutation} at ${text}: ${r.sites}`);
+    if (mutated) assert(m.src.includes(mutated), `${a}: ${m.src}`);
+  }
+  assert.strictEqual(sg30('js', '  return t;', '  return typeof t;').ms.uncovered.text, 'typeof');
+  assert.strictEqual(sg30('py', '    return t', '    return t if s else n').ms.uncovered.text, 'if');
+  assert.strictEqual(sg30('py', '    return s * t', '    return s @ t').ms.uncovered.text, '@', 'an operator with no mutant is no punctuation');
+  assert.strictEqual(sg30('js', '  t += s;\n  return t;', '  t = s + 1;\n  return t;').ms.uncovered.text, '=', 'an `=` stands only on the token right after it');
+  assert(!sg30('js', '  return String(s).slice(0, 9);', '  const max = 9;\n  return String(s).slice(0, max);').ms.uncovered, 'a declaration stands on its covered name and value');
 });

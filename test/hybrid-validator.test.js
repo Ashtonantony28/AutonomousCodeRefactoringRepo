@@ -338,10 +338,10 @@ test('criticGate derives majority and unanimity from panel[]', () => {
 
 // ---------- SG14: commit bar ----------
 
-// The diff test never generates strings past 1000 characters, so it sees
+// The diff test never generates strings past 5000 characters, so it sees
 // this behaviour change as `equivalent`; only the jury can stop it.
 const CUT_CUR = 'function body(s) {\n  return String(s);\n}';
-const CUT_PROP = 'function body(s) {\n  return String(s).slice(0, 1000);\n}';
+const CUT_PROP = 'function body(s) {\n  return String(s).slice(0, 10000);\n}';
 
 function cutRepo(ctx) {
   fs.writeFileSync(path.join(ctx.repo, 'body.js'), `'use strict';\n${CUT_CUR}\nmodule.exports = { body };\n`);
@@ -362,10 +362,10 @@ test('an approving persona listing a behaviour-changing edge case blocks the edi
   const ctx = setup(t);
   cutRepo(ctx);
   const p = await viaPipeline(ctx, makeProposal('body.js', CUT_CUR, CUT_PROP),
-    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ['inputs over 1000 characters are truncated'] } : APPROVE_RAW));
+    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ['inputs over 10000 characters are truncated'] } : APPROVE_RAW));
   assert.strictEqual(p.diff_test.verdict, 'equivalent');
   assert.strictEqual(p.test_outcome.status, 'critic_rejected');
-  assert.match(p.test_outcome.reason, /edge cases: security: inputs over 1000 characters are truncated/);
+  assert.match(p.test_outcome.reason, /edge cases: security: inputs over 10000 characters are truncated/);
 });
 
 test('criticGate: a persona below the p_preserves floor blocks a unanimous approve', () => {

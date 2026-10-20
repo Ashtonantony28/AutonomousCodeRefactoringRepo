@@ -921,3 +921,18 @@ test('crashes inside the oracle are inconclusive: preparation, sandbox, worker s
   assert.strictEqual(m.message.result.verdict, 'inconclusive');
   assert.match(m.message.result.reason, /^sandbox error: /);
 });
+
+test('integer-width, prototype-key, tab and long-string boundaries are always tried (AUDIT-21 H1)', () => {
+  const fn = (body) => `function f(n) {\n  return ${body};\n}\nmodule.exports = { f };`;
+  for (const [cur, prop] of [
+    ['Math.trunc(Number(n) || 0)', '(Number(n) || 0) | 0'],
+    ['Math.floor(Math.abs(Number(n) || 0) / 2)', 'Math.abs(Number(n) || 0) >> 1'],
+    ['Math.trunc(Math.abs(Number(n) || 0))', 'Math.abs(Number(n) || 0) >>> 0'],
+    ["typeof ({ a: 1 })[n] === 'number'", 'n in { a: 1 }'],
+    ['String(n).slice(0, 0x1000)', 'String(n).slice(-0x1000)'],
+    ["String(n).replace(/\\t/g, ' ')", "String(n).replace(/\\t+/g, ' ')"]
+  ]) {
+    const r = run({ currentSrc: fn(cur), proposedSrc: fn(prop) });
+    assert.strictEqual(r.verdict, 'divergent', `${prop}: ${r.reason}`);
+  }
+});

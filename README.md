@@ -239,8 +239,10 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
 
 - **Diff-test blind spots.** The differential test only sees inputs its
   generator builds and effects its oracle records. Behaviour confined to
-  inputs it never builds (tabs, zero-width or compatibility characters,
-  lists past a length cap, deeper nesting, `NaN` in arrays) or effects it
+  inputs it never builds (zero-width or compatibility characters,
+  lists or strings past the lengths it tries, deeper nesting, `NaN` in
+  arrays; integer-width boundaries, prototype keys, a tab, a 5,000-character
+  string and a 150-element Python list are always tried) or effects it
   cannot observe (a dropped `await` on a stub that never rejects, module
   state across chained calls such as a missing `global`) reads as
   `equivalent` (AUDIT-12 H1/H2, AUDIT-13 H2/H3). For those edits the only
@@ -262,17 +264,24 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   never differ, so an edit that inserts a read of one ends
   `tests_insensitive`; a perturbation that throws (a skip that leaves the
   wrong type) is killed by any test that runs it.
-- **Fail closed per token.** Every inserted name, number, string,
-  template / f-string part and regex atom or flag needs a kill that covers
-  it. Shapes with no mutant are rejected, not carried: a renamed or moved
+- **Fail closed per token.** Every inserted token but punctuation and
+  whitespace needs a kill that covers it, operators and keywords included.
+  Shapes with no mutant are rejected, not carried: a renamed or moved
   object key or keyword argument with no inserted read of the same name, a
-  regex class bracket, names in type annotations. A string, or a template /
+  regex class bracket, names in type annotations, `typeof`, `=>`, `@`,
+  `*args`, a Python ternary or comprehension, a new function definition.
+  An operator mutant is a strong change (`>>` → `<<`, `-` → `+`): a test
+  on small inputs kills it, so a range change (`x | 0` for `Math.trunc`)
+  stands on the executor bar only if the diff test misses it. A string, or a template /
   f-string text part, is one site (`x` added): a change inside it (`r'\t'` →
   `r'\t+'`) stands on any test that checks the string's output.
 - **Sham control covers size only.** The sham of a mutant that adds text
-  adds as many spaces: it stops tests that read source length or layout.
-  A test that greps the source for a name, or a mutant that removes text,
-  has no sham.
+  adds as many spaces and wraps the site in at least as many non-space
+  characters (parentheses, or a number in a comma expression): it stops
+  tests that read source length, length without whitespace, or layout. A
+  test that greps the source for a name or a character (`=>`, `lambda`), or
+  a mutant that removes text, has no sham. A site whose wrapped sham does
+  not parse (a numeric object key) has no mutant and is rejected.
 - **Slow suites.** Every mutant kill takes three suite runs (mutant, mutant
   again, unmutated control) inside one 60 s mutant budget, so suites slower
   than about a third of that budget end `reverted` with `mutation_budget`.

@@ -578,6 +578,10 @@ const NUMERIC_OPS = new Set([...ARITH_OPS, '<', '>', '<=', '>=']);
 const SKIP_KEYS = new Set(['__proto__', 'constructor', 'prototype', 'call', 'apply', 'bind', 'then', 'toString', 'valueOf', 'hasOwnProperty']);
 const EDGE_VALUES = [null, undefined, 0, '', [], {}, 1, -1, 'a', [1, 2, 3], true, -0];
 const GENERIC_STRINGS = ['', ' a', 'a ', ' A b ', '0x10', 'a.b', 'A', '\u{1F600}', 'a\u{1F600}b'];
+// Always tried: integer-width boundaries (32-bit signed / unsigned overflow,
+// past 2 ** 53), prototype keys, a tab, a string past common length caps.
+const BOUNDARY_NUMS = [2 ** 30 + 1, 2 ** 31, -(2 ** 31) - 1, 2 ** 32 + 1, 2 ** 53 + 2];
+const BOUNDARY_STRS = ['a\tb', 'constructor', 'toString', 'b'.padEnd(5000, 'a')];
 
 function toLiteral(v) {
   if (v === undefined) return 'undefined';
@@ -891,7 +895,8 @@ function generator(h, rand, pools) {
   const numbers = [0, 1, -1, 2, 10, 0.5, 0.1, 0.126, -1.5, 2.675, 1e6];
   const forced = () => (force.s !== undefined ? force.s : force.n);
   const str = () => {
-    if (force) return force.s !== undefined ? force.s : force.as === 'str' ? 'a'.repeat(force.n) : String(force.n);
+    // A forced length: n characters whose head differs from its tail.
+    if (force) return force.s !== undefined ? force.s : force.as === 'str' ? (force.n ? 'b'.padEnd(force.n, 'a') : '') : String(force.n);
     return pools.strs.length && rand() < 0.5 ? pick(pools.strs) : pick(strings);
   };
   const num = () => {
@@ -1057,6 +1062,8 @@ function buildInputs(pair, runs, seed, arityOpt) {
       if (stringish && Number.isInteger(n) && n >= 0 && n <= 5000) forces.push({ n, as: 'str' });
     }
     for (const s of pools.strs) forces.push({ s });
+    for (const n of BOUNDARY_NUMS) forces.push({ n, as: 'num' });
+    for (const s of BOUNDARY_STRS) forces.push({ s });
     for (const f of forces) {
       gen.setForce(f);
       add(argsFor(k), self());

@@ -48,6 +48,10 @@ import types
 SEED = 42
 MAX_TARGETS = 8
 MAX_INPUTS = 40
+# Always tried: integer-width boundaries (32-bit overflow, past 2 ** 53, float
+# products past 2 ** 26), a tab, a string and a list past common length caps.
+BOUNDARY = [2 ** 30 + 1, 2 ** 31, 2 ** 32 + 1, 2 ** 53 + 1, 2 ** 53 + 3, 'a\tb', 'b' + 'a' * 4999, list(range(150))]
+BOUNDARY_INPUTS = 24
 MIN_VALUE_RUNS = 10
 MAX_RUNS = 100
 MAX_DEPTH = 24
@@ -659,7 +663,7 @@ def build_inputs(fn, skip_first, hints, P, rng):
     typical = {n: OMIT if pools[n][0] is OMIT else next((v for v in pools[n] if v is not None), None) for n in names}
     out, seen = [], set()
 
-    def add(vals):
+    def add(vals, cap=MAX_INPUTS):
         args = []
         for n in pos:
             v = vals[n]
@@ -668,7 +672,7 @@ def build_inputs(fn, skip_first, hints, P, rng):
             args.append(v)
         kw = {n: vals[n] for n, _ in kwonly if vals[n] is not OMIT}
         key = repr((args, sorted(kw.items())))
-        if key not in seen and len(out) < MAX_INPUTS:
+        if key not in seen and len(out) < cap:
             seen.add(key)
             out.append((tuple(args), kw))
 
@@ -683,6 +687,16 @@ def build_inputs(fn, skip_first, hints, P, rng):
     if vararg and out:
         a, kw = out[0]
         out[-1] = (a + (1, 'a'), kw)
+    # Then each boundary value in one argument whose pool has its type, the
+    # others 1, then 0, where they can be (at most BOUNDARY_INPUTS more inputs).
+    def fill(k):
+        return {n: k if any(type(v) is int and v == k for v in pools[n]) else typical[n] for n in names}
+    cap = len(out) + BOUNDARY_INPUTS
+    for others in (fill(1), fill(0)):
+        for n in names:
+            for v in BOUNDARY:
+                if any(type(x) is type(v) for x in pools[n]):
+                    add({**others, n: v}, cap)
     return out
 
 

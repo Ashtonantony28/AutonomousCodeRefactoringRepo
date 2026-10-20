@@ -921,7 +921,11 @@ function scriptedExecutor(runs) {
   delete require.cache[execPath];
   const seq = [{ status: 'passed', tests: { a: 'pass', b: 'pass' }, coverage: { available: true, exercised: true } }, ...runs];
   let i = 0;
-  runner.runTests = async () => ({ framework: 'npm', command: 'npm test', stdout: '', stderr: '', execution_time_ms: 5, ...seq[Math.min(i++, seq.length - 1)] });
+  runner.runTests = async () => {
+    const r = { framework: 'npm', command: 'npm test', stdout: '', stderr: '', execution_time_ms: 5, ...seq[Math.min(i++, seq.length - 1)] };
+    if (r.wall_ms) await new Promise(res => setTimeout(res, r.wall_ms));
+    return r;
+  };
   const fresh = require('../src/agents/executor');
   runner.runTests = orig;
   require.cache[execPath] = origExec;
@@ -951,6 +955,18 @@ test('a kill is a test that passed unmutated and fails in both mutant runs, with
   const res = await scriptedExecutor([fail({ a: 'fail', b: 'pass' }), fail({ a: 'fail', b: 'fail' }), pass]).runExecutor({ proposal: makeProposal('src/inc.js', cur, prop), repoRoot: repo, onKept: () => 'c1' });
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert.strictEqual(res.mutation.killed_test, 'a');
+});
+
+test('the whole runTests wall time (report parsing included) is charged to the mutant budget (AUDIT-22 C1)', async (t) => {
+  const cur = 'function inc(x) {\n  return x + 1;\n}';
+  const prop = 'function inc(x) {\n  return x + 2;\n}';
+  const slow = { status: 'failed', tests: { a: 'fail', b: 'pass' }, wall_ms: 700 };
+  const repo = nodeRepo(t, { 'src/inc.js': `'use strict';\n${cur}\nmodule.exports = { inc };\n` });
+  const res = await scriptedExecutor([slow, slow, { status: 'passed', tests: { a: 'pass', b: 'pass' } }])
+    .runExecutor({ proposal: makeProposal('src/inc.js', cur, prop), repoRoot: repo, testTimeoutMs: 1000, onKept: () => 'c1' });
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'mutation_budget');
+  assert.strictEqual(res.mutation.run, 1);
 });
 
 test('Python: a class attribute read through self. needs its own kill at the use (AUDIT-16 H1)', { skip: hasPyTooling ? false : 'pytest + coverage.py not installed' }, async (t) => {
@@ -999,4 +1015,20 @@ test('an inserted token no mutant covers is no evidence, whatever kills its sibl
   assert.strictEqual(res.mutation.uncovered_token, ']');
   assert.strictEqual(res.mutation.run, 0);
   assertReverted(res, repo, 'src/parts.js', before, kept);
+});
+
+test('a size test that ignores whitespace fails the sham too: no kill (AUDIT-21 H2)', async (t) => {
+  const cur = 'function body(s) {\n  return String(s).slice(SKIP);\n}';
+  const prop = 'function body(s) {\n  return String(s).slice(SKIP, SKIP + MAX_LEN);\n}';
+  const rest = 'const SKIP = 1;\nconst MAX_LEN = 4096;\nmodule.exports = { body };';
+  const solid = `'use strict';\n${cur}\n${rest}\n`.replace(/\s+/g, '').length + 120;
+  const size = "const fs = require('fs');\nconst path = require('path');\ntest('size: src stays within its minified budget', () => { const d = path.join(__dirname, '..', 'src'); " +
+    `let n = 0; for (const f of fs.readdirSync(d)) n += fs.readFileSync(path.join(d, f), 'utf8').replace(/\\s+/g, '').length; assert.ok(n <= ${solid}, String(n)); });`;
+  const { res, repo, before, kept } = await execOn(t, 'src/body.js', cur, prop, rest,
+    `const m = require('../src/body');\n${size}\ntest('body', () => { assert.strictEqual(m.body('xabc'), 'abc'); assert.strictEqual(m.body('x'), ''); });`, null);
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.surviving_ref, 'SKIP');
+  assert(res.mutation.sham_failed >= 1, JSON.stringify(res.mutation));
+  assertReverted(res, repo, 'src/body.js', before, kept);
 });

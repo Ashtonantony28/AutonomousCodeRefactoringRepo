@@ -159,6 +159,10 @@ function syntheticNegatives(proposal, targetRepo = null, opts = {}) {
 // "killed" by any suite that loads it, which proves nothing.
 
 const swapper = (map) => (m) => map[m];
+// An arithmetic, bitwise, shift or power operator (or its compound
+// assignment) -> another of the same arity.
+const ARITH = { '+': '-', '-': '+', '*': '/', '/': '*', '%': '*', '**': '*', '//': '/', '&': '|', '|': '&', '^': '&', '<<': '>>', '>>': '<<', '>>>': '>>', '++': '--', '--': '++' };
+const arith = (t) => (t.length > 1 && t.endsWith('=') && ARITH[t.slice(0, -1)] ? `${ARITH[t.slice(0, -1)]}=` : ARITH[t]);
 // A numeric literal of any spelling plus one (decimal; a Python float stays a float).
 function bump(n, py) {
   const t = n.replace(/_/g, '');
@@ -177,8 +181,13 @@ const EDIT_OPS = {
     { name: 'negate_equality', re: /===|!==|==|!=/g, to: swapper({ '===': '!==', '!==': '===', '==': '!=', '!=': '==' }) },
     { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
     { name: 'numeric_off_by_one', re: /(?<![\w.$])(?:0[xXoObB][\da-fA-F_]+n?|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?n?)(?![\w$])/g, to: (n) => bump(n, false) },
-    { name: 'swap_logical', re: /&&|\|\|/g, to: swapper({ '&&': '||', '||': '&&' }) },
-    { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
+    { name: 'swap_logical', re: /&&|\|\||\?\?/g, to: swapper({ '&&': '||', '||': '&&', '??': '||' }) },
+    { name: 'swap_arith', re: /\*\*=?|>>>=?|<<=?|>>=?|\+\+|--|(?<![&|])[&|](?![&|])=?|[-+*/%^]=?/g, to: arith },
+    { name: 'drop_unary', re: /!(?!=)|~/g, to: () => '' },
+    { name: 'negate_in', re: /\b(?:in|instanceof)\b/g, ast: 'binary' },
+    { name: 'negate_ternary', re: /\?(?![.?])/g, ast: 'cond' },
+    { name: 'null_value', re: /\bnull\b/g, to: () => '0' },
+    { name: 'drop_await', re: /\bawait\s+/g, to: () => '' },
     { name: 'flip_boolean', re: /\b(?:true|false)\b/g, to: swapper({ true: 'false', false: 'true' }) },
     { name: 'drop_return', re: /\breturn[ \t]+(?=[^\s;}])/g, to: () => '' },
     { name: 'string_literal', re: /(['"]) *\1/g, string: true }
@@ -189,7 +198,12 @@ const EDIT_OPS = {
     { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
     { name: 'numeric_off_by_one', re: /(?<![\w.])(?:0[xXoObB][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?[jJ]?)(?![\w])/g, to: (n) => bump(n, true) },
     { name: 'swap_logical', re: /\b(?:and|or)\b/g, to: swapper({ and: 'or', or: 'and' }) },
-    { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
+    { name: 'swap_arith', re: /\*\*=?|\/\/=?|<<=?|>>=?|-(?!>)=?|[+*/%&|^]=?/g, to: arith },
+    { name: 'drop_unary', re: /~/g, to: () => '' },
+    { name: 'negate_in', re: /\bnot\s+in\b|\bis\s+not\b|\bis\b|\bin\b/g, to: (t) => (/^not/.test(t) ? 'in' : /^is\s/.test(t) ? 'is' : t === 'is' ? 'is not' : 'not in') },
+    { name: 'drop_not', re: /(?<!\bis\s+)\bnot\s+(?!in\b)/g, to: () => '' },
+    { name: 'null_value', re: /\bNone\b/g, to: () => '0' },
+    { name: 'drop_await', re: /\bawait\s+/g, to: () => '' },
     { name: 'flip_boolean', re: /\b(?:True|False)\b/g, to: swapper({ True: 'False', False: 'True' }) },
     { name: 'drop_return', re: /\breturn[ \t]+(?=\S)/g, to: () => '' },
     { name: 'string_literal', re: /(['"]) *\1/g, string: true }
@@ -205,13 +219,17 @@ function editLang(file) {
 
 // One mutant of an operator match -> { edits: [[at, deleted, inserted]],
 // lo, hi } ([lo, hi]: the part of the original the change falls in) or null.
-function mutateAt(src, code, op, m, lang) {
+function mutateAt(src, code, op, m, lang, nodes) {
   const at = m.index;
+  if (op.ast) {
+    const n = nodes()[op.ast].get(at);
+    return n ? { edits: [[n[0], 0, '!('], [n[1], 0, ')']], lo: n[0], hi: n[1], wrap: n } : null;
+  }
   if (op.wrap) {
     const open = at + m[0].length - 1;
     const close = polyglot.matchBracket(code, open);
     if (close < 0) return null;
-    return { edits: [[open + 1, 0, op.wrap[0]], [close, 0, op.wrap[1]]], lo: open + 1, hi: close };
+    return { edits: [[open + 1, 0, op.wrap[0]], [close, 0, op.wrap[1]]], lo: open + 1, hi: close, wrap: [open + 1, close] };
   }
   if (op.pyCond) {
     const from = at + m[0].length;
@@ -224,7 +242,7 @@ function mutateAt(src, code, op, m, lang) {
       else if (depth <= 0 && (c === ':' || c === '\n')) break;
     }
     if (code[j] !== ':' || j === from) return null;
-    return { edits: [[from, j - from, 'not (' + src.slice(from, j).trimEnd() + ')']], lo: from, hi: j };
+    return { edits: [[from, j - from, 'not (' + src.slice(from, j).trimEnd() + ')']], lo: from, hi: j, wrap: [from, from + src.slice(from, j).trimEnd().length] };
   }
   if (op.string) {
     if (IMPORT_BEFORE.test(code.slice(Math.max(0, at - 24), at))) return null;
@@ -372,6 +390,7 @@ const KEYWORDS = {
     'import in is lambda nonlocal not or pass raise return try while with yield match case').split(' '))
 };
 const IDENT = /^[A-Za-z_$][\w$]*$/;
+const VALUES = /^(?:None|True|False|null|true|false)$/;
 
 // ---------- Use sites of inserted references ----------
 // An inserted identifier or member the edit reads is perturbed where the
@@ -461,7 +480,26 @@ function jsUses(src, file, toks) {
     } else if (p.type === 'ObjectProperty' && p.shorthand) rep = `${n.name}: ${JS_PERTURB(n.name)}`;
     else if (p.type === 'TaggedTemplateExpression' && k === 'tag') { u = p; rep = JS_PERTURB(text(u)); } else rep = JS_PERTURB(text(u));
     if (up.get(u)[0].type === 'ExpressionStatement') rep = 'void 0';
-    out.set(n.start, { use: [u.start, u.end], text: rep });
+    out.set(n.start, { use: [u.start, u.end], text: rep, ...(p.type === 'ObjectProperty' && p.shorthand ? { short: `${n.name}: ` } : {}) });
+  }
+  return out;
+}
+
+// JS operators a textual swap cannot negate -> { binary: Map(offset of an
+// `in` / `instanceof` -> [s, e) of its expression), cond: Map(offset of a
+// ternary `?` -> [s, e) of its test) }; empty when the file does not parse.
+function jsNodes(src, file, code) {
+  const out = { binary: new Map(), cond: new Map() };
+  const { ast } = require('../validation/ast-checker').parseJs(src, file);
+  const stack = ast ? [ast.program] : [];
+  while (stack.length) {
+    const n = stack.pop();
+    if (n.type === 'BinaryExpression' && (n.operator === 'in' || n.operator === 'instanceof')) out.binary.set(code.indexOf(n.operator, n.left.end), [n.start, n.end]);
+    if (n.type === 'ConditionalExpression') out.cond.set(code.indexOf('?', n.test.end), [n.test.start, n.test.end]);
+    for (const k of Object.keys(n)) {
+      if (AST_SKIP.has(k)) continue;
+      for (const c of [].concat(n[k])) if (c && typeof c.type === 'string') stack.push(c);
+    }
   }
   return out;
 }
@@ -699,7 +737,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
         if (r >= h.ranges.length) break;
         if (!(a < h.ranges[r][1] && b > h.ranges[r][0])) continue;
         if (op.to && op.to(m[0]) === m[0]) continue;
-        if (op.string && fQuotes.has(a)) continue;
+        if ((op.string && fQuotes.has(a)) || (litToks.get(a) || {}).kind === 'delim') continue;
         const site = h.ranges[r][0];
         if (!sites.has(site)) sites.set(site, EDIT_OPS[lang].map(() => []));
         const l = sites.get(site)[oi];
@@ -711,7 +749,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const [a] of h.ranges) {
       const t = litToks.get(a);
       const mut = t && t.kind !== 'delim' && literalMutant(src, t);
-      if (mut) lits.push({ ...mut, hunk: hi, site: a, line: lineOf(a) });
+      if (mut) lits.push({ ...mut, span: [a, t.at[1]], wrap: [t.lit.s, t.lit.e], hunk: hi, site: a, line: lineOf(a) });
     }
     // Use sites: one per distinct use, plus one per replaced name.
     const refs = [];
@@ -719,13 +757,13 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const t of names[hi]) {
       const u = uses.get(t.at);
       if (!u) continue;
-      const base = { hunk: hi, site: t.at, ref: t.name, line: lineOf(t.at) };
+      const base = { hunk: hi, site: t.at, ref: t.name, line: lineOf(t.at), wrap: u.short ? [...u.use, u.short] : u.use };
       if (t.was === '') return Object.assign([], { unmutated_ref: { name: t.name, line: base.line, hunk: hi } });
       if (!seen.has(u.use.join(':'))) {
         seen.add(u.use.join(':'));
-        refs.push({ ...base, mutation: 'use_site', cover: u.use, edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
+        refs.push({ ...base, mutation: 'use_site', span: u.use, edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
       }
-      if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, edits: [[t.at, t.end - t.at, t.was]], lo: t.at, hi: t.end });
+      if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, span: [t.at, t.end], edits: [[t.at, t.end - t.at, t.was]], lo: t.at, hi: t.end });
     }
     if (sites.size + lits.length + refs.length > EDIT_MAX_SITES) return Object.assign([], { capped: true });
     needed.push(...refs);
@@ -736,59 +774,121 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       candidates.push(...order.slice(0, max * 4));
     }
   }
+  let jsn;
+  const nodes = () => jsn || (jsn = jsNodes(src, file, code));
+  const atom = new RegExp(String.raw`[A-Za-z_$][\w$]*|(?:\d|\.\d)(?:[\w.]|(?<=\d[eE])[+-])*`, 'y');
+  // [s, e) of the expression atom (literal, bracket group, name, number) at i, or null.
+  const litAt = new Map(view.lits.map(l => [l.s, l]));
+  const atomAt = (i) => {
+    const l = litAt.get(i);
+    if (l) return [l.s, l.e];
+    if ('([{'.includes(code[i])) { const e = polyglot.matchBracket(code, i); return e < 0 ? null : [i, e + 1]; }
+    atom.lastIndex = i;
+    const w = atom.exec(code);
+    return w ? [i, i + w[0].length] : null;
+  };
+  // An operator match's sham wraps the match itself when it is an atom,
+  // else its right operand, else the name before it.
+  const atomNear = ([s, e]) => {
+    const self = atomAt(s);
+    if (self && self[1] === e && !(KEYWORDS[lang].has(src.slice(s, e)) && !VALUES.test(src.slice(s, e)))) return self;
+    let i = e;
+    while (code[i] === ' ' || code[i] === '\t') i++;
+    const r = atomAt(i);
+    if (r) return r;
+    let j = s;
+    while (code[j - 1] === ' ' || code[j - 1] === '\t') j--;
+    let b = j;
+    while (b > 0 && /[\w$]/.test(code[b - 1])) b--;
+    return b < j ? [b, j] : null;
+  };
   const build = (c) => {
     if (c.built) return c.built;
-    const mut = mutateAt(src, code, c.op, c.m, lang);
-    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
+    const mut = mutateAt(src, code, c.op, c.m, lang, nodes);
+    if (!mut) return null;
+    const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
+    const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
+    return { wrap: atomNear(span), ...mut, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
+  // Sham edits of a mutant that adds text: its wrap in redundant parentheses
+  // (as many characters as the mutant adds, or one more) and as many spaces
+  // at `pad`. [] when it adds nothing, null when it has no wrap.
+  const shamOf = ({ edits, hi, pad = hi, wrap }) => {
+    const grow = edits.reduce((n, [, del, ins]) => n + ins.length - del, 0);
+    if (grow <= 0) return [];
+    if (!wrap) return null;
+    const [a, e, pre = ''] = wrap;
+    const n = Math.max(1, grow - pre.length), k = Math.ceil(n / 2);
+    // Past 16 characters (parsers cap nesting) a number takes the rest: (10…0, x) / (10…0, x)[1].
+    const [open, close] = n <= 16 ? ['('.repeat(k), ')'.repeat(k)]
+      : lang === 'python' ? [`(1${'0'.repeat(Math.max(0, n - 7))},`, ')[1]'] : [`(1${'0'.repeat(Math.max(0, n - 4))},`, ')'];
+    const parens = pre ? [[a, e - a, pre + open + src.slice(a, e) + close]] : [[a, 0, open], [e, 0, close]];
+    return [...parens, [pad, 0, ' '.repeat(grow)]].sort((x, y) => x[0] - y[0]);
+  };
+  const shamMut = (edits) => ({ edits, lo: edits[0][0], hi: edits[edits.length - 1][0] });
   const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
   const kept = new Map();
   const out = [];
-  const take = ({ edits, lo, hi, pad = hi, ...c }) => {
+  const take = ({ edits, lo, hi, pad, wrap, ...c }, sham) => {
     kept.set(key(c), (kept.get(key(c)) || 0) + 1);
-    const grow = edits.reduce((n, [, del, ins]) => n + ins.length - del, 0);
-    out.push({ ...c, src: applyEdits(src, edits), ...(grow > 0 ? { sham: applyEdits(src, [[pad, 0, ' '.repeat(grow)]]) } : {}) });
+    out.push({ ...c, src: applyEdits(src, edits), ...(sham.length ? { sham: applyEdits(src, sham) } : {}) });
   };
   if (lang === 'python') {
-    // One batch: every candidate, the first `max` that parse per site.
-    const built = candidates.map(build).filter(Boolean);
-    const ok = built.length ? parsesPython(src, built, lineOf, starts, timeoutMs) : [];
+    // One batch: every candidate and its sham, the first `max` per site where both parse.
+    const built = candidates.map(build).filter(Boolean).map(b => [b, shamOf(b)]).filter(([, sh]) => sh);
+    const batch = built.flatMap(([b, sh]) => (sh.length ? [b, shamMut(sh)] : [b]));
+    const ok = batch.length ? parsesPython(src, batch, lineOf, starts, timeoutMs) : [];
     if (!ok) return Object.assign([], { unchecked: true });
-    built.forEach((c, i) => { if (ok[i] && (kept.get(key(c)) || 0) < max) take(c); });
+    let i = 0;
+    for (const [b, sh] of built) {
+      const good = ok[i] && (!sh.length || ok[i + 1]);
+      i += sh.length ? 2 : 1;
+      if (good && (kept.get(key(b)) || 0) < max) take(b, sh);
+    }
   } else {
     const parses = jsParseCheck(src, file);
     for (const c of candidates) {
       const b = build(c);
-      if (b && (kept.get(key(b)) || 0) < max && parses(b)) take(b);
+      const sh = b && shamOf(b);
+      if (sh && (kept.get(key(b)) || 0) < max && parses(b) && (!sh.length || parses(shamMut(sh)))) take(b, sh);
     }
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, lang);
+  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks);
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 
-// The first inserted token (name, number, string, literal part, regex atom
-// or flag) no mutant covers -> { text, at, hunk }, or null.
-function uncoveredToken(src, hunks, out, names, litToks, lang) {
+// The first inserted token other than punctuation (brackets, commas,
+// semicolons, colons, regex delimiters) and whitespace that no mutant covers
+// -> { text, at, hunk }, or null. A site covers the span every one of its
+// mutants changes (the match, the literal token, the perturbed use).
+const PUNCT = /^[()[\]{},;:]$/;
+const BOUND = /^(?:=|const|let|var)$/;
+function uncoveredToken(src, hunks, out, names, litToks) {
   const nameAt = new Set(names.flat().map(t => t.at));
-  const covers = (a, b) => out.some(m => (m.site === a && !m.ref) || (m.revert && m.site === a) || (m.cover && m.cover[0] <= a && b <= m.cover[1]));
-  const loose = [];
-  const read = new Set();
-  for (let hi = 0; hi < hunks.length; hi++) {
-    for (const [a, b] of hunks[hi].ranges) {
-      const text = src.slice(a, b);
-      const t = litToks.get(a);
-      const name = !t && nameAt.has(a);
-      const must = t ? t.kind !== 'delim' : name || /^(?:\d|\.\d)/.test(text) || /^[rRbBuUfF]{0,2}['"`]/.test(text);
-      if (!must) continue;
-      if (covers(a, b)) { if (name) read.add(text); continue; }
-      if (name) loose.push({ text, at: a, hunk: hi });
-      else return { text, at: a, hunk: hi };
-    }
+  const spans = new Map();
+  for (const m of out) {
+    const k = `${m.site}${m.revert ? 'r' : ''}`, p = spans.get(k);
+    spans.set(k, p ? [Math.max(p[0], m.span[0]), Math.min(p[1], m.span[1])] : m.span);
   }
-  return loose.find(t => !read.has(t.text)) || null;
+  const covers = (a, b) => [...spans.values()].some(([s, e]) => s <= a && b <= e);
+  const toks = [];
+  hunks.forEach((h, hunk) => h.ranges.forEach(([a, b]) => {
+    const text = src.slice(a, b), t = litToks.get(a);
+    if (t ? t.kind === 'delim' : !text.trim() || PUNCT.test(text)) return;
+    toks.push({ text, at: a, end: b, hunk, name: !t && nameAt.has(a), ok: covers(a, b) });
+  }));
+  const read = new Set(toks.filter(t => t.name && t.ok).map(t => t.text));
+  for (const t of toks) if (t.name && !t.ok) t.ok = read.has(t.text);
+  // `=` and `const` / `let` / `var` stand on the covered token right after them.
+  for (let i = toks.length - 2; i >= 0; i--) {
+    const t = toks[i], nx = toks[i + 1];
+    if (!t.ok && BOUND.test(t.text) && nx.hunk === t.hunk && !src.slice(t.end, nx.at).trim()) t.ok = nx.ok;
+  }
+  const bad = toks.find(t => !t.ok && !t.name) || toks.find(t => !t.ok);
+  return bad ? { text: bad.text, at: bad.at, hunk: bad.hunk } : null;
 }
 
 module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, changeHunks, MUTATIONS, MAX_MUTANTS, EDIT_MAX_HUNKS, EDIT_MAX_CHARS, EDIT_MAX_SITES };
