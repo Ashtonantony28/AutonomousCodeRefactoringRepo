@@ -156,7 +156,20 @@ test('handleSignal reverts a live edit and exits 0', (t) => {
   assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
 });
 
-test('SIGINT to the CLI mid-test restores the worktree file, kills the test group, leaves the target clean', async (t) => {
+test('handleSignal flushes the session; an uncaught exception exits 1 (AUDIT-11 H1)', (t) => {
+  const { freshSession, sessionPath } = require('../src/utils/checkpoint');
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const session = freshSession(repo);
+  session.proposals.push({ issue_id: 'flushed-on-signal' });
+  const codes = [];
+  handleSignal('SIGTERM', session, { exit: (c) => codes.push(c) });
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8')).proposals, [{ issue_id: 'flushed-on-signal' }]);
+  handleSignal('uncaughtException', null, { exit: (c) => codes.push(c) });
+  assert.deepStrictEqual(codes, [0, 1]);
+});
+
+for (const signal of ['SIGINT', 'SIGTERM']) test(`${signal} to the CLI mid-test restores the worktree file, kills the test group, leaves the target clean`, async (t) => {
   const repo = env.copyFixture('js-basic');
   const marker = `refactor-sigint-${crypto.randomBytes(4).toString('hex')}`;
   const pkgPath = path.join(repo, 'package.json');
@@ -185,7 +198,7 @@ test('SIGINT to the CLI mid-test restores the worktree file, kills the test grou
   const wtFile = path.join(wtRoot, MATH);
   assert(fs.readFileSync(wtFile, 'utf8').includes(ADD_PROPOSED), 'edit is in flight');
 
-  child.kill('SIGINT');
+  child.kill(signal);
   const { code } = await exited;
   assert.strictEqual(code, 0, out);
   assert(!fs.readFileSync(wtFile, 'utf8').includes(ADD_PROPOSED), 'in-flight edit reverted');
@@ -434,6 +447,37 @@ test('a timed-out mutant whose re-run fails is killed', async (t) => {
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert.strictEqual(res.mutation.timeouts, 1);
   assert.strictEqual(res.mutation.run, 2);
+});
+
+test('a mutant whose re-run times out again is no kill (AUDIT-11 C5)', async (t) => {
+  const repo = countingSuite(t, 'if (n === 2 || n === 3) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, onKept: () => { kept = true; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.killed, null);
+  assert(res.mutation.run >= 2);
+  assert.strictEqual(kept, false);
+});
+
+test('an exception while gathering mutation evidence reverts the edit (AUDIT-11 C5)', async (t) => {
+  const hunks = require('../src/utils/hunks');
+  const execPath = require.resolve('../src/agents/executor');
+  const [origHunks, origExec] = [hunks.changeHunks, require.cache[execPath]];
+  delete require.cache[execPath];
+  hunks.changeHunks = () => { throw new Error('evidence boom'); };
+  const fresh = require('../src/agents/executor');
+  hunks.changeHunks = origHunks;
+  require.cache[execPath] = origExec;
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => fresh.runExecutor({ proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo, onKept: () => { kept = true; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.error, 'evidence boom');
+  assertReverted(res, repo, MATH, before, kept);
 });
 
 test('an edit over the change-hunk cap gets no mutants: reverted mutation_budget (AUDIT-9 H1)', async (t) => {

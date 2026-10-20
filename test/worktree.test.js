@@ -201,3 +201,49 @@ test('worktree add failing on both branch names throws EWORKTREE; no worktree, n
   assert.strictEqual(git(repo, ['worktree', 'list', '--porcelain']).split('\n').filter(l => l.startsWith('worktree ')).length, 1);
   assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'a.js'), 'utf8'), 'module.exports = 1; // user work\n');
 });
+
+// ---------- SG23: copy failures stop the run; commits carry only the edited file ----------
+
+// A tracked file replaced by a directory: the dirty entry under it cannot be
+// copied over the worktree's file of the same name (even as root).
+const blockCopy = (repo) => {
+  fs.rmSync(path.join(repo, 'src', 'a.js'));
+  write(repo, 'src/a.js/x.js', 'X\n');
+};
+
+test('a dirty file that cannot be copied stops worktree creation (AUDIT-11 H3)', (t) => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-repo-'));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-base-'));
+  t.after(() => { env.rm(repo); env.rm(base); });
+  write(repo, 'src/a.js', 'module.exports = 1;\n');
+  gitInit(repo);
+  blockCopy(repo);
+  assert.throws(() => worktree.createWorktree({ targetRepo: repo, runId: 'r1', baseDir: base }), /could not copy src\/a\.js\/x\.js into the worktree/);
+  assert.strictEqual(fs.existsSync(path.join(base, 'r1')), false);
+  assert.strictEqual(git(repo, ['branch', '--list', 'refactor/r1']), '');
+});
+
+test('resumeWorktree stops with EWORKTREE when the re-created worktree cannot be synced (AUDIT-11 H3)', (t) => {
+  const { repo, info } = makeRepo(t, () => {});
+  fs.rmSync(info.path, { recursive: true, force: true });
+  blockCopy(repo);
+  assert.throws(() => worktree.resumeWorktree({ targetRepo: repo, info }),
+    (err) => err.code === 'EWORKTREE' && /could not copy src\/a\.js\/x\.js/.test(err.message));
+  assert.strictEqual(fs.existsSync(info.path), false, 'half-synced worktree removed');
+});
+
+test('resumeWorktree on a target that is no longer a git repository throws EWORKTREE (AUDIT-11 C6)', (t) => {
+  const { repo, info } = makeRepo(t, () => {});
+  fs.rmSync(path.join(repo, '.git'), { recursive: true, force: true });
+  assert.throws(() => worktree.resumeWorktree({ targetRepo: repo, info }),
+    (err) => err.code === 'EWORKTREE' && /no longer a git repository/.test(err.message));
+});
+
+test('a commit stages only the edited file, not dirty files synced from the target (AUDIT-11 C6)', (t) => {
+  const { info } = makeRepo(t, (repo) => write(repo, 'src/a.js', 'module.exports = 100;\n'));
+  assert.deepStrictEqual(info.dirty_synced, ['src/a.js']);
+  fs.writeFileSync(path.join(info.root, 'src', 'b.js'), 'module.exports = 20;\n');
+  const sha = worktree.commitProposal(info, { issue_id: 'dddd000011112222', file: 'src/b.js', reasoning: '' });
+  assert.strictEqual(git(info.path, ['show', '--name-only', '--format=', sha]), 'src/b.js');
+  assert.strictEqual(git(info.path, ['status', '--porcelain']), 'M src/a.js', 'synced change stays uncommitted');
+});

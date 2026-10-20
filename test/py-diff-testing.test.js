@@ -183,3 +183,47 @@ test('log records below WARNING and warnings are output (AUDIT-12 H1, Y7)', () =
   const same = run('def charge(user, amt):\n    log.debug("charge %s", user)\n    return amt\n', 'def charge(user, amt):\n    log.debug("charge %s", user)\n    total = amt\n    return total\n', { pre });
   assert.strictEqual(same.verdict, 'equivalent', same.reason);
 });
+
+// ---------- SG23: every rule that keeps a verdict from being `equivalent` is pinned (AUDIT-11 C2, C3) ----------
+
+const INLINE = ['def f(x):\n    y = x + 1\n    return y\n', 'def f(x):\n    return x + 1\n'];
+
+test('module state after load that is not deterministic is inconclusive (AUDIT-11 C2)', () => {
+  const r = run(...INLINE, { pre: 'import os\nTOKEN = os.urandom(8).hex()\n' });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /module state after load is not deterministic/);
+});
+
+test('load-time state differing only through dependency stubs is inconclusive (AUDIT-11 C2)', () => {
+  const r = run("HOST = requests.get('a')\n", "HOST = requests.get('b')\n", { pre: 'import requests\n' });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /module-scope state after load differs through dependency stubs/);
+});
+
+test('a target cut short by the time budget is inconclusive even with enough value runs (AUDIT-11 C2)', () => {
+  // Only the proposed side slows down (calls 13+, ~50 ms each), so it alone is
+  // cut by its share of the budget; both current runs complete.
+  const r = run('def f(n):\n    CALLS[0] += 1\n    y = n * 2\n    return y\n',
+    'def f(n):\n    CALLS[0] += 1\n    if CALLS[0] > 12:\n        for _ in range(4_000_000):\n            pass\n    return n * 2\n',
+    { pre: 'CALLS = [0]\n', budgetMs: 300, callTimeoutMs: 2000 });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /f: time budget reached after \d+ of \d+ runs/);
+});
+
+test('harness crashes are inconclusive and observe no deletion: bad output, harness error, a side dying before load (AUDIT-11 C2, C3)', { skip: process.platform === 'win32' }, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pydt-fake-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const fake = path.join(dir, 'python3');
+  fs.writeFileSync(fake, '#!/bin/sh\ncat > /dev/null\necho not json\n', { mode: 0o755 });
+  const parse = run(...INLINE, { python: fake });
+  assert.strictEqual(parse.verdict, 'inconclusive');
+  assert.match(parse.reason, /^python sandbox error: /);
+  assert.strictEqual(parse.deletions_observed, false);
+  const err = run(...INLINE, { budgetMs: 'not a number' });
+  assert.strictEqual(err.verdict, 'inconclusive');
+  assert.match(err.reason, /^harness error: TypeError/);
+  assert.strictEqual(err.deletions_observed, false);
+  const noload = run(...INLINE, { pre: 'import os\nos._exit(0)\n' });
+  assert.strictEqual(noload.verdict, 'inconclusive');
+  assert.strictEqual(noload.reason, 'a sandboxed side ended before loading the module');
+});

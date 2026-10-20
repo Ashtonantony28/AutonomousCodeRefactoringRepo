@@ -69,6 +69,27 @@ test('timeout kills the whole process group, grandchildren included', { skip: pr
   assert.strictEqual(alive(), false, `grandchild sleep ${pid} survived the timeout`);
 });
 
+test('a process left in the test group after a normal exit is killed (AUDIT-11 H2)', { skip: process.platform !== 'linux' }, async (t) => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { runCommand } = require('../src/runner/test-runner');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-straggler-'));
+  const pidFile = path.join(dir, 'pid');
+  let pid = 0;
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* */ } rm(dir); });
+  const r = await runCommand({ cmd: 'sh', args: ['-c', `sleep 30 & echo $! > "${pidFile}"`], cwd: dir, env: process.env, timeoutMs: 20000 });
+  assert.strictEqual(r.timedOut, false);
+  assert.strictEqual(r.exitCode, 0);
+  pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert(pid > 0);
+  // Dead or a zombie waiting to be reaped (no PID 1 reaping assumed).
+  const dead = () => { try { return fs.readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] === 'Z'; } catch { return true; } };
+  const t0 = Date.now();
+  while (!dead() && Date.now() - t0 < 3000) await new Promise(r2 => setTimeout(r2, 20));
+  assert(dead(), `straggler sleep ${pid} still running after the test command exited`);
+});
+
 test('runTests reports timeout through the process-group kill', { skip: process.platform === 'win32' }, async () => {
   const r = await runTests({ repoRoot: process.cwd(), command: { cmd: 'sh', args: ['-c', 'sleep 30 & wait'], framework: 'sh' }, timeoutMs: 200 });
   assert.strictEqual(r.status, 'timeout');

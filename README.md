@@ -95,6 +95,23 @@ After every run, open `dashboard/dashboard.html` (or `http://127.0.0.1:4173/` wh
 `--serve` is on) for the reliability diagram, agreement grid, what-if RL sliders,
 failure clusters, and per-proposal decision traces.
 
+## Tests
+
+```bash
+npm test                    # node:test suite (stub Claude client, temp dirs, no API calls)
+npm run bench               # per-stage p50/p95 vs the PLAN.md latency budgets
+npm run coverage            # line coverage of src/ incl. the diff-test worker threads
+npm run coverage -- --files # ... plus the uncovered lines of each file
+```
+
+`npm run coverage` runs the suite with `NODE_V8_COVERAGE` and merges the V8
+dumps of every isolate. `scripts/worker-coverage.js` hands the variable to the
+diff-prep and diff-sandbox workers (started with an empty env) and flushes their
+coverage before they are terminated; `node --test --experimental-test-coverage`
+does not see worker threads and under-reports `src/validation`. It exits 1 when
+`src/validation`, `src/runner`, `src/rl` or `src/orchestrator.js` is below 85%
+lines. `py_diff_harness.py` is not included.
+
 ## CLI flags
 
 | flag                | default      | description                                                  |
@@ -126,6 +143,7 @@ state/         cache/<hash>.json · runs/<run_id>/spans.ndjson   (override: REFA
 dashboard/     dashboard.html   (override: REFACTOR_DASHBOARD_DIR)
 test/          *.test.js (node:test, stub Claude client, no API calls) · fixtures/ · helpers/
 bench/         run.js (npm run bench: per-stage p50/p95 vs PLAN.md budgets)
+scripts/       coverage.js · worker-coverage.js (npm run coverage)
 ```
 
 ## Features in detail

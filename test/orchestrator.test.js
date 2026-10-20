@@ -297,3 +297,26 @@ test('a red suite that never ran the edit gives no sample, no reward and no Refl
   assert.strictEqual(stub.count('reflexion'), 0);
   assert.deepStrictEqual(loadSamples(repo).filter(s => s.proposal_id === p.issue_id), []);
 });
+
+test('an executor exception records an error outcome, so --resume does not re-execute the proposal (AUDIT-11 H1)', async (t) => {
+  const path = require('path');
+  const { processProposal } = require('../src/orchestrator');
+  const { freshSession } = require('../src/utils/checkpoint');
+  const { TokenTracker } = require('../src/utils/token-tracker');
+  const { Classifier } = require('../src/rl/classifier');
+  const { FileSnapshot } = require('../src/runner/reverter');
+  const { makeProposal } = require('./helpers/factories');
+  const repo = env.copyFixture('js-basic');
+  const snapDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'refactor-snapdir-'));
+  t.after(() => { resetClient(); FileSnapshot.restoreLive(); env.rm(repo); env.rm(snapDir); env.rm(snapDir + '.tmp'); });
+  installStub({ critic: { preserves_semantics: true, p_preserves: 0.95, edge_cases: [], hallucination_flags: [], reasoning: 'same' } });
+  const session = freshSession(repo);
+  const proposal = makeProposal('src/math.js', 'function add(a, b) {\n  const result = a + b;\n  return result;\n}', 'function add(a, b) {\n  return a + b;\n}');
+  session.proposals.push(proposal);
+  // The snapshot path is a directory: persisting the pre-edit snapshot throws inside the executor.
+  const work = { root: repo, info: null, snapshotPath: snapDir };
+  await withoutTestContext(() => processProposal({ proposal, session, tracker: new TokenTracker(session), classifier: new Classifier(null), dryRun: false, absRepo: repo, work, allowRepair: false }));
+  assert.strictEqual(proposal.test_outcome && proposal.test_outcome.status, 'error', JSON.stringify(proposal.test_outcome));
+  assert(proposal.test_outcome.error);
+  assert.strictEqual(JSON.parse(fs.readFileSync(sessionPath(repo), 'utf8')).proposals[0].test_outcome.status, 'error');
+});

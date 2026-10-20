@@ -834,3 +834,75 @@ test('oracle: named array properties and state read through prototype methods of
   const same = edit(cls('this.#max = Math.max(1, max);'), cls('this.#max = Math.max(max, 1);'), { exp: 'module.exports = { Pool };' });
   assert.strictEqual(same.verdict, 'equivalent', same.reason);
 });
+
+// ---------- SG23: every rule that keeps a verdict from being `equivalent` is pinned (AUDIT-11 C1, C3) ----------
+
+// ~8 ms per call here; the budgets below are far from what all runs need.
+const SLOW = 'let s = 0;\n  for (let i = 0; i < 1e6; i++) s = (s + i) % 7;';
+
+test('a target cut short by the time budget is inconclusive even with enough value runs (AUDIT-11 C1)', () => {
+  const r = run({
+    currentSrc: `function kind(x) {\n  ${SLOW}\n  return typeof x + s;\n}`,
+    proposedSrc: `function kind(x) {\n  ${SLOW}\n  const t = typeof x;\n  return t + s;\n}`,
+    budgetMs: 100, minValueRuns: 1, callTimeoutMs: 2000
+  });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /kind: time budget reached after [1-9]\d* of \d+ inputs/);
+});
+
+test('every input run but too few value runs before the budget is inconclusive (AUDIT-11 C1)', () => {
+  const r = run({
+    currentSrc: `function slow() {\n  ${SLOW}\n  return s;\n}`,
+    proposedSrc: `function slow() {\n  ${SLOW}\n  const r = s;\n  return r;\n}`,
+    budgetMs: 200, minValueRuns: 100, callTimeoutMs: 2000
+  });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /slow: (only \d+ of \d+ runs returned comparable values|time budget reached)/);
+});
+
+test('deferred module state too large to compare is inconclusive (AUDIT-11 C1)', () => {
+  const r = edit("function twice(x) {\n  if (typeof x !== 'number') return 0;\n  return x * 2;\n}", "function twice(x) {\n  if (typeof x !== 'number') return 0;\n  return x + x;\n}", {
+    pre: 'const TABLE = Array.from({ length: 3000 }, (_, i) => i);\nlet DEEP = {};\nfor (let i = 0; i < 40; i++) DEEP = { d: DEEP };',
+    exp: 'module.exports = { twice, TABLE, DEEP };'
+  });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /twice: module state too large to compare/);
+});
+
+test('no changed callable resolved (a removed private helper) is inconclusive (AUDIT-11 C1)', () => {
+  const helper = 'function helper(x) {\n  return x + 1;\n}\n';
+  const r = run({ currentSrc: helper, proposedSrc: '', fileSrc: `'use strict';\n${helper}function main(x) {\n  return x;\n}\nmodule.exports = { main };\n` });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /no changed callable could be resolved/);
+});
+
+test('a new top-level declaration with a side-effecting initialiser caps the verdict (AUDIT-11 C1)', () => {
+  const cur = 'function inc(x) {\n  return x + 1;\n}';
+  const r = edit(cur, `const added = registry.add('inc');\n${cur}`, {
+    pre: 'const registry = (() => { const items = []; return { add: (x) => items.push(x), size: () => items.length }; })();',
+    exp: 'module.exports = { inc };'
+  });
+  assert.strictEqual(r.verdict, 'inconclusive', r.reason);
+  assert.match(r.reason, /top-level statement changed outside a located callable: "const added = registry\.add/);
+});
+
+test('crashes inside the oracle are inconclusive: preparation, sandbox, worker start (AUDIT-11 C3)', () => {
+  const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads');
+  const f = { currentSrc: 'function f(x) {\n  return x;\n}', proposedSrc: 'function f(x) {\n  return x + 0;\n}' };
+  const prep = run({ ...f, arity: Infinity });
+  assert.strictEqual(prep.verdict, 'inconclusive');
+  assert.match(prep.reason, /^diff test error: /);
+  const start = run({ ...f, minValueRuns: Symbol('uncloneable') });
+  assert.strictEqual(start.verdict, 'inconclusive');
+  assert.match(start.reason, /^worker failed to start: /);
+  // The sandbox worker given a payload without targets throws in main().
+  const sab = new SharedArrayBuffer(4);
+  const { port1, port2 } = new MessageChannel();
+  const w = new Worker(require.resolve('../src/validation/diff-sandbox-worker.js'), { workerData: { flag: sab, port: port2 }, transferList: [port2] });
+  Atomics.wait(new Int32Array(sab), 0, 0, 10000);
+  const m = receiveMessageOnPort(port1);
+  w.terminate();
+  port1.close();
+  assert.strictEqual(m.message.result.verdict, 'inconclusive');
+  assert.match(m.message.result.reason, /^sandbox error: /);
+});

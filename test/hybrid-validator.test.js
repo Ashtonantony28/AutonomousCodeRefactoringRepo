@@ -396,3 +396,25 @@ test('the critic prompt defines edge_cases as behaviour differences', () => {
   const { systemPromptFor, PERSONAS } = require('../src/agents/critic');
   assert.match(systemPromptFor(PERSONAS.strict), /edge_cases lists only inputs or situations on which proposed_code behaves\ndifferently/);
 });
+
+test('a unanimous approve whose jury mean p_preserves is below 0.5 is critic_rejected (AUDIT-11 C4)', async (t) => {
+  const ctx = setup(t);
+  const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME), perPersona(() => ({ ...base, preserves_semantics: true, p_preserves: 0.3 })));
+  assert.strictEqual(p.critic_verdict.agreement.unanimous, true);
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
+  assert(p.combined_confidence >= 0.5, 'score alone would pass');
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+  assert.match(p.test_outcome.reason, /critic jury does not approve.*p_preserves=0\.3/);
+});
+
+test('a diff test that throws is inconclusive, never equivalent (AUDIT-11 C3)', async (t) => {
+  const diffTesting = require('../src/validation/diff-testing');
+  const orig = diffTesting.run;
+  diffTesting.run = () => { throw new Error('oracle crashed'); };
+  t.after(() => { diffTesting.run = orig; });
+  const ctx = setup(t);
+  const p = await viaPipeline(ctx, makeProposal('index.js', DOUBLE, SAME), perPersona(() => ({ ...base, preserves_semantics: true, p_preserves: 0.9 })));
+  assert.strictEqual(p.diff_test.verdict, 'inconclusive');
+  assert.match(p.diff_test.reason, /diff-test error: oracle crashed/);
+  assert.strictEqual(p.test_outcome.status, 'critic_rejected');
+});
