@@ -96,7 +96,7 @@ const RUNNERS = {
   ast: { filter: (c) => !c.applyOnly, run: (c) => runChecks({ proposal: freshProposal(c.proposal), repoRoot: c.repo }) },
   difftest: {
     filter: (c) => !c.applyOnly && /\.(js|cjs|mjs)$/i.test(c.proposal.file),
-    run: (c) => diffTesting.run({ currentSrc: c.proposal.current_code, proposedSrc: c.proposal.proposed_code, fileSrc: c.original })
+    run: (c) => diffTesting.run({ currentSrc: c.proposal.current_code, proposedSrc: c.proposal.proposed_code, fileSrc: c.original, file: c.proposal.file })
   },
   apply: {
     filter: () => true,

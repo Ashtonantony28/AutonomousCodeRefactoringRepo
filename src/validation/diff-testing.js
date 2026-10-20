@@ -35,7 +35,8 @@
 // When the edit deletes code, the current version is probed so the result
 // says whether that code ran (`deletions_observed`).
 // run() is synchronous: the caller blocks on Atomics.wait until the worker
-// reports or the hard kill fires.
+// reports or the hard kill fires. Python edits (`file` *.py or
+// `lang: 'python'`) go to py-diff-testing.js.
 
 const path = require('path');
 const { changeHunks } = require('../utils/hunks');
@@ -1059,6 +1060,7 @@ function finish(t0, fields) {
 const labelOf = (t) => (t.className ? `${t.className}.${t.name}` : t.owner ? `${t.owner}.${t.name}` : t.name);
 
 function run(opts) {
+  if (opts && (opts.lang === 'python' || /\.py$/i.test(opts.file || ''))) return require('./py-diff-testing').run(opts);
   const t0 = performance.now();
   const { currentSrc, proposedSrc, fileSrc, functionName, arity, runs = MAX_RUNS } = opts;
   const hardKillMs = opts.hardKillMs || HARD_KILL_MS;

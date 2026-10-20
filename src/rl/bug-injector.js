@@ -85,7 +85,7 @@ function injectInto(source) {
 }
 
 const MAX_MUTANTS = 3;
-const JS_FILE = /\.(js|cjs|mjs)$/i;
+const DIFF_FILE = /\.(js|cjs|mjs|py)$/i;
 
 // The file as it was before the parent edit: the target may already hold the
 // proposed code (in-place executor), in which case the edit is undone in memory.
@@ -112,8 +112,8 @@ function rescoreMutant(parent, mutated, { repoRoot, fileSrc }) {
   let checks = [];
   try { checks = runChecks({ proposal: mutant, repoRoot }).checks; } catch { checks = []; }
   let dt = null;
-  if (JS_FILE.test(parent.file || '') && mutant.current_code) {
-    try { dt = diffTesting.run({ currentSrc: mutant.current_code, proposedSrc: mutated, fileSrc }); } catch { dt = null; }
+  if (DIFF_FILE.test(parent.file || '') && mutant.current_code) {
+    try { dt = diffTesting.run({ currentSrc: mutant.current_code, proposedSrc: mutated, fileSrc, file: parent.file }); } catch { dt = null; }
   }
   return { checks, diff_test: dt };
 }

@@ -170,10 +170,12 @@ approval is unanimous; every persona has `p_preserves >= 0.2`
 (`MIN_PERSONA_P`); and no persona lists an `edge_cases` entry (the prompt
 defines them as inputs on which the edit behaves differently). Without an
 `equivalent` diff test the gate fails closed: an `inconclusive` diff test
-that ran inputs (`runs > 0`) is rejected, so is a JS edit the diff test ran
-no input on (unlocatable shapes: the AST checks only catch their four
-anti-patterns), and a non-JS edit (`runs = 0`) proceeds only with every
-check passed (for Python including the lexical checks). The gate and fusion
+that ran inputs (`runs > 0`) is rejected, so is a JS or Python edit the diff
+test ran no input on (Python runs in an isolated `python3 -I` harness,
+`src/validation/py_diff_harness.py`), and an edit in another language
+(`runs = 0`) proceeds only with every check passed. Python's
+`condition_change` check drops from veto to a score penalty when the Python
+diff test is `equivalent`; `guard_removal` always vetoes. The gate and fusion
 read only contract fields (`panel`, `p_preserves`, `agreement`, verdict
 `edge_cases`; `applicable`, `verdict`, `runs`); the diff score is derived
 from `verdict`. Independently of the score, a proposal is **vetoed**
