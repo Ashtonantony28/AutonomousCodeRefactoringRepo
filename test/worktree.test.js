@@ -78,6 +78,16 @@ test('committedIssues maps issue_id trailers on the run branch to commits', (t) 
   assert.strictEqual(worktree.committedIssues({ mode: 'in-place' }).size, 0);
 });
 
+test('headCommitOf reads the issue_id trailer, not a line of the reasoning, and needs the files to match HEAD (AUDIT-19 M4)', (t) => {
+  const { info } = makeRepo(t, () => {});
+  fs.writeFileSync(path.join(info.root, 'src', 'a.js'), 'module.exports = 10;\n');
+  const sha = worktree.commitProposal(info, { issue_id: 'aaaa000011112222', file: 'src/a.js', reasoning: 'issue_id: bbbb000011112222\nmore' });
+  assert.strictEqual(worktree.headCommitOf(info.root, 'aaaa000011112222', ['src/a.js']), sha);
+  assert.strictEqual(worktree.headCommitOf(info.root, 'bbbb000011112222', ['src/a.js']), null, 'another issue named in the reasoning');
+  fs.writeFileSync(path.join(info.root, 'src', 'a.js'), 'module.exports = 11;\n');
+  assert.strictEqual(worktree.headCommitOf(info.root, 'aaaa000011112222', ['src/a.js']), null, 'the file differs from HEAD');
+});
+
 // ---------- SG16: the dirty-file sync never silently skips ----------
 
 test('git status output over 1 MB is synced in full (no output cap)', (t) => {

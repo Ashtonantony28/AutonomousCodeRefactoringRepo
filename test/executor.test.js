@@ -410,10 +410,11 @@ const SLOW_CUR = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
 const SLOW_PROP = 'function inc(x) {\n  return x + 1;\n}';
 
 test('mutant runs have their own budget: a suite that uses most of the test budget still gets a mutant run (AUDIT-9 C2)', async (t) => {
-  // The main run takes ~4 s of the 8 s budget; a confirmed kill (mutant,
-  // mutant again, unmutated) needs three more runs (up to ~1.6 s each).
-  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 4000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
-  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 8000 }));
+  // The main run takes over half of the 12 s budget, so a budget shared with
+  // it could not fit the confirmed kill (mutant, mutant again, unmutated);
+  // its own budget leaves ~5 s for the first two runs (~0.5 s each unloaded).
+  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 6000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 12_000 }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert(res.mutation.run === 3 && res.mutation.killed, JSON.stringify(res.mutation));
 });
@@ -423,12 +424,14 @@ test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and
   const prop = 'function f(a, b) {\n  return a > 1 && b < 2 ? a + 1 : 3;\n}';
   const repo = nodeRepo(t, {
     'src/f.js': `'use strict';\n${cur}\nmodule.exports = { f };\n`,
-    'check.js': "require('node:test')('f', () => { const t0 = Date.now(); while (Date.now() - t0 < 1500); require('assert').strictEqual(require('./src/f').f(1, 0), 3); });\n"
+    'check.js': "require('node:test')('f', () => { const t0 = Date.now(); while (Date.now() - t0 < 3000); require('assert').strictEqual(require('./src/f').f(1, 0), 3); });\n"
   }, 'node --test check.js');
   const before = fs.readFileSync(path.join(repo, 'src/f.js'), 'utf8');
   let kept = false;
+  // Every run takes over 3 s of the 5 s budget: the main run has ~2 s to
+  // spare, and a second mutant run never fits (it needs the suite time + 0.5 s).
   const res = await withoutTestContext(() => runExecutor({
-    proposal: makeProposal('src/f.js', cur, prop), repoRoot: repo, testTimeoutMs: 3000, onKept: () => { kept = true; }
+    proposal: makeProposal('src/f.js', cur, prop), repoRoot: repo, testTimeoutMs: 5000, onKept: () => { kept = true; }
   }));
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
   assert.strictEqual(res.reason, 'mutation_budget');
@@ -897,6 +900,16 @@ test('a mutant that breaks module load is no kill: required at a test file\'s to
     assert.strictEqual(res.mutation.killed, null);
     assertReverted(res, repo, 'src/b.js', before, kept);
   }
+});
+
+test('a swapped method needs its own kill of the old name back: trim -> trimStart with no trailing-whitespace test is reverted (AUDIT-19 H1)', async (t) => {
+  const { res, repo, before, kept } = await execOn(t, 'src/t.js', 'function t(s) {\n  return s.trim() + 1;\n}', 'function t(s) {\n  return s.trimStart() + 1;\n}',
+    'module.exports = { t };', "const { t } = require('../src/t');\ntest('t', () => { assert.strictEqual(t('  ab'), 'ab1'); });", { ...GATE_DIFF_TEST });
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.sites, 2, 'skipping the call and reverting the name are separate sites');
+  assert.strictEqual(res.mutation.surviving_ref, 'trimStart');
+  assertReverted(res, repo, 'src/t.js', before, kept);
 });
 
 // The executor with runTests scripted: the main run passes and exercises the

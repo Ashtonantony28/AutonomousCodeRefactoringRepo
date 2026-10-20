@@ -266,3 +266,44 @@ test('editMutants (Python): a parse check that does not finish gives no mutants,
   assert.strictEqual(muts.length, 0);
   assert.strictEqual(muts.unchecked, true);
 });
+
+// ---------- SG29: use-site shapes (AUDIT-19 H2, M6) ----------
+
+test('editMutants: a read in a default value, a #private member and a shorthand property are use sites (AUDIT-19 H2, M6)', () => {
+  const js = (b, a) => bugInjector.editMutants(`'use strict';\nconst LIMIT = 4;\n${a}\n`, { file: 'f.js', before: `'use strict';\nconst LIMIT = 4;\n${b}\n` });
+  const P = '\\(\\(v\\) => .*\\)';
+  for (const [b, a, ref, re] of [
+    ['function f(a, k) {\n  return a + (k || 0);\n}', 'function f(a, k = LIMIT) {\n  return a + (k || 0) + 1;\n}', 'LIMIT', `k = ${P}\\(LIMIT\\)\\) \\{`],
+    ['function f(a, { k } = {}) {\n  return a + k;\n}', 'function f(a, { k = LIMIT } = {}) {\n  return a + k;\n}', 'LIMIT', `\\{ k = ${P}\\(LIMIT\\) \\} = \\{\\}`],
+    ['class K {\n  #max = 4;\n  f(s) { return s; }\n}', 'class K {\n  #max = 4;\n  f(s) { return s.slice(0, this.#max); }\n}', 'max', `slice\\(0, ${P}\\(this\\.#max\\)\\)`],
+    ['function f(s) {\n  return { s };\n}', 'function f(s) {\n  return { s, LIMIT };\n}', 'LIMIT', `\\{ s, LIMIT: ${P}\\(LIMIT\\) \\}`]
+  ]) {
+    const ms = js(b, a);
+    const use = ms.find(m => m.mutation === 'use_site' && m.ref === ref);
+    assert(!ms.unmutated_ref && use, `${a}: ${JSON.stringify(ms.unmutated_ref)}`);
+    assert.match(use.src, new RegExp(re), a);
+  }
+});
+
+test('editMutants (Python): a call in statement position becomes None, a method call is skipped to its receiver (AUDIT-19 M6)', () => {
+  const py = (a) => bugInjector.editMutants(a, { file: 'f.py', before: 'def f(s):\n    return s\n' });
+  assert.strictEqual(py('def f(s):\n    log(s)\n    return s\n').find(m => m.ref === 'log').src, 'def f(s):\n    None\n    return s\n');
+  assert.strictEqual(py('def f(s):\n    return s.strip()\n').find(m => m.ref === 'strip').src, 'def f(s):\n    return (s)\n');
+});
+
+test('editMutants (Python): a use check that does not finish gives no mutants, marked unchecked (AUDIT-19 M6)', (t) => {
+  const cp = require('child_process');
+  const injPath = require.resolve('../src/rl/bug-injector');
+  const [origSpawn, origMod] = [cp.spawnSync, require.cache[injPath]];
+  // Only the use check (the run that reads `toks`) times out; the parse check runs.
+  cp.spawnSync = function (cmd, args) {
+    if (cmd === 'python3' && String(args[2]).includes("req['toks']")) return { status: null, signal: 'SIGTERM', stdout: '', stderr: '' };
+    return origSpawn.apply(this, arguments);
+  };
+  t.after(() => { cp.spawnSync = origSpawn; require.cache[injPath] = origMod; });
+  delete require.cache[injPath];
+  const fresh = require('../src/rl/bug-injector');
+  const ms = fresh.editMutants('MAX = 9\n\n\ndef f(s):\n    return s[0:MAX]\n', { file: 'f.py', before: 'MAX = 9\n\n\ndef f(s):\n    return s\n' });
+  assert.strictEqual(ms.length, 0);
+  assert.strictEqual(ms.unchecked, true);
+});

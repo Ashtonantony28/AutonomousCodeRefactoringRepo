@@ -42,6 +42,7 @@ const PJ = 'src/validation/py-diff-testing.js';
 const PH = 'src/validation/py_diff_harness.py';
 const WT = 'src/runner/worktree.js';
 const RV = 'src/runner/reverter.js';
+const BI = 'src/rl/bug-injector.js';
 
 const SAME_LINE_SB = '    if (value >= need && valued.length >= distinct && !differs && !ood && n >= calls.length) continue;';
 const PY_PASS = '        if value >= MIN_VALUE_RUNS and len(valued) >= need_distinct and not (differs or ood or nondet) and n == len(sched):';
@@ -151,7 +152,7 @@ const MUTANTS = [
   M('G-reconcile2', 'safety', OR, 'reconciliation overwrites proposals that already have an outcome',
     '    if (p.test_outcome || !sha) continue;', '    if (!sha) continue;'),
   M('S-kill', 'safety', OR, 'signal handler no longer kills the in-flight test process group',
-    '  try { killActive(); } catch { /* */ }\n', ''),
+    '  try { killActive(); removeLiveDirs(); } catch { /* */ }\n', '  try { removeLiveDirs(); } catch { /* */ }\n'),
   M('O5', 'control', OR, 'persisted in-flight snapshot not restored on start',
     'const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo), {', 'const crashed = null && FileSnapshot.restoreFromDisk(inflightPath(absRepo), {'),
 
@@ -362,7 +363,26 @@ const MUTANTS = [
   M('R-committhrow', 'safety', RV, 'SG25: a committed() check that throws discards the snapshot (crashed edit left in the worktree)',
     '    try { sha = committed ? committed(data) : null; } catch { sha = null; }', "    try { sha = committed ? committed(data) : null; } catch { sha = 'mutant'; }"),
   M('O-committed', 'safety', OR, 'SG25: orchestrator passes no committed() check (crashed-after-commit snapshot restored over the commit)',
-    '    committed: (d) => worktree.headCommitOf(d.repo_root, d.meta && d.meta.issue_id, Object.keys(d.files))', '    committed: null')
+    '    committed: (d) => worktree.headCommitOf(d.repo_root, d.meta && d.meta.issue_id, Object.keys(d.files))', '    committed: null'),
+
+  // --- SG29: AUDIT-19 M1/M3/M6
+  M('X-shared', 'perf', EX, 'AUDIT-9 C2: mutant runs share the test budget with the main run (a slow suite never gets a confirmed kill)',
+    'budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs', 'budgetMs: (testTimeoutMs || TIMEOUT_MS) - testResult.execution_time_ms, usedMs'),
+  M('TR-judup', 'safety', TR, 'SG26: duplicate JUnit test ids overwrite each other (a failing duplicate can be hidden, a set change unseen)',
+    '    let k = id;\n    for (let n = 2; k in tests; n++) k = `${id}#${n}`;\n    tests[k] = state;', '    tests[id] = state;'),
+  M('BI-private', 'safety', BI, 'SG26: a #private member read is perturbed as its bare name (no parse-valid use-site mutant)',
+    "    if (p.type === 'PrivateName') { u = p; [p, k] = up.get(u); }", '    if (false) { u = p; [p, k] = up.get(u); }'),
+  M('BI-shorthand', 'safety', BI, 'SG26: a shorthand property { MAX } is perturbed as a bare value (no parse-valid use-site mutant)',
+    "    if (p.type === 'ObjectProperty' && p.shorthand) rep =", '    if (false) rep ='),
+  M('BI-pystmt', 'safety', BI, 'SG26: a Python call in statement position is skipped to its argument instead of dropped (None)',
+    "text: stmt ? 'None' :", "text: false ? 'None' :"),
+  M('BI-pyrecv', 'safety', BI, 'SG26: a Python method call is perturbed in its result instead of skipped to its receiver',
+    '            skip = span(f.value)', '            skip = None'),
+  { id: 'BI-pyuses', kind: 'safety', why: 'SG26: a Python use check that did not finish leaves the references unmutated instead of unchecked (another site\'s kill stands in)',
+    edits: [
+      { file: BI, from: '  const uses = !toks.length ?', to: '  const uses = (!toks.length ?' },
+      { file: BI, from: 'jsUses(src, file, toks);\n  if (!uses) return Object.assign([], { unchecked: true });', to: 'jsUses(src, file, toks)) || new Map();' }
+    ] }
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.
