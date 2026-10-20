@@ -249,8 +249,9 @@ const MUTANTS = [
     "      tryGit(top, ['worktree', 'remove', '--force', info.path]);\n      throw fail(err.message);", '      void err;'),
   M('W-add', 'safety', WT, 'commit stages every change in the worktree (dirty-synced files too), not only the edited file',
     "  git(info.path, ['add', '--', rel]);", "  git(info.path, ['add', '-A']);"),
+  // Re-anchored by AUDIT-19: SG25 headCommitOf has the same `.filter(Boolean).pop();`.
   M('W-trailer', 'safety', WT, 'reconciliation reads the first issue_id line (free-text reasoning) instead of the trailer',
-    '.filter(Boolean).pop();', '.filter(Boolean)[0];'),
+    '.filter(Boolean).pop();\n    if (sha', '.filter(Boolean)[0];\n    if (sha'),
 
   // --- crash snapshots (SG5, SG21)
   M('R-discard', 'safety', RV, 'SG21: snapshot of a vanished worktree is restored (fails every later run) instead of discarded',
@@ -304,8 +305,68 @@ const MUTANTS = [
   M('HV-delcond', 'safety', HV, 'SG25: condition_change relaxed although part of a condition was deleted',
     " && !c.deletes_condition) {", ') {'),
   M('R-committed', 'safety', RV, 'SG25: a snapshot whose edit is already committed is restored over it',
-    '    if (sha) {', '    if (false) {')
+    '    if (sha) {', '    if (false) {'),
+
+  // --- AUDIT-19: SG24-SG26 rules not pinned by a mutant above
+  M('EX-coll', 'redundant', EX, 'SG26: a mutant run flagged collection_error is judged like a test failure (backed by failedTests returning null for it)',
+    "        if (r.collection_error) { count('collection_errors'); continue; }\n", ''),
+  { id: 'EX-coll2', kind: 'safety', why: 'SG26: collection_error ignored everywhere in the executor (first run, failedTests, confirmation run)',
+    edits: [
+      { file: EX, from: "        if (r.collection_error) { count('collection_errors'); continue; }\n", to: '' },
+      { file: EX, from: '  if (!r.tests || !control.tests || r.collection_error) return null;', to: '  if (!r.tests || !control.tests) return null;' },
+      { file: EX, from: "        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }", to: "        if (again.status !== 'failed') { count('unconfirmed'); continue; }" }
+    ] },
+  M('EX-repro', 'safety', EX, 'SG24/SG26: a test failing only in the first mutant run counts (no reproduction in the second run)',
+    '        const tests = a && b ? a.filter(id => b.includes(id)) : [];', '        const tests = a && b ? a : [];'),
+  M('EX-again', 'redundant', EX, 'SG24: second mutant run not required to fail (backed by the per-test intersection)',
+    "        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }", "        if (again.collection_error) { count('unconfirmed'); continue; }"),
+  M('EX-flaky', 'safety', EX, 'SG24: a failing unmutated control run (flaky suite) no longer ends the evidence',
+    "        if (control.status !== 'passed') { out.flaky = true; return done(); }\n", ''),
+  M('EX-ctrlpass', 'redundant', EX, 'SG26: a test that did not pass in the control run can be a kill (backed by control.status === passed)',
+    "  return ids.filter(id => r.tests[id] === 'fail' && control.tests[id] === 'pass');", "  return ids.filter(id => r.tests[id] === 'fail');"),
+  M('EX-sitekey', 'safety', EX, 'SG26: revert_reference mutant shares its site with the use-site perturbation (one kill covers both)',
+    'const siteKey = (m) => (m.revert ? `r${m.site}` : m.site);', 'const siteKey = (m) => m.site;'),
+  M('EX-bare', 'safety', EX, 'a hunk with inserted tokens but no site no longer blocks',
+    '  const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));', '  const bare = -1;'),
+  M('EX-unref', 'redundant', EX, 'SG26: unmutated_ref result ignored (backed: that result carries no mutants, so every hunk is bare)',
+    '  if (mutants.unmutated_ref) {', '  if (false) {'),
+  M('EX-unchecked', 'label', EX, 'SG24: mutant parse check not finished reported as tests_insensitive, not mutation_budget',
+    '  if (mutants.unchecked) { out.budget_exhausted = true;', '  if (false) { out.budget_exhausted = true;'),
+  M('TR-tapfail', 'safety', TR, 'SG26: a node:test hook / non-test-code failure (failureType != testCodeFailure) counts as a test failure',
+    "add(cur.id, cur.state === 'fail' && cur.failureType !== 'testCodeFailure' ? 'error' : cur.state);", 'add(cur.id, cur.state);'),
+  M('TR-juerr', 'safety', TR, 'SG26: a pytest <error> (fixture/setup error) counts as a test failure',
+    "      state = /<failure\\b/.test(body) ? 'fail' : 'error';", "      state = 'fail';"),
+  M('TR-jucoll', 'safety', TR, 'SG26: a pytest collection failure reported in junit (--continue-on-collection-errors, exit 1) is not a load failure',
+    '      if (/<error\\b[^>]*message="collection failure/.test(body) || /:\\d+: in <module>$/m.test(unxml(body))) load = true;',
+    '      if (/:\\d+: in <module>$/m.test(unxml(body))) load = true;'),
+  M('TR-pyexit', 'redundant', TR, 'SG25: pytest exit 2-5 (collection/usage error) no longer flagged unless junit has a load marker (backed: such runs have no per-test failure or a changed test set)',
+    '(pytest && result.exitCode >= 2 && result.exitCode <= 5) || ', ''),
+  M('TR-dup', 'safety', TR, 'SG26: duplicate TAP test names overwrite each other (a failing duplicate can be hidden, a set change unseen)',
+    'const add = (id, state) => { let k = id; for (let n = 2; k in tests; n++) k = `${id}#${n}`; tests[k] = state; };', 'const add = (id, state) => { tests[id] = state; };'),
+  M('TR-tapnest', 'safety', TR, 'SG26: TAP subtest ids not prefixed by their parents (same-named subtests in two suites collide)',
+    "      cur = { id: [...names, m[2]].join(' > '),", '      cur = { id: m[2],'),
+  M('BI-revkey', 'safety', 'src/rl/bug-injector.js', 'SG26: revert_reference and use_site share a key (a lost revert mutant is not reported)',
+    "  const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;", '  const key = (c) => `${c.site}`;'),
+  M('BI-default', 'safety', 'src/rl/bug-injector.js', 'SG26: a reference in a default value inside a binding pattern is not a use',
+    "      const b = noRef || ((n.type === 'AssignmentPattern' && key === 'right') || (key === 'key' && n.computed) ? false : bind);", '      const b = noRef || bind;'),
+  M('BI-pyattr', 'safety', 'src/rl/bug-injector.js', 'SG26: Python attribute reads (self.MAX, cfg.limit) are not uses',
+    '    elif isinstance(n, ast.Attribute):\n        e = off', '    elif False:\n        e = off'),
+  M('BI-sitecap', 'label', 'src/rl/bug-injector.js', 'SG26: use sites not counted toward the 12-site cap',
+    '    if (sites.size + refs.length > EDIT_MAX_SITES)', '    if (sites.size > EDIT_MAX_SITES)'),
+  M('W-headdiff', 'redundant', WT, 'SG25: snapshot discarded when HEAD names its issue_id although the file differs from HEAD (backed: issue_ids are unique per session and a committed proposal is never re-executed)',
+    "  if (tryGit(dir, ['diff', '--quiet', 'HEAD', '--', ...files]) == null) return null;\n", ''),
+  M('W-headid', 'redundant', WT, "SG25: snapshot discarded when HEAD is another issue's commit (backed by the diff-against-HEAD check)",
+    '  if (!m || m[1] !== issueId) return null;', '  if (!m) return null;'),
+  M('W-headtrailer', 'safety', WT, 'SG25: headCommitOf reads the first issue_id line (free-text reasoning) instead of the trailer',
+    '.filter(Boolean).pop();\n  if (!m', '.filter(Boolean)[0];\n  if (!m'),
+  M('R-committhrow', 'safety', RV, 'SG25: a committed() check that throws discards the snapshot (crashed edit left in the worktree)',
+    '    try { sha = committed ? committed(data) : null; } catch { sha = null; }', "    try { sha = committed ? committed(data) : null; } catch { sha = 'mutant'; }"),
+  M('O-committed', 'safety', OR, 'SG25: orchestrator passes no committed() check (crashed-after-commit snapshot restored over the commit)',
+    '    committed: (d) => worktree.headCommitOf(d.repo_root, d.meta && d.meta.issue_id, Object.keys(d.files))', '    committed: null')
 ];
+
+// AUDIT-19: tests seen failing on unmutated code under host load.
+const FLAKY = /mutant runs have their own budget|out of mutant budget|thousands of constant bindings|V8 coverage: a file the tests never load/;
 
 function copyRepo() {
   const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'audit11-mut-'));
@@ -338,14 +399,31 @@ function runTests(dir, tests) {
 
 function main() {
   const args = process.argv.slice(2);
+  if (args.includes('--check')) {
+    // AUDIT-19: pattern check only (each edit of each mutant matches exactly once).
+    let bad = 0;
+    for (const m of MUTANTS) for (const e of m.edits) {
+      const n = fs.readFileSync(path.join(ROOT, e.file), 'utf8').split(e.from).length - 1;
+      if (n !== 1) { bad++; console.log(`FINDING pattern ${m.id}: found ${n} times in ${e.file}`); }
+    }
+    console.log(bad ? `FINDING: ${bad} pattern(s) do not match exactly once` : `ok: ${MUTANTS.length} mutants, every pattern matches once`);
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   if (args.includes('--list')) { for (const m of MUTANTS) console.log(`${m.id.padEnd(14)} ${m.kind.padEnd(9)} ${m.why}`); return; }
   const list = args.length ? MUTANTS.filter(m => args.includes(m.id)) : MUTANTS;
   const dir = copyRepo();
   const tally = {};
   const survivors = [];
   try {
-    const base = runTests(dir, allTests(dir));
-    console.log(`baseline (unmutated copy): pass=${base.pass} fail=${base.fail}`);
+    // AUDIT-19: timing-bound tests (FLAKY) fail under host load; the baseline
+    // gets up to 3 tries and names what failed.
+    let base;
+    for (let i = 0; i < 3; i++) {
+      base = runTests(dir, allTests(dir));
+      console.log(`baseline (unmutated copy): pass=${base.pass} fail=${base.fail}${base.failed.length ? ` failed: ${base.failed.join(' | ')}` : ''}`);
+      if (!base.fail && base.status === 0) break;
+    }
     if (base.fail || base.status !== 0) { console.log('baseline is not green; aborting'); process.exitCode = 2; return; }
     for (const m of list) {
       const origs = new Map();
@@ -367,6 +445,12 @@ function main() {
         let r = sub.length ? runTests(dir, sub) : null;
         stage = `subset(${sub.length})`;
         if (!r || !(r.fail > 0 || r.status !== 0)) { r = runTests(dir, allTests(dir)); stage = 'full'; }
+        // AUDIT-19: a kill only by known timing-bound tests is re-checked once
+        // on the full suite (host load gives false kills there).
+        if ((r.fail > 0 || r.status !== 0) && r.failed.length && r.failed.every(n => FLAKY.test(n))) {
+          console.log(`         re-check: killed only by timing-bound test(s): ${r.failed.join(' | ')}`);
+          r = runTests(dir, allTests(dir)); stage += '+recheck';
+        }
         const dead = r.fail > 0 || r.status !== 0;
         verdict = dead ? 'killed' : 'SURVIVED';
         by = [...new Set(r.failed)].slice(0, 2);
