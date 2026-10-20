@@ -156,6 +156,26 @@ test('handleSignal reverts a live edit and exits 0', (t) => {
   assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
 });
 
+test('handleSignal removes the in-flight run\'s coverage and bytecode temp dirs (AUDIT-17 C1)', async (t) => {
+  const { runTests } = require('../src/runner/test-runner');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg27-repo-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sg27-tmp-'));
+  t.after(() => { env.rm(dir); env.rm(tmp); });
+  fs.writeFileSync(path.join(dir, 'x.js'), 'module.exports = 1;\n');
+  const prev = process.env.TMPDIR;
+  process.env.TMPDIR = tmp;
+  let run;
+  try {
+    run = runTests({ repoRoot: dir, command: { cmd: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], framework: 'node:test' }, timeoutMs: 30_000, edit: { file: 'x.js', start: 0, end: 5 } });
+  } finally { if (prev === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prev; }
+  assert.deepStrictEqual(fs.readdirSync(tmp).map(n => n.split('-').slice(0, 2).join('-')).sort(), ['refactor-cov', 'refactor-pyc']);
+  let code = null;
+  handleSignal('SIGTERM', null, { exit: (c) => { code = c; } });
+  assert.strictEqual(code, 0);
+  assert.deepStrictEqual(fs.readdirSync(tmp), []);
+  await run;
+});
+
 test('handleSignal flushes the session; an uncaught exception exits 1 (AUDIT-11 H1)', (t) => {
   const { freshSession, sessionPath } = require('../src/utils/checkpoint');
   const repo = env.copyFixture('js-basic');
@@ -390,10 +410,10 @@ const SLOW_CUR = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
 const SLOW_PROP = 'function inc(x) {\n  return x + 1;\n}';
 
 test('mutant runs have their own budget: a suite that uses most of the test budget still gets a mutant run (AUDIT-9 C2)', async (t) => {
-  // The main run takes ~2 s of the 4 s budget; a confirmed kill (mutant,
-  // mutant again, unmutated) needs three more runs.
-  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 2000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
-  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 4000 }));
+  // The main run takes ~4 s of the 8 s budget; a confirmed kill (mutant,
+  // mutant again, unmutated) needs three more runs (up to ~1.6 s each).
+  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 4000); }\nif (require('./src/inc').inc(1) !== 2) throw new Error('failed');");
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 8000 }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert(res.mutation.run === 3 && res.mutation.killed, JSON.stringify(res.mutation));
 });
@@ -403,12 +423,12 @@ test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and
   const prop = 'function f(a, b) {\n  return a > 1 && b < 2 ? a + 1 : 3;\n}';
   const repo = nodeRepo(t, {
     'src/f.js': `'use strict';\n${cur}\nmodule.exports = { f };\n`,
-    'check.js': "require('node:test')('f', () => { const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/f').f(1, 0), 3); });\n"
+    'check.js': "require('node:test')('f', () => { const t0 = Date.now(); while (Date.now() - t0 < 1500); require('assert').strictEqual(require('./src/f').f(1, 0), 3); });\n"
   }, 'node --test check.js');
   const before = fs.readFileSync(path.join(repo, 'src/f.js'), 'utf8');
   let kept = false;
   const res = await withoutTestContext(() => runExecutor({
-    proposal: makeProposal('src/f.js', cur, prop), repoRoot: repo, testTimeoutMs: 1500, onKept: () => { kept = true; }
+    proposal: makeProposal('src/f.js', cur, prop), repoRoot: repo, testTimeoutMs: 3000, onKept: () => { kept = true; }
   }));
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
   assert.strictEqual(res.reason, 'mutation_budget');

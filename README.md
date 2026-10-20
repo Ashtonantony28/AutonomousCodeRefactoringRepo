@@ -252,8 +252,9 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   test that passed unmutated and fails in both mutant runs, so the runner
   has to report per-test results: node:test (TAP through `NODE_OPTIONS`) or
   pytest (JUnit XML). Suites on other runners (Jest, Mocha, plain scripts,
-  `make`), and node:test suites that set their own `--test-reporter`, get no
-  kill and end `tests_insensitive`.
+  `make`), and node:test suites that set their own `--test-reporter` (also
+  through a delegated script: node refusing the added reporters is re-run
+  without them), get no kill and end `tests_insensitive`.
 - **Use-site perturbations are small value changes.** A read is perturbed
   by number + 1, string + `~`, last list/dict entry dropped, or a skipped
   call. Values with no such change (class instances, `Map`s, sets) never

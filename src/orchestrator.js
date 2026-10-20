@@ -18,7 +18,7 @@ const { runHybridValidator, unconfirmedBlock, juryVotes } = require('./validatio
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
 const { FileSnapshot, resolveEdit } = require('./runner/reverter');
-const { killActive } = require('./runner/test-runner');
+const { killActive, removeLiveDirs } = require('./runner/test-runner');
 const worktree = require('./runner/worktree');
 
 const { collectSample, isLabeled } = require('./rl/collector');
@@ -44,7 +44,7 @@ function logOk(msg)   { console.log(chalk.green('[orch] ')+ msg); }
 // state, exit. Exported so tests can drive it without delivering a signal.
 function handleSignal(signal, session, { exit = process.exit } = {}) {
   logWarn(`${signal} — reverting in-flight edit and flushing state`);
-  try { killActive(); } catch { /* */ }
+  try { killActive(); removeLiveDirs(); } catch { /* */ }
   try {
     const n = FileSnapshot.restoreLive();
     if (n) logWarn(`restored ${n} in-flight file(s)`);
