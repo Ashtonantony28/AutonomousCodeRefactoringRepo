@@ -87,6 +87,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG30 | Fail closed per inserted token, sham-mutant control | SG29 | thread worker | done |
 | SG31 | Literal-aware lines, operator and keyword sites, non-whitespace sham | SG30 | thread worker | done |
 | SG32 | Linear per-test parsing, charge parse time to the mutant budget | SG31 | thread worker (with SG31) | done |
+| SG33 | Caught load failures are not collection errors | SG32 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -283,6 +284,12 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
 
+### SG33 — Caught load failures are not collection errors (A24-H1, A24-L1–L3)
+
+Problem: the SG30 load hooks log module-body throws that a test catches on purpose (`assert.throws(() => require(...))`, `pytest.raises` around an import), so every failing mutant run is a `collection_error` and no edit on such a target can be kept (regression from `passed` at dd893e9).
+
+Acceptance: `node audit/24/caught-load-failure.js` ok (a–d); `node audit/20/load-detect.js` still ok (uncaught deep/wrapped load failures stay no-kill); SG26/SG30 load tests green; docs drift L1–L3 fixed (comments, editMutants shape, CLAUDE.md `tests_insensitive` causes); `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
+
 ### SG32 — Linear per-test parsing, charge parse time to the mutant budget (A22-C1)
 
 Problem: TAP/junit parsing (`test-runner.js`) and the kill intersection (`executor.js`) are quadratic in tests that share a name or fail together, and that time is not charged to the mutant budget: a 20,000-case same-name suite runs the mutant phase 274 s against 60 s.
@@ -406,3 +413,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-21 | audits r8 | AUDIT-22 | prior perf C/H fixed, bench within budget, no leaks; 1C/0H/6M/4L: quadratic per-test parsing and kill intersection uncharged to the mutant budget → SG32. |
 | 2026-10-21 | SG31 | green | `hunks.lexView` runs once per file and hunks take the tokens overlapping their lines (a line inside or closing a multi-line literal gets the literal's tokens); an insertion- or deletion-only run slides to its leftmost bracket-balanced place; both lexers always advance (progress guard), a Python quote right after a word opens a string. Operator and keyword sites: arithmetic / bitwise / shift / power / floor-division (and compound, `++`/`--`) swapped within arity, `??` → `||`, `!` / `~` / `not` / `await` dropped, `in` / `instanceof` / ternary test negated, Python `in` ↔ `not in`, `is` ↔ `is not`, `null` / `None` → `0`. Fail closed on every inserted token but brackets, commas, semicolons, colons, regex delimiters and whitespace (per-site span intersection; `=` / `const` / `let` / `var` on the token right after). Sham: spaces plus the site wrapped in as many non-space characters (parens; past 16 a comma-expression number), one combined control run, unparsable sham drops the mutant. Diff test always tries integer-width boundaries, prototype keys, a tab, a 5,000-character string, a 150-element Python list (operator mutants are killed by small-input tests, so range changes are stopped here). audit/21 subset 0/21 committed (1 reached the executor); token-sites, lex-hang ok; audit/20 1 (D09), audit/16 3 (N12 N15 N18), audit/13 6; audit/5, 8, 12 e2e 0; executor-benign 10/18 rejected (was 9). Mutants HK-litline, HK-pyquote, HK-slide, BI-unary, BI-pyin, BI-punct, BI-bound, BI-sham2, DT-bound, PH-bound killed; `--check` 163/163. npm test 486/486 ×2; bench ok; coverage validation 94.21 / runner 93.62 / rl 98.89 / orchestrator 94.25. |
 | 2026-10-21 | SG32 | green | TAP / JUnit duplicate ids numbered with a per-id counter (`adder`), kill intersection set-based, each mutant run charged its whole `runTests` wall time (parsing included). dup-budget 20000 ok (mutant phase 53.6 s, stall 498 ms); report-parse 5000/20000 + e2e 5000 ok (uncharged overhead 37 ms). Per-test kill unchanged (EX-pertest, EX-repro, TR-dup, TR-judup re-anchored and killed); EX-wall, TR-dupnext killed. 2 new tests fail on the old code. |
+| 2026-10-21 | audits r9 | AUDIT-24 | prior contract C/H fixed (A18-H1 ok); 0C/1H/8M(carried)/3L: load hooks count caught module-body throws as collection errors, so no kill is possible on such targets → SG33. |
