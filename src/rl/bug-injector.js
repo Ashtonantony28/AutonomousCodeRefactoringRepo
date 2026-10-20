@@ -191,14 +191,15 @@ function editLang(file) {
   return null;
 }
 
-// One mutant per operator match inside [lo, hi) -> { mutation, src, at } or null.
+// One mutant of an operator match -> { edits: [[at, deleted, inserted]],
+// lo, hi } ([lo, hi]: the part of the original the change falls in) or null.
 function mutateAt(src, code, op, m, lang) {
   const at = m.index;
   if (op.wrap) {
     const open = at + m[0].length - 1;
     const close = polyglot.matchBracket(code, open);
     if (close < 0) return null;
-    return src.slice(0, open + 1) + op.wrap[0] + src.slice(open + 1, close) + op.wrap[1] + src.slice(close);
+    return { edits: [[open + 1, 0, op.wrap[0]], [close, 0, op.wrap[1]]], lo: open + 1, hi: close };
   }
   if (op.pyCond) {
     const from = at + m[0].length;
@@ -211,15 +212,22 @@ function mutateAt(src, code, op, m, lang) {
       else if (depth <= 0 && (c === ':' || c === '\n')) break;
     }
     if (code[j] !== ':' || j === from) return null;
-    return src.slice(0, from) + 'not (' + src.slice(from, j).trimEnd() + ')' + src.slice(j);
+    return { edits: [[from, j - from, 'not (' + src.slice(from, j).trimEnd() + ')']], lo: from, hi: j };
   }
   if (op.string) {
     if (IMPORT_BEFORE.test(code.slice(Math.max(0, at - 24), at))) return null;
     const end = at + m[0].length;
     if (lang === 'python' && (code[at - 1] === m[1] || code[end] === m[1])) return null; // triple quote
-    return src.slice(0, end - 1) + 'x' + src.slice(end - 1);
+    return { edits: [[end - 1, 0, 'x']], lo: end - 1, hi: end - 1 };
   }
-  return src.slice(0, at) + op.to(m[0]) + src.slice(at + m[0].length);
+  return { edits: [[at, m[0].length, op.to(m[0])]], lo: at, hi: at + m[0].length };
+}
+
+// `text` (the original from offset `base`) with the edits applied.
+function applyEdits(text, edits, base = 0) {
+  let out = '', prev = 0;
+  for (const [at, del, ins] of edits) { out += text.slice(prev, at - base) + ins; prev = at - base + del; }
+  return out + text.slice(prev);
 }
 
 function parsesJs(src, file, baseErrors) {
@@ -228,10 +236,121 @@ function parsesJs(src, file, baseErrors) {
   return !!r.ast && r.errors.length <= baseErrors;
 }
 
-function parsesPython(srcs) {
-  const script = 'import ast, json, sys\nout = []\nfor s in json.load(sys.stdin):\n    try:\n        ast.parse(s)\n        out.append(True)\n    except Exception:\n        out.append(False)\nprint(json.dumps(out))';
-  const r = spawnSync('python3', ['-c', script], { input: JSON.stringify(srcs), encoding: 'utf8', timeout: 10_000 });
-  try { return JSON.parse(r.stdout); } catch { return srcs.map(() => false); }
+const CHUNK_TYPES = /(?:Statement|Declaration)$|^(?:ClassMethod|ClassPrivateMethod|ClassProperty|ClassPrivateProperty|ObjectMethod)$/;
+const AST_SKIP = new Set(['loc', 'extra', 'leadingComments', 'trailingComments', 'innerComments', 'errors', 'tokens', 'comments']);
+
+// JS parse check of a mutant ({ edits, lo, hi }): on the smallest statement or
+// class/object member (in a bare class/object) holding [lo, hi] that parses
+// cleanly on its own (with the file's strictness), else on the whole file. Mutations add no newline and no
+// context-dependent syntax, so a clean statement stays clean in place.
+function jsParseCheck(src, file) {
+  const { parseJs } = require('../validation/ast-checker');
+  const full = parseJs(src, file);
+  const base = full.errors.length;
+  const nodes = [];
+  if (full.ast) {
+    const stack = [[full.ast.program, null]];
+    while (stack.length) {
+      const [node, up] = stack.pop();
+      let here = up;
+      if (CHUNK_TYPES.test(node.type) && node !== full.ast.program) {
+        const wrap = /^Class/.test(node.type) ? ['class __M__ {\n', '\n}'] : node.type === 'ObjectMethod' ? ['({\n', '\n})'] : ['', ''];
+        here = { start: node.start, end: node.end, up, wrap };
+        nodes.push(here);
+      }
+      for (const k of Object.keys(node)) {
+        if (AST_SKIP.has(k)) continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c.type === 'string') stack.push([c, here]); } else if (v && typeof v.type === 'string') stack.push([v, here]);
+      }
+    }
+  }
+  nodes.sort((a, b) => a.start - b.start || b.end - a.end);
+  const starts = nodes.map(n => n.start);
+  const prog = full.ast && full.ast.program;
+  const opts = {
+    allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, allowSuperOutsideMethod: true, allowNewTargetOutsideFunction: true,
+    strictMode: !!prog && (prog.sourceType === 'module' || (prog.directives || []).some(d => d.value.value === 'use strict'))
+  };
+  const clean = new Map();
+  const ok = (n, text) => { const r = parseJs(n.wrap[0] + text + n.wrap[1], file, false, opts); return !!r.ast && !r.errors.length; };
+  return (mut) => {
+    let lo = 0, hi = starts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= mut.lo) lo = mid + 1; else hi = mid; }
+    let n = lo > 0 ? nodes[lo - 1] : null;
+    while (n && !(n.start <= mut.lo && mut.hi <= n.end)) n = n.up;
+    for (; n; n = n.up) {
+      if (!clean.has(n)) clean.set(n, ok(n, src.slice(n.start, n.end)));
+      if (clean.get(n)) return ok(n, applyEdits(src.slice(n.start, n.end), mut.edits, n.start));
+    }
+    return parsesJs(applyEdits(src, mut.edits), file, base);
+  };
+}
+
+// Python parse check of many mutants in one python3 run: each on the
+// smallest statement holding its changed lines that parses on its own (an
+// indented one under `if 1:`), else on the whole file. -> booleans, or null
+// when the check did not complete (timeout, no python3).
+const PY_CHECK = `import ast, bisect, json, sys
+req = json.load(sys.stdin)
+src = req['src']
+lines = src.split('\\n')
+need = sorted({m[0] for m in req['muts']})
+around = {}
+if '\\r' not in src.replace('\\r\\n', ''):
+    spans = []
+    try:
+        stack = list(ast.parse(src).body)
+    except Exception:
+        stack = []
+    while stack:
+        n = stack.pop()
+        spans.append((min([n.lineno] + [d.lineno for d in getattr(n, 'decorator_list', [])]), n.end_lineno))
+        for f in ('body', 'orelse', 'finalbody', 'handlers', 'cases'):
+            for c in getattr(n, f, None) or ():
+                stack.extend([c] if isinstance(c, ast.stmt) else getattr(c, 'body', []))
+    for a, b in sorted(spans, key=lambda s: s[1] - s[0]):
+        for k in range(bisect.bisect_left(need, a), bisect.bisect_right(need, b)):
+            around.setdefault(need[k], []).append((a, b))
+def parses(text):
+    try:
+        ast.parse(text)
+        return True
+    except Exception:
+        return False
+def wrap(ls):
+    return ('if 1:\\n' if ls[0][:1] in (' ', '\\t') else '') + '\\n'.join(ls)
+clean = {}
+out = []
+for l1, l2, text in req['muts']:
+    mut = text.split('\\n')
+    res = None
+    for a, b in around.get(l1, ()):
+        if b < l2:
+            continue
+        if (a, b) not in clean:
+            clean[(a, b)] = parses(wrap(lines[a - 1:b]))
+        if clean[(a, b)]:
+            res = parses(wrap(lines[a - 1:l1 - 1] + mut + lines[l2:b]))
+            break
+    if res is None:
+        res = parses('\\n'.join(lines[:l1 - 1] + mut + lines[l2:]))
+    out.append(res)
+print(json.dumps(out))
+`;
+
+function parsesPython(src, muts, lineOf, starts, timeoutMs = 10_000) {
+  const payload = muts.map((m) => {
+    const l1 = lineOf(m.lo), l2 = lineOf(m.hi);
+    let e = src.indexOf('\n', m.hi);
+    if (e < 0) e = src.length;
+    return [l1, l2, applyEdits(src.slice(starts[l1 - 1], e), m.edits, starts[l1 - 1])];
+  });
+  const r = spawnSync('python3', ['-I', '-c', PY_CHECK], { input: JSON.stringify({ src, muts: payload }), encoding: 'utf8', timeout: Math.max(1, timeoutMs), maxBuffer: 16 * 1024 * 1024 });
+  try {
+    const ok = JSON.parse(r.stdout);
+    return Array.isArray(ok) && ok.length === muts.length ? ok : null;
+  } catch { return null; }
 }
 
 const EDIT_MAX_HUNKS = 16;
@@ -244,11 +363,14 @@ const EDIT_MAX_SITES = 12;
 // edit) the hunks and their tokens come from a token diff, else [start, end)
 // is one hunk and one site. Unchanged tokens, even on an edited line, are
 // never mutated. Operators are taken round-robin, at most max * 4 candidates
-// per site, built and parsed lazily. An edit over EDIT_MAX_HUNKS hunks,
+// per site. An edit over EDIT_MAX_HUNKS hunks,
 // EDIT_MAX_CHARS changed characters or EDIT_MAX_SITES sites in one hunk (or
-// one too large to diff) gets no mutants and the result is marked `capped`.
+// one too large to diff) gets no mutants and the result is marked `capped`;
+// a Python parse check that did not finish within `timeoutMs` (default 10 s)
+// gives none either, marked `unchecked`. Each mutant is parse-checked on the
+// smallest statement around it (jsParseCheck / parsesPython), not the file.
 // -> [{ mutation, src, line, hunk, site }] (site: the token's offset in src)
-function editMutants(src, { start, end, file, max = MAX_MUTANTS, before }) {
+function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
   const hunks = typeof before === 'string' ? changeHunks(before, src, file) : [{ ranges: [[start, end]] }];
@@ -297,28 +419,24 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before }) {
     }
   }
   const build = (c) => {
-    const mutated = mutateAt(src, code, c.op, c.m, lang);
-    return mutated ? { mutation: c.op.name, src: mutated, line: lineOf(c.m.index), hunk: c.hunk, site: c.site } : null;
+    const mut = mutateAt(src, code, c.op, c.m, lang);
+    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
   const kept = new Map();
   const out = [];
-  const take = (c) => { kept.set(c.site, (kept.get(c.site) || 0) + 1); out.push(c); };
+  const take = ({ edits, lo, hi, ...c }) => { kept.set(c.site, (kept.get(c.site) || 0) + 1); out.push({ ...c, src: applyEdits(src, edits) }); };
   if (lang === 'python') {
-    // Two batches: the first `max` per site, then the rest for sites still short.
-    const first = [], rest = [], seen = new Map();
-    for (const c of candidates) { const k = seen.get(c.site) || 0; seen.set(c.site, k + 1); (k < max ? first : rest).push(c); }
-    for (const batch of [first, rest]) {
-      const built = batch.filter(c => (kept.get(c.site) || 0) < max).map(build).filter(Boolean);
-      const ok = built.length ? parsesPython(built.map(c => c.src)) : [];
-      built.forEach((c, i) => { if (ok[i] && (kept.get(c.site) || 0) < max) take(c); });
-    }
+    // One batch: every candidate, the first `max` that parse per site.
+    const built = candidates.map(build).filter(Boolean);
+    const ok = built.length ? parsesPython(src, built, lineOf, starts, timeoutMs) : [];
+    if (!ok) return Object.assign([], { unchecked: true });
+    built.forEach((c, i) => { if (ok[i] && (kept.get(c.site) || 0) < max) take(c); });
   } else {
-    const { parseJs } = require('../validation/ast-checker');
-    const base = parseJs(src, file).errors.length;
+    const parses = jsParseCheck(src, file);
     for (const c of candidates) {
       if ((kept.get(c.site) || 0) >= max) continue;
       const b = build(c);
-      if (b && parsesJs(b.src, file, base)) take(b);
+      if (b && parses(b)) take(b);
     }
   }
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);

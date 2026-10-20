@@ -825,6 +825,18 @@ test('large module state: a binding that differs mid-run is divergent even when 
   assert.strictEqual(same.verdict, 'equivalent', same.reason);
 });
 
+test('thousands of constant bindings: a later binding that differs mid-run is still divergent, unchanged ones cost nothing per call (AUDIT-14 H4)', () => {
+  // 5,000 constants before `flag`: the per-call digest used to stop after
+  // SMALL_TOTAL nodes, so `flag` was never looked at between calls.
+  const pre = `${Array.from({ length: 5000 }, (_, i) => `const K_${i} = ${i % 101};`).join('\n')}\nlet calls = 0;\nlet flag = 0;\nfunction setFlag(v) { flag = v; }`;
+  const opts = { pre, exp: 'module.exports = { pick, readFlag: () => flag };' };
+  const cur = 'function pick(i) {\n  calls++;\n  return K_1 + i;\n}';
+  const mid = edit(cur, 'function pick(i) {\n  calls++;\n  if (calls === 3) setFlag(1);\n  if (calls === 6) setFlag(0);\n  return K_1 + i;\n}', opts);
+  assert.strictEqual(mid.verdict, 'divergent', mid.reason);
+  const same = edit(cur, 'function pick(i) {\n  calls += 1;\n  const r = K_1 + i;\n  return r;\n}', opts);
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+});
+
 test('oracle: named array properties and state read through prototype methods of returned instances', () => {
   const named = edit("function put(o, k, v) {\n  k === '__proto__' && (k = '_proto');\n  o[k] = v;\n  return o;\n}", 'function put(o, k, v) {\n  o[k] = v;\n  return o;\n}');
   assert.strictEqual(named.verdict, 'divergent', named.reason);

@@ -28,6 +28,7 @@ too few value-returning runs are inconclusive. Floats compare with a 1e-9
 relative tolerance (sum() vs a loop).
 """
 import ast
+import bisect
 import builtins
 import copy
 import io
@@ -867,7 +868,7 @@ def side_main(code, filename, modname, raise_lines, plan, deadline, wfd, workdir
     rec = {'k': 'value'}
     try:
         with Timer(max(call_timeout, 1.0)):
-            exec(compile(code, filename, 'exec'), mod.__dict__)
+            exec(code if isinstance(code, types.CodeType) else compile(code, filename, 'exec'), mod.__dict__)
     except CallTimeout:
         rec = {'k': 'timeout'}
     except BaseException as e:
@@ -1055,39 +1056,72 @@ COND_EXPR = {ast.IfExp: ('body', 'orelse'), ast.Lambda: ('body',), ast.Assert: (
              ast.SetComp: ('elt',), ast.GeneratorExp: ('elt',), ast.DictComp: ('key', 'value'), ast.comprehension: ('ifs',)}
 
 
-def probe(src, ranges):
+def probe(src, ranges, tree=None):
     """Probe each deleted range where it is evaluated: a __dt_hit__(k) line
     before its innermost statement, or `(__dt_hit__(k), e)[1]` around the
-    conditionally evaluated expression holding it (COND_EXPR).
+    conditionally evaluated expression holding it (COND_EXPR). The caller
+    checks that the result compiles.
     -> (source, number of probes, every range probed)"""
     lines = src.splitlines(keepends=True)
     starts, at = [], 0
     for ln in lines:
         starts.append(at)
         at += len(ln)
-    tree = ast.parse(src)
+    tree = tree or ast.parse(src)
+    list_starts = {}
+
+    encoded = {}
 
     def off(lineno, col):
         ln = lines[lineno - 1] if lineno - 1 < len(lines) else ''
-        return starts[lineno - 1] + len(ln.encode('utf-8')[:col].decode('utf-8', 'ignore'))
+        if ln.isascii():
+            return starts[lineno - 1] + min(col, len(ln))
+        if lineno not in encoded:
+            encoded[lineno] = ln.encode('utf-8')
+        return starts[lineno - 1] + len(encoded[lineno][:col].decode('utf-8', 'ignore'))
+
+    spans, parts = {}, {}
 
     def span(n):
-        if getattr(n, 'lineno', None) is None or getattr(n, 'end_lineno', None) is None:
-            return None
-        return off(n.lineno, n.col_offset), off(n.end_lineno, n.end_col_offset)
+        key = id(n)
+        if key not in spans:
+            spans[key] = None if getattr(n, 'lineno', None) is None or getattr(n, 'end_lineno', None) is None \
+                else (off(n.lineno, n.col_offset), off(n.end_lineno, n.end_col_offset))
+        return spans[key]
 
     def holds(c, a, b):
         sp = span(c)
         if sp is None:  # no position (arguments, comprehension): any part holding it
-            return any(d is not c and span(d) and span(d)[0] <= a and b <= span(d)[1] for d in ast.walk(c))
+            key = id(c)
+            if key not in parts:
+                parts[key] = [span(d) for d in ast.walk(c) if d is not c and span(d)]
+            return any(x <= a and b <= y for x, y in parts[key])
         return sp[0] <= a and b <= sp[1]
+
+    def candidates(value, a):
+        # Siblings in a long list are disjoint and in source order: only the
+        # last one starting at or before a can hold [a, b).
+        if not isinstance(value, list):
+            return [(0, value)]
+        if len(value) < 16:
+            return list(enumerate(value))
+        key = id(value)
+        if key not in list_starts:
+            sp = [span(c) if isinstance(c, ast.AST) else None for c in value]
+            st = [x[0] for x in sp] if all(sp) else None
+            list_starts[key] = st if st and all(x <= y for x, y in zip(st, st[1:])) else None
+        starts_ = list_starts[key]
+        if starts_ is None:
+            return list(enumerate(value))
+        i = bisect.bisect_right(starts_, a) - 1
+        return [(i, value[i])] if i >= 0 else []
 
     def site(a, b):
         node, found = tree, None
         while node is not None:
             nxt = None
             for field, value in ast.iter_fields(node):
-                for i, c in enumerate(value if isinstance(value, list) else [value]):
+                for i, c in candidates(value, a):
                     if not isinstance(c, ast.AST) or not holds(c, a, b):
                         continue
                     if isinstance(c, ast.stmt) and isinstance(value, list):
@@ -1120,23 +1154,62 @@ def probe(src, ranges):
             a, b = span(n)
             edits.append((a, 0, a - b, f'(__dt_hit__({k}), '))
             edits.append((b, 1, a - b, ')[1]'))
-    # Right to left; at one offset openers before closers, inner first.
-    out = src
-    for at, _, _, text in sorted(edits, key=lambda e: (-e[0], e[1], -e[2] if e[1] == 0 else e[2])):
-        out = out[:at] + text + out[at:]
-    try:
-        compile(out, '<probe>', 'exec')
-    except SyntaxError:
-        return src, 0, False
-    return out, len(sites), True
+    # As if inserted right to left (at one offset openers before closers,
+    # inner first), in one pass.
+    order = sorted(edits, key=lambda e: (-e[0], e[1], -e[2] if e[1] == 0 else e[2]))
+    pieces, prev = [], 0
+    for at, _, _, text in reversed(order):
+        pieces += [src[prev:at], text]
+        prev = at
+    pieces.append(src[prev:])
+    return ''.join(pieces), len(sites), True
 
 
-def raise_lines(tree):
+def raise_lines(tree, src):
+    """Lines of every `raise` statement; only top-level statements whose
+    lines mention `raise` are walked."""
+    marked = [i + 1 for i, ln in enumerate(re.split(r'\r\n?|\n', src)) if 'raise' in ln]
     out = set()
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Raise):
-            out.update(range(n.lineno, (n.end_lineno or n.lineno) + 1))
+    for s in tree.body if marked else ():
+        lo = min([s.lineno] + [d.lineno for d in getattr(s, 'decorator_list', [])])
+        k = bisect.bisect_left(marked, lo)
+        if k == len(marked) or marked[k] > (s.end_lineno or s.lineno):
+            continue
+        for n in ast.walk(s):
+            if isinstance(n, ast.Raise):
+                out.update(range(n.lineno, (n.end_lineno or n.lineno) + 1))
     return out
+
+
+def edit_lines(a, b):
+    """1-based line spans of the text that differs between a and b, in each."""
+    n = min(len(a), len(b))
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    p = lo
+    lo, hi = 0, n - p
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[len(a) - mid:] == b[len(b) - mid:]:
+            lo = mid
+        else:
+            hi = mid - 1
+    nl = lambda s, i, j: s.count('\n', i, j) + s.count('\r', i, j) - s.count('\r\n', i, j)
+    out = []
+    for s in (a, b):
+        first = nl(s, 0, p) + 1
+        out.append((first - 1, first + nl(s, p, len(s) - lo) + 1))  # one line of slack each way (\r|\n split)
+    return out
+
+
+def touches(node, lo, hi):
+    first = min([node.lineno] + [d.lineno for d in getattr(node, 'decorator_list', [])])
+    return first <= hi and (node.end_lineno or node.lineno) >= lo
 
 
 def set_parents(tree):
@@ -1164,12 +1237,13 @@ def main(req):
     except SyntaxError as e:
         return {'verdict': 'divergent', 'runs': 0, 'reason': f'proposed does not parse: {e.msg} (line {e.lineno})',
                 'counterexample': {'phase': 'load', 'proposed': {'kind': 'throw', 'error': {'name': 'SyntaxError', 'message': e.msg}}}}
-    set_parents(cur_tree)
-    set_parents(prop_tree)
     cf, cv, co = layout(cur_tree)
     pf, pv, po = layout(prop_tree)
     caps = []
-    changed = [q for q in cf if q in pf and dump(cf[q][1]) != dump(pf[q][1])]
+    # A callable outside the lines that differ is the same text on both sides.
+    (c1, c2), (p1, p2) = edit_lines(cur_src, prop_src)
+    changed = [q for q in cf if q in pf and (touches(cf[q][1], c1, c2) or touches(pf[q][1], p1, p2))
+               and dump(cf[q][1]) != dump(pf[q][1])]
     removed = [q for q in cf if q not in pf and not q.split('.')[-1].startswith('_')]
     if removed:
         caps.append(f'callable(s) removed by the edit: {", ".join(removed)}')
@@ -1192,7 +1266,10 @@ def main(req):
         reason = '; '.join(['no callable function or constant located in the edit'] + caps)
         return {'verdict': 'inconclusive', 'runs': 0, 'reason': reason}
 
-    lits = literals([cur_tree, prop_tree] if len(cur_src) < 20000 else [cf[q][1] for q in changed] + [pf[q][1] for q in changed])
+    small = len(cur_src) < 20000
+    for node in [cur_tree, prop_tree] if small else [cf[q][2] or cf[q][1] for q in changed] + [pf[q][1] for q in changed]:
+        set_parents(node)
+    lits = literals([cur_tree, prop_tree] if small else [cf[q][1] for q in changed] + [pf[q][1] for q in changed])
     P = pools_from(lits)
     rng = random.Random(SEED)
     plan = []
@@ -1239,22 +1316,40 @@ def main(req):
                      'inputs': inputs, 'sched': sched, 'arity': len(signature(fn, kind in ('method', 'property', 'init', 'classmethod'))[0])})
     PLAN[:] = plan
 
-    probed, n_probes, probes_ok = cur_src, 0, True
+    probed, probed_tree, n_probes, probes_ok = cur_src, cur_tree, 0, True
     deleted = req.get('deleted') or []
     if deleted:
         try:
-            probed, n_probes, probes_ok = probe(cur_src, deleted)
+            out, n, ok = probe(cur_src, deleted, cur_tree)
+            if n:
+                probed, probed_tree, n_probes, probes_ok = out, ast.parse(out), n, ok
+            else:
+                probes_ok = ok
         except Exception:
-            probed, n_probes, probes_ok = cur_src, 0, False
-    probed_tree = ast.parse(probed)
+            probes_ok = False
 
     root = req.get('workdir') or os.getcwd()
     workdir = os.path.join(root, 'cwd')
     filename = os.path.join(workdir, req.get('basename') or 'module.py')
+
+    def compiled(tree, src):
+        # Compiled once here and inherited by the forked sides; a compile-time
+        # error is left for the side to report as a load failure.
+        try:
+            return compile(tree, filename, 'exec')
+        except Exception:
+            return src
+
+    cur_code = compiled(probed_tree, probed)
+    if n_probes and isinstance(cur_code, str):
+        probed, probed_tree, n_probes, probes_ok = cur_src, cur_tree, 0, False
+        cur_code = compiled(cur_tree, cur_src)
+    cur_raise = raise_lines(probed_tree, probed)
+    side_args = ((cur_code, cur_raise), (compiled(prop_tree, prop_src), raise_lines(prop_tree, prop_src)), (cur_code, cur_raise))
     sides = []
-    for i, (code, tree) in enumerate(((probed, probed_tree), (prop_src, prop_tree), (probed, probed_tree))):
+    for i, (code, rl) in enumerate(side_args):
         share = max(0.05, (budget - (time.monotonic() - t0)) / (3 - i))
-        sides.append(run_side(code, filename, modname, raise_lines(tree), plan, share, workdir, call_timeout, n_probes))
+        sides.append(run_side(code, filename, modname, rl, plan, share, workdir, call_timeout, n_probes))
     A, B, A2 = sides
     shutil.rmtree(workdir, ignore_errors=True)
 
@@ -1274,7 +1369,12 @@ def main(req):
     runs = 0
     if values:
         runs = 1
-    if la2 is None or not same(la, la2):
+    if la2 is None or la2['k'] == 'timeout':
+        inconclusive = True
+        notes.append('time budget reached before the second current run loaded the module' if la2 is None and (A2['killed'] or A2['budget'])
+                     else 'the second current run timed out loading the module' if la2 is not None
+                     else 'the second current run ended before loading the module')
+    elif not same(la, la2):
         inconclusive = True
         notes.append('module state after load is not deterministic')
     elif not same(la, lb):
@@ -1293,7 +1393,7 @@ def main(req):
         valued = set()
         for ri, idx in enumerate(sched):
             a, b, a2 = A['runs'].get((ti, ri)), B['runs'].get((ti, ri)), A2['runs'].get((ti, ri))
-            if a is None or b is None:
+            if a is None or b is None or a2 is None:
                 break
             n += 1
             runs += 1

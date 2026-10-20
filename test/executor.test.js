@@ -390,13 +390,12 @@ const SLOW_CUR = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
 const SLOW_PROP = 'function inc(x) {\n  return x + 1;\n}';
 
 test('mutant runs have their own budget: a suite that uses most of the test budget still gets a mutant run (AUDIT-9 C2)', async (t) => {
-  const repo = nodeRepo(t, {
-    'src/inc.js': `'use strict';\n${SLOW_CUR}\nmodule.exports = { inc };\n`,
-    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/inc').inc(1), 2);\n"
-  }, 'node check.js');
-  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 2500 }));
+  // The main run takes ~2 s of the 4 s budget; a confirmed kill (mutant,
+  // mutant again, unmutated) needs three more runs.
+  const repo = countingSuite(t, "if (n === 1) { const t0 = Date.now(); while (Date.now() - t0 < 2000); }\nif (require('./src/inc').inc(1) !== 2) process.exit(1);");
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 4000 }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
-  assert(res.mutation.run >= 1 && res.mutation.killed, JSON.stringify(res.mutation));
+  assert(res.mutation.run === 3 && res.mutation.killed, JSON.stringify(res.mutation));
 });
 
 test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and not a label (AUDIT-9 C2)', async (t) => {
@@ -442,11 +441,11 @@ test('a mutant run that times out is no kill: it is re-run once (AUDIT-9 H2)', a
 });
 
 test('a timed-out mutant whose re-run fails is killed', async (t) => {
-  const repo = countingSuite(t, 'if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }\nif (n > 2) process.exit(1);');
+  const repo = countingSuite(t, "if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }\nif (require('./src/inc').inc(1) !== 2) process.exit(1);");
   const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo }));
   assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
   assert.strictEqual(res.mutation.timeouts, 1);
-  assert.strictEqual(res.mutation.run, 2);
+  assert.strictEqual(res.mutation.run, 4, 'timeout, its failing re-run, the confirming run, the unmutated run');
 });
 
 test('a mutant whose re-run times out again is no kill (AUDIT-11 C5)', async (t) => {
@@ -458,6 +457,55 @@ test('a mutant whose re-run times out again is no kill (AUDIT-11 C5)', async (t)
   assert.strictEqual(res.mutation.killed, null);
   assert(res.mutation.run >= 2);
   assert.strictEqual(kept, false);
+});
+
+// ---------- SG24: a kill must reproduce ----------
+
+test('a mutant failure that does not reproduce is no kill: a suite failing on its first mutant run only (AUDIT-14 C1)', async (t) => {
+  const repo = countingSuite(t, 'if (n === 2) process.exit(1);');
+  let kept = false;
+  const before = fs.readFileSync(path.join(repo, 'src/inc.js'), 'utf8');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, onKept: () => { kept = true; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.killed, null);
+  assert.strictEqual(res.mutation.unconfirmed, 1);
+  assert(!isLabeled(res));
+  assertReverted(res, repo, 'src/inc.js', before, kept);
+});
+
+test('a suite that also fails unmutated gives no kill: every run after the main one fails (load spike, AUDIT-14 C1)', async (t) => {
+  const repo = countingSuite(t, 'if (n > 1) process.exit(1);');
+  let kept = false;
+  const before = fs.readFileSync(path.join(repo, 'src/inc.js'), 'utf8');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, onKept: () => { kept = true; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.killed, null);
+  assert.strictEqual(res.mutation.flaky, true);
+  assert.strictEqual(res.mutation.run, 3, 'mutant, mutant again, unmutated');
+  assertReverted(res, repo, 'src/inc.js', before, kept);
+});
+
+test('a parse check of the mutants that did not finish is mutation_budget, not tests_insensitive (AUDIT-14 H3)', async (t) => {
+  const injector = require('../src/rl/bug-injector');
+  const execPath = require.resolve('../src/agents/executor');
+  const [origEdit, origExec] = [injector.editMutants, require.cache[execPath]];
+  delete require.cache[execPath];
+  injector.editMutants = () => Object.assign([], { unchecked: true });
+  const fresh = require('../src/agents/executor');
+  injector.editMutants = origEdit;
+  require.cache[execPath] = origExec;
+  const repo = env.copyFixture('js-basic');
+  t.after(() => env.rm(repo));
+  const before = fs.readFileSync(path.join(repo, MATH), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => fresh.runExecutor({ proposal: makeProposal(MATH, ADD_CURRENT, ADD_PROPOSED), repoRoot: repo, onKept: () => { kept = true; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'mutation_budget');
+  assert.strictEqual(res.mutation.run, 0);
+  assert(!isLabeled(res));
+  assertReverted(res, repo, MATH, before, kept);
 });
 
 test('an exception while gathering mutation evidence reverts the edit (AUDIT-11 C5)', async (t) => {
@@ -680,5 +728,5 @@ test('a killed mutant counts only for the token it mutates: slice(0, 1000) kille
   const strong = await execOn(t, 'src/body.js', cur, prop, 'module.exports = { body };',
     "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body('x'.repeat(1001)).length, 1000); });");
   assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
-  assert.strictEqual(strong.res.mutation.run, 2, 'one kill per site');
+  assert.strictEqual(strong.res.mutation.run, 6, 'one confirmed kill (three runs) per site');
 });

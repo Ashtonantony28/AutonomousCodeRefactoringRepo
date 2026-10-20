@@ -16,7 +16,10 @@ const MUTANT_CAP = 3;
 // first one that makes it fail is that site's evidence, and it counts for
 // that site only (a kill of `0 -> 1` in `slice(0, 1000)` says nothing about
 // `1000`). A hunk with inserted tokens but no site has no evidence. A mutant
-// run that times out is re-run once and counts only if that run fails.
+// run that times out is re-run once and counts only if that run fails. A
+// failure is a kill only when it reproduces: the same mutant fails again and
+// the unmutated suite then passes (a mutant that passes on the second run is
+// no kill; an unmutated failure means the suite is flaky and nothing counts).
 // Deleted tokens (of every hunk) have nothing to mutate: they stand when the
 // diff test is `equivalent` and executed each of them, or, for a stretch
 // that replaces them with at least as many inserted tokens holding a site,
@@ -34,10 +37,12 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   let suiteMs = Math.max(1, usedMs);
   let spent = 0;
   const hunks = changeHunks(before, edited, file);
-  const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP, before });
+  const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP, before, timeoutMs: Math.min(10_000, budgetMs) });
+  spent = Date.now() - t0;
   const out = { hunks: hunks.length, mutants: mutants.length, run: 0, killed: null, ok: false };
   const done = () => { out.duration_ms = Date.now() - t0; out.suite_ms = suiteMs; return out; };
   if (mutants.capped) { out.budget_exhausted = true; out.edit_too_large = true; return done(); }
+  if (mutants.unchecked) { out.budget_exhausted = true; out.parse_check_failed = true; return done(); }
   const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));
   if (!hunks.length || bare >= 0) {
     if (bare >= 0) out.unmutated_hunk_line = hunks[bare].line;
@@ -52,7 +57,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   }
   const sites = [...new Set(mutants.map(m => m.site))];
   out.sites = sites.length;
-  const runMutant = async () => {
+  const runOnce = async () => {
     const left = budgetMs - spent;
     if (out.run && left < suiteMs + 500) return null;
     const r = await runTests({ repoRoot, timeoutMs: Math.min(left, 2 * suiteMs + 1000) });
@@ -60,18 +65,30 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
     out.run++;
     return r;
   };
+  // A timed-out run is re-run once. -> the run, or null when out of budget.
+  const runSuite = async (content) => {
+    fs.writeFileSync(abs, content);
+    let r = await runOnce();
+    if (r && r.status === 'timeout') {
+      out.timeouts = (out.timeouts || 0) + 1;
+      r = await runOnce();
+    }
+    if (r && r.status === 'passed') suiteMs = Math.max(1, r.execution_time_ms);
+    return r;
+  };
   try {
     for (const site of sites) {
       let killed = false;
       for (const m of mutants.filter(x => x.site === site)) {
-        fs.writeFileSync(abs, m.src);
-        let r = await runMutant();
-        if (r && r.status === 'timeout') {
-          out.timeouts = (out.timeouts || 0) + 1;
-          r = await runMutant();
+        let r = await runSuite(m.src);
+        if (r && r.status === 'failed') {
+          r = await runSuite(m.src);
+          if (r && r.status !== 'failed') { out.unconfirmed = (out.unconfirmed || 0) + 1; continue; }
+          const control = r && await runSuite(edited);
+          if (control && control.status !== 'passed') { out.flaky = true; return done(); }
+          r = control && r;
         }
         if (!r) { out.budget_exhausted = true; return done(); }
-        if (r.status === 'passed') suiteMs = Math.max(1, r.execution_time_ms);
         if (r.status === 'failed') {
           out.killed = m.mutation;
           out.killed_line = m.line;
