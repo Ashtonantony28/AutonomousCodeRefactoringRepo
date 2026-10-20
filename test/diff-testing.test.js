@@ -734,9 +734,11 @@ test('deletions: the result says whether the deleted code ran', () => {
   assert.strictEqual(dead.verdict, 'equivalent', dead.reason);
   assert.strictEqual(dead.deletions_observed, false);
   const arrow = edit('const inc = (x) => (0, x + 1);', 'const inc = (x) => (x + 1);', { exp: 'module.exports = { inc };' });
-  assert.strictEqual(arrow.deletions_observed, false, 'a deletion inside an expression body cannot be probed');
-  const noDeletion = edit('function f(x) {\n  return x + 1;\n}', 'function f(x) {\n  return 1 + x;\n}');
-  assert(!('deletions_observed' in noDeletion));
+  assert.strictEqual(arrow.deletions_observed, true, 'a deletion inside an expression body is probed in the body');
+  const reorder = edit('function f(x) {\n  return x * 2;\n}', 'function f(x) {\n  return 2 * x;\n}');
+  assert.strictEqual(reorder.deletions_observed, true, 'tokens deleted in a hunk that also inserts are probed too');
+  const insertOnly = edit('function f(x) {\n  return x;\n}', 'function f(x) {\n  return x + 0;\n}');
+  assert(!('deletions_observed' in insertOnly));
 });
 
 // ---------- SG20: bounded inputs, preparation inside the hard kill, deferred state ----------
@@ -786,4 +788,49 @@ test('large module state is compared once per target: equivalent edits stay equi
   assert.strictEqual(writes.verdict, 'divergent', writes.reason);
   const big = run({ currentSrc: cur, proposedSrc: fn('if (x === 1) table[18999] = 0;\n  return x * 2;'), fileSrc: cur });
   assert.strictEqual(big.verdict, 'divergent', big.reason);
+});
+
+// ---------- SG22: deletions observed where they are evaluated; mid-run state ----------
+
+test('a deletion is observed only if the deleted part itself ran: braceless branch, && operand, ternary branch (AUDIT-12 C1)', () => {
+  const braceless = edit("function scale(n) {\n  if (typeof n === 'bigint') return n * 1000n;\n  return n * 1000;\n}", 'function scale(n) {\n  return n * 1000;\n}');
+  assert.strictEqual(braceless.verdict, 'equivalent', braceless.reason);
+  assert.strictEqual(braceless.deletions_observed, false, 'the if ran, its BigInt branch never did');
+  const operand = edit("function norm(n) {\n  typeof n === 'bigint' && (n = Number(n));\n  return n;\n}", 'function norm(n) {\n  return n;\n}');
+  assert.strictEqual(operand.verdict, 'equivalent', operand.reason);
+  assert.strictEqual(operand.deletions_observed, false, 'the right side of && never ran');
+  const ternary = edit("function fmt(n) {\n  return typeof n === 'bigint' ? n.toString() + 'n' : String(n);\n}", 'function fmt(n) {\n  return String(n);\n}');
+  assert.strictEqual(ternary.verdict, 'equivalent', ternary.reason);
+  assert.strictEqual(ternary.deletions_observed, false, 'the BigInt branch of the ternary never ran');
+  const reached = edit('function twice(x) {\n  if (x === 0) return x * 2;\n  return x * 2;\n}', 'function twice(x) {\n  return x * 2;\n}');
+  assert.strictEqual(reached.verdict, 'equivalent', reached.reason);
+  assert.strictEqual(reached.deletions_observed, true, 'a braceless branch the inputs reach is observed');
+});
+
+test('deleted tokens in a hunk that also inserts are probed (AUDIT-12 C2)', () => {
+  const r = edit("function scale(n) {\n  if (typeof n === 'bigint') {\n    return n * 1000n;\n  }\n  return n * 1000;\n}", 'function scale(n) {\n  return 1000 * n;\n}');
+  assert.strictEqual(r.verdict, 'equivalent', r.reason);
+  assert.strictEqual(r.deletions_observed, false);
+});
+
+test('large module state: a binding that differs mid-run is divergent even when it agrees after the last call (AUDIT-12 H4)', () => {
+  const lastSeen = edit('function lookup(i) {\n  lastSeen = i;\n  return TABLE[i];\n}', 'function lookup(i) {\n  if (i) lastSeen = i;\n  return TABLE[i];\n}',
+    { pre: 'const TABLE = Array.from({ length: 3000 }, (_, i) => i * 2);\nlet lastSeen = null;', exp: 'module.exports = { lookup, seen: () => lastSeen };' });
+  assert.strictEqual(lastSeen.verdict, 'divergent', lastSeen.reason);
+  const toggle = edit('function toggle(i) {\n  flags.debug = !flags.debug;\n  return NAMES[i];\n}', 'function toggle(i) {\n  flags.debug = true;\n  return NAMES[i];\n}',
+    { pre: 'const NAMES = Array.from({ length: 3000 }, (_, i) => `n${i}`);\nconst flags = { debug: false };', exp: 'module.exports = { toggle, flags };' });
+  assert.strictEqual(toggle.verdict, 'divergent', toggle.reason);
+  const same = edit('function lookup(i) {\n  lastSeen = i;\n  return TABLE[i];\n}', 'function lookup(i) {\n  lastSeen = i;\n  const v = TABLE[i];\n  return v;\n}',
+    { pre: 'const TABLE = Array.from({ length: 3000 }, (_, i) => i * 2);\nlet lastSeen = null;', exp: 'module.exports = { lookup, seen: () => lastSeen };' });
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+});
+
+test('oracle: named array properties and state read through prototype methods of returned instances', () => {
+  const named = edit("function put(o, k, v) {\n  k === '__proto__' && (k = '_proto');\n  o[k] = v;\n  return o;\n}", 'function put(o, k, v) {\n  o[k] = v;\n  return o;\n}');
+  assert.strictEqual(named.verdict, 'divergent', named.reason);
+  const cls = (body) => `class Pool {\n  #max;\n  constructor(max) {\n    ${body}\n  }\n  capacity() {\n    return this.#max;\n  }\n}`;
+  const priv = edit(cls('this.#max = Math.max(1, max);'), cls('this.#max = max;'), { exp: 'module.exports = { Pool };' });
+  assert.strictEqual(priv.verdict, 'divergent', priv.reason);
+  const same = edit(cls('this.#max = Math.max(1, max);'), cls('this.#max = Math.max(max, 1);'), { exp: 'module.exports = { Pool };' });
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
 });

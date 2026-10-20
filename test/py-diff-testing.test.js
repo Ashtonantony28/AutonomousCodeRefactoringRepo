@@ -158,3 +158,28 @@ test('benign Python refactors are equivalent (AUDIT-8 NP*)', () => {
   ];
   for (const [cur, prop] of cases) assert.strictEqual(run(cur, prop).verdict, 'equivalent', prop);
 });
+
+// ---------- SG22 ----------
+
+test('a deletion is observed only if the deleted expression ran: if-expression branch, and/or operand (AUDIT-12 C1)', () => {
+  const ifexp = run('def note(s):\n    s = s[:3000] if len(s) > 3000 else s\n    return s.strip()\n', 'def note(s):\n    return s.strip()\n');
+  assert.strictEqual(ifexp.verdict, 'equivalent', ifexp.reason);
+  assert.strictEqual(ifexp.deletions_observed, false, 'the assignment ran, the slice branch never did');
+  const operand = run('def norm(n):\n    n = isinstance(n, complex) and abs(n) or n\n    return n\n', 'def norm(n):\n    return n\n');
+  assert.strictEqual(operand.verdict, 'equivalent', operand.reason);
+  assert.strictEqual(operand.deletions_observed, false, 'abs(n) never ran');
+  const mixed = run('def twice(x):\n    y = x * 2\n    return y\n', 'def twice(x):\n    return x * 2\n');
+  assert.strictEqual(mixed.verdict, 'equivalent', mixed.reason);
+  assert.strictEqual(mixed.deletions_observed, true, 'deleted tokens of a hunk that also inserts are probed and ran');
+  const branch = run('def sign(n):\n    return -1 if n < 0 else 1\n', 'def sign(n):\n    if n < 0:\n        return -1\n    return 1\n');
+  assert.strictEqual(branch.verdict, 'equivalent', branch.reason);
+  assert.strictEqual(branch.deletions_observed, true, 'both branches of the deleted if-expression ran');
+});
+
+test('log records below WARNING and warnings are output (AUDIT-12 H1, Y7)', () => {
+  const pre = 'import logging\nlog = logging.getLogger(__name__)\n\n\n';
+  const r = run('def charge(user, amt):\n    log.info("charge %s %s", user, amt)\n    return amt\n', 'def charge(user, amt):\n    return amt\n', { pre });
+  assert.strictEqual(r.verdict, 'divergent', r.reason);
+  const same = run('def charge(user, amt):\n    log.debug("charge %s", user)\n    return amt\n', 'def charge(user, amt):\n    log.debug("charge %s", user)\n    total = amt\n    return total\n', { pre });
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+});

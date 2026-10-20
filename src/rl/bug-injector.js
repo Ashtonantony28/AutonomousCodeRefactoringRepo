@@ -236,16 +236,18 @@ function parsesPython(srcs) {
 
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
+const EDIT_MAX_SITES = 12;
 
-// Up to `max` parse-valid mutants per change hunk of `src` (the edited
-// file), each of a token the edit inserted or changed: with `before` (the
-// file before the edit) the hunks come from a token diff, else [start, end)
-// is one hunk. Unchanged tokens, even on an edited line, are never mutated.
-// Operators are taken round-robin, at most max * 4 candidates per hunk, built
-// and parsed lazily. An edit over EDIT_MAX_HUNKS hunks or EDIT_MAX_CHARS
-// changed characters (or one too large to diff) gets no mutants and the
-// result is marked `capped`.
-// -> [{ mutation, src, line, hunk }]
+// Up to `max` parse-valid mutants per site of `src` (the edited file): a
+// site is one token the edit inserted or changed, and a mutant belongs to
+// the site its operator match starts in. With `before` (the file before the
+// edit) the hunks and their tokens come from a token diff, else [start, end)
+// is one hunk and one site. Unchanged tokens, even on an edited line, are
+// never mutated. Operators are taken round-robin, at most max * 4 candidates
+// per site, built and parsed lazily. An edit over EDIT_MAX_HUNKS hunks,
+// EDIT_MAX_CHARS changed characters or EDIT_MAX_SITES sites in one hunk (or
+// one too large to diff) gets no mutants and the result is marked `capped`.
+// -> [{ mutation, src, line, hunk, site }] (site: the token's offset in src)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -261,58 +263,65 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before }) {
     return lo + 1;
   };
   const candidates = [];
-  hunks.forEach((h, hi) => {
-    if (!h.ranges.length) return;
+  for (let hi = 0; hi < hunks.length; hi++) {
+    const h = hunks[hi];
+    if (!h.ranges.length) continue;
     const lo = src.lastIndexOf('\n', Math.max(0, h.ranges[0][0] - 1)) + 1;
     const last = h.ranges[h.ranges.length - 1][1];
     let stop = src.indexOf('\n', Math.max(lo, last - 1));
     if (stop < 0) stop = src.length;
-    const perOp = EDIT_OPS[lang].map((op) => {
-      const out = [];
+    // Per site (the inserted token a match starts in), per operator: up to max matches.
+    const sites = new Map();
+    EDIT_OPS[lang].forEach((op, oi) => {
       const re = new RegExp(op.re.source, op.re.flags);
       re.lastIndex = lo;
       let m, r = 0;
-      while (out.length < max * 4 && (m = re.exec(code)) && m.index < stop) {
+      while ((m = re.exec(code)) && m.index < stop) {
         if (m.index < lo) continue;
         const a = m.index, b = m.index + Math.max(1, m[0].length);
         while (r < h.ranges.length && h.ranges[r][1] <= a) r++;
         if (r >= h.ranges.length) break;
         if (!(a < h.ranges[r][1] && b > h.ranges[r][0])) continue;
         if (op.to && op.to(m[0]) === m[0]) continue;
-        out.push({ op, m, hunk: hi });
+        const site = h.ranges[r][0];
+        if (!sites.has(site)) sites.set(site, EDIT_OPS[lang].map(() => []));
+        const l = sites.get(site)[oi];
+        if (l.length < max) l.push({ op, m, hunk: hi, site });
       }
-      return out;
     });
-    const order = [];
-    for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
-    candidates.push(...order.slice(0, max * 4));
-  });
+    if (sites.size > EDIT_MAX_SITES) return Object.assign([], { capped: true });
+    for (const perOp of sites.values()) {
+      const order = [];
+      for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
+      candidates.push(...order.slice(0, max * 4));
+    }
+  }
   const build = (c) => {
     const mutated = mutateAt(src, code, c.op, c.m, lang);
-    return mutated ? { mutation: c.op.name, src: mutated, line: lineOf(c.m.index), hunk: c.hunk } : null;
+    return mutated ? { mutation: c.op.name, src: mutated, line: lineOf(c.m.index), hunk: c.hunk, site: c.site } : null;
   };
   const kept = new Map();
   const out = [];
-  const take = (c) => { kept.set(c.hunk, (kept.get(c.hunk) || 0) + 1); out.push(c); };
+  const take = (c) => { kept.set(c.site, (kept.get(c.site) || 0) + 1); out.push(c); };
   if (lang === 'python') {
-    // Two batches: the first `max` per hunk, then the rest for hunks still short.
+    // Two batches: the first `max` per site, then the rest for sites still short.
     const first = [], rest = [], seen = new Map();
-    for (const c of candidates) { const k = seen.get(c.hunk) || 0; seen.set(c.hunk, k + 1); (k < max ? first : rest).push(c); }
+    for (const c of candidates) { const k = seen.get(c.site) || 0; seen.set(c.site, k + 1); (k < max ? first : rest).push(c); }
     for (const batch of [first, rest]) {
-      const built = batch.filter(c => (kept.get(c.hunk) || 0) < max).map(build).filter(Boolean);
+      const built = batch.filter(c => (kept.get(c.site) || 0) < max).map(build).filter(Boolean);
       const ok = built.length ? parsesPython(built.map(c => c.src)) : [];
-      built.forEach((c, i) => { if (ok[i] && (kept.get(c.hunk) || 0) < max) take(c); });
+      built.forEach((c, i) => { if (ok[i] && (kept.get(c.site) || 0) < max) take(c); });
     }
   } else {
     const { parseJs } = require('../validation/ast-checker');
     const base = parseJs(src, file).errors.length;
     for (const c of candidates) {
-      if ((kept.get(c.hunk) || 0) >= max) continue;
+      if ((kept.get(c.site) || 0) >= max) continue;
       const b = build(c);
       if (b && parsesJs(b.src, file, base)) take(b);
     }
   }
-  return out.sort((x, y) => x.hunk - y.hunk);
+  return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 
-module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, changeHunks, MUTATIONS, MAX_MUTANTS, EDIT_MAX_HUNKS, EDIT_MAX_CHARS };
+module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, changeHunks, MUTATIONS, MAX_MUTANTS, EDIT_MAX_HUNKS, EDIT_MAX_CHARS, EDIT_MAX_SITES };

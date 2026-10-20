@@ -14,7 +14,11 @@ const { FileSnapshot } = require('../src/runner/reverter');
 const { inflightPath } = require('../src/utils/checkpoint');
 const { assertTestOutcome } = require('../src/contracts');
 const { installStub, resetClient } = require('./helpers/stub-client');
-const { makeProposal } = require('./helpers/factories');
+const factories = require('./helpers/factories');
+// Proposals reach the executor only through the gate, which needs an
+// `equivalent` diff test; this one also ran every deleted token.
+const GATE_DIFF_TEST = { applicable: true, verdict: 'equivalent', runs: 12, deletions_observed: true, duration_ms: 1 };
+const makeProposal = (...a) => ({ ...factories.makeProposal(...a), diff_test: { ...GATE_DIFF_TEST } });
 const { git, gitInit, treeHash } = require('./helpers/git');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -387,7 +391,7 @@ test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and
   const prop = 'function f(a, b) {\n  return a > 1 && b < 2 ? a + 1 : 3;\n}';
   const repo = nodeRepo(t, {
     'src/f.js': `'use strict';\n${cur}\nmodule.exports = { f };\n`,
-    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('./src/f').f(0, 0);\n"
+    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/f').f(1, 0), 3);\n"
   }, 'node check.js');
   const before = fs.readFileSync(path.join(repo, 'src/f.js'), 'utf8');
   let kept = false;
@@ -598,4 +602,39 @@ test('every change hunk needs its own killed mutant', async (t) => {
   assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
   assert.strictEqual(strong.res.mutation.ok, true);
   assert(strong.res.mutation.run >= 2);
+});
+
+// ---------- SG22: deleted tokens of every hunk; a kill counts for its own site ----------
+
+test('deleted tokens in a hunk that also inserts need observation: a kill of the inserted token does not keep them (AUDIT-12 C2)', async (t) => {
+  const cur = "function scale(n) {\n  if (typeof n === 'bigint') {\n    return n * 1000n;\n  }\n  return n * 1000;\n}";
+  const prop = 'function scale(n) {\n  return 1000 * n;\n}';
+  const body = "const m = require('../src/scale');\ntest('scale', () => { assert.strictEqual(m.scale(2), 2000); });";
+  const { res, repo, before, kept } = await execOn(t, 'src/scale.js', cur, prop, 'module.exports = { scale };', body);
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.unobserved_deletion_line, 3);
+  assert.strictEqual(res.mutation.run, 0);
+  assertReverted(res, repo, 'src/scale.js', before, kept);
+  // A token replaced one for one (`>` -> `>=`) is covered by the kill of its replacement.
+  const sub = await execOn(t, 'src/lim.js', 'function lim(x) {\n  return x > 9 ? 1 : 0;\n}', 'function lim(x) {\n  return x >= 10 ? 1 : 0;\n}', 'module.exports = { lim };',
+    "const m = require('../src/lim');\ntest('lim', () => { assert.strictEqual(m.lim(10), 1); assert.strictEqual(m.lim(9), 0); });",
+    { applicable: true, verdict: 'equivalent', runs: 12, deletions_observed: false, duration_ms: 1 });
+  assert.strictEqual(sub.res.status, 'passed', JSON.stringify(sub.res.mutation));
+});
+
+test('a killed mutant counts only for the token it mutates: slice(0, 1000) killed via 0 -> 1 keeps nothing (AUDIT-12 H3, DM3)', async (t) => {
+  const cur = 'function body(s) {\n  return String(s);\n}';
+  const prop = 'function body(s) {\n  return String(s).slice(0, 1000);\n}';
+  const weak = await execOn(t, 'src/body.js', cur, prop, 'module.exports = { body };',
+    "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); });");
+  assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
+  assert.strictEqual(weak.res.reason, 'tests_insensitive');
+  assert.strictEqual(weak.res.mutation.sites, 2);
+  assert.strictEqual(weak.res.mutation.surviving_site_line, 3, 'the 1000 site survives');
+  assertReverted(weak.res, weak.repo, 'src/body.js', weak.before, weak.kept);
+  const strong = await execOn(t, 'src/body.js', cur, prop, 'module.exports = { body };',
+    "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body('x'.repeat(1001)).length, 1000); });");
+  assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
+  assert.strictEqual(strong.res.mutation.run, 2, 'one kill per site');
 });

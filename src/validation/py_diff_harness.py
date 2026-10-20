@@ -12,7 +12,8 @@ comparisons, calls, defaults) from literals mined from both versions and
 boundary values derived from them. Each side runs in its own forked child:
 fresh empty cwd, address-space / CPU / file-size limits, an audit hook that
 refuses network, processes, ctypes and writes outside the cwd, captured
-stdout/stderr, recording stubs for non-stdlib imports and a per-call timer.
+stdout/stderr (log records of every level and every warning included),
+recording stubs for non-stdlib imports and a per-call timer.
 The current version runs twice so nondeterminism is not taken for a change.
 
 Each call records the return value (or exception type, plus its arguments
@@ -832,6 +833,11 @@ def side_main(code, filename, modname, raise_lines, plan, deadline, wfd, workdir
     out = Capture()
     sys.stdout = sys.stderr = out
     sys.stdin = io.StringIO('')
+    # Log records of every level and every warning are output too.
+    import logging
+    import warnings
+    logging.basicConfig(stream=out, level=logging.DEBUG, format='%(levelname)s:%(name)s:%(message)s', force=True)
+    warnings.simplefilter('always')
     random.seed(SEED)
     sys.addaudithook(audit_hook(workdir))
 
@@ -1043,8 +1049,16 @@ def show(v):
 
 # --- main ---------------------------------------------------------------------
 
+# Children evaluated only sometimes when their parent is (plus the operands
+# after the first of and/or).
+COND_EXPR = {ast.IfExp: ('body', 'orelse'), ast.Lambda: ('body',), ast.Assert: ('msg',), ast.ListComp: ('elt',),
+             ast.SetComp: ('elt',), ast.GeneratorExp: ('elt',), ast.DictComp: ('key', 'value'), ast.comprehension: ('ifs',)}
+
+
 def probe(src, ranges):
-    """Insert __dt_hit__(k) before the statement holding each deleted range.
+    """Probe each deleted range where it is evaluated: a __dt_hit__(k) line
+    before its innermost statement, or `(__dt_hit__(k), e)[1]` around the
+    conditionally evaluated expression holding it (COND_EXPR).
     -> (source, number of probes, every range probed)"""
     lines = src.splitlines(keepends=True)
     starts, at = [], 0
@@ -1057,32 +1071,64 @@ def probe(src, ranges):
         ln = lines[lineno - 1] if lineno - 1 < len(lines) else ''
         return starts[lineno - 1] + len(ln.encode('utf-8')[:col].decode('utf-8', 'ignore'))
 
-    stmts = [(off(s.lineno, s.col_offset), off(s.end_lineno, s.end_col_offset), s) for s in ast.walk(tree) if isinstance(s, ast.stmt)]
-    chosen, ok = {}, True
+    def span(n):
+        if getattr(n, 'lineno', None) is None or getattr(n, 'end_lineno', None) is None:
+            return None
+        return off(n.lineno, n.col_offset), off(n.end_lineno, n.end_col_offset)
+
+    def holds(c, a, b):
+        sp = span(c)
+        if sp is None:  # no position (arguments, comprehension): any part holding it
+            return any(d is not c and span(d) and span(d)[0] <= a and b <= span(d)[1] for d in ast.walk(c))
+        return sp[0] <= a and b <= sp[1]
+
+    def site(a, b):
+        node, found = tree, None
+        while node is not None:
+            nxt = None
+            for field, value in ast.iter_fields(node):
+                for i, c in enumerate(value if isinstance(value, list) else [value]):
+                    if not isinstance(c, ast.AST) or not holds(c, a, b):
+                        continue
+                    if isinstance(c, ast.stmt) and isinstance(value, list):
+                        found = ('stmt', c)
+                    elif (isinstance(node, ast.BoolOp) and i > 0) or field in COND_EXPR.get(type(node), ()):
+                        found = ('expr', c)
+                    nxt = c
+                    break
+                if nxt is not None:
+                    break
+            node = nxt
+        return found
+
+    sites = {}
     for a, b in ranges:
-        inner = [x for x in stmts if x[0] <= a and b <= x[1]]
-        if not inner:
-            ok = False
-            continue
-        s = min(inner, key=lambda x: x[1] - x[0])[2]
-        chosen[s.lineno] = s
-    out = list(lines)
-    k = 0
-    for lineno in sorted(chosen, reverse=True):
-        text = out[lineno - 1]
-        indent = text[:len(text) - len(text.lstrip())]
-        if text[:len(indent)] != indent or chosen[lineno].col_offset != len(indent.encode()):
-            ok = False
-            continue
-        trial = out[:lineno - 1] + [f'{indent}__dt_hit__({k})\n'] + out[lineno - 1:]
-        try:
-            compile(''.join(trial), '<probe>', 'exec')
-        except SyntaxError:
-            ok = False
-            continue
-        out = trial
-        k += 1
-    return ''.join(out), k, ok
+        s = site(a, b)
+        if s is None:
+            return src, 0, False
+        sites[id(s[1])] = s
+    edits = []
+    for k, (kind, n) in enumerate(sites.values()):
+        if kind == 'stmt':
+            first = min([n] + list(getattr(n, 'decorator_list', [])), key=lambda d: (d.lineno, d.col_offset))
+            text = lines[first.lineno - 1]
+            indent = text[:len(text) - len(text.lstrip())]
+            if first.col_offset != len(indent.encode()):
+                return src, 0, False
+            edits.append((starts[first.lineno - 1], 0, 0, f'{indent}__dt_hit__({k})\n'))
+        else:
+            a, b = span(n)
+            edits.append((a, 0, a - b, f'(__dt_hit__({k}), '))
+            edits.append((b, 1, a - b, ')[1]'))
+    # Right to left; at one offset openers before closers, inner first.
+    out = src
+    for at, _, _, text in sorted(edits, key=lambda e: (-e[0], e[1], -e[2] if e[1] == 0 else e[2])):
+        out = out[:at] + text + out[at:]
+    try:
+        compile(out, '<probe>', 'exec')
+    except SyntaxError:
+        return src, 0, False
+    return out, len(sites), True
 
 
 def raise_lines(tree):

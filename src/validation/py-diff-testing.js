@@ -52,7 +52,7 @@ function run(opts) {
   const base = Math.max(at, 0);
   let deleted = [];
   try {
-    deleted = changeHunks(currentSrc, proposedSrc, 'edit.py').filter(h => h.deletion).flatMap(h => h.deleted)
+    deleted = changeHunks(currentSrc, proposedSrc, 'edit.py').flatMap(h => h.deleted)
       .map(([a, b]) => [cpOffset(current, a + base), cpOffset(current, b + base)]);
   } catch { deleted = []; }
   const rel = typeof file === 'string' ? file.replace(/\\/g, '/') : 'module.py';

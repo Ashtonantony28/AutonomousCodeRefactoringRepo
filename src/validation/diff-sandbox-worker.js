@@ -12,7 +12,9 @@
 // recorded during load are compared. A run then compares, per input: the
 // return value (and whether it is an object an earlier call returned;
 // returned functions are probed with shaped argument lists and their owner as
-// `this`; generators are drained; thrown errors include own props and name),
+// `this`, and so are the methods and getters of a returned object's
+// user-defined prototypes; generators are drained; thrown errors include own
+// props and name; arrays include their named properties),
 // the arguments after the call, the `this` object, recorded calls into
 // callbacks and dependency stubs, console output, changes to the global
 // object and the builtins (prototypes, Math, JSON, ...), the non-function
@@ -37,7 +39,8 @@ const PRELUDE = `(function () {
   var construct = Reflect.construct, apply = Reflect.apply, ownKeys = Reflect.ownKeys, keyFor = Symbol.keyFor;
   var PromiseC = Promise, MapC = Map, SetC = Set, DateC = Date, RegExpC = RegExp, ErrorC = Error, WeakSetC = WeakSet, WeakMapC = WeakMap, ProxyC = Proxy;
   var ReferenceErrorC = ReferenceError, symToPrim = Symbol.toPrimitive, symIter = Symbol.iterator, emptyIter = [][Symbol.iterator];
-  var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_END_NODES = 500000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
+  var fnToStr = Function.prototype.toString, ObjProto = Object.prototype;
+  var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_END_NODES = 500000, SMALL_NODES = 256, SMALL_TOTAL = 4000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
   var STATE = 0, PLAIN = 1, PROBE = 2;
   var lookup = null, mod = null, rec = null, cur = null, targets = [], bindNames = [], pool = [], known = [];
   var probeArgs = [[0], [1], ['a']], vi = 0;
@@ -141,8 +144,15 @@ const PRELUDE = `(function () {
       out = [];
       for (i = 0; i < v.length && st.budget >= 0; i++) out[i] = ser(v[i], st, depth + 1);
       if (i < v.length) st.trunc = true;
-      var a = { t: 'arr', len: v.length, v: out }, sa = shape(v);
+      var a = { t: 'arr', len: v.length, v: out }, sa = shape(v), an = i < v.length ? [] : ownNames(v), ai = an.length;
       if (sa) a.x = sa;
+      // Named properties of a fully serialised array (own string keys after 'length').
+      while (ai > 0 && an[ai - 1] !== 'length') ai--;
+      for (; ai < an.length && st.budget >= 0; ai++) {
+        var ad = getDesc(v, an[ai]);
+        if (!a.p) a.p = {};
+        a.p[an[ai]] = ad && 'value' in ad ? ser(ad.value, st, depth + 1) : { t: 'acc' };
+      }
       return a;
     }
     if (v instanceof DateC) return { t: 'date', v: toStr(v.getTime()) };
@@ -158,12 +168,43 @@ const PRELUDE = `(function () {
       return { t: 'gen', v: out };
     }
     if (v instanceof ErrorC) return { t: 'err', name: ctorName(v), message: toStr(v.message), v: props(v, st, depth, true) };
+    var pm = st.mode === PROBE ? protoMethods(v, st, depth) : undefined;
     var o = { t: 'obj', c: ctorName(v), v: props(v, st, depth, false) }, so = shape(v), ks;
+    if (pm) o.m = pm;
     try { if (getProto(v) === null) o.c = '(null)'; } catch (e) { o.c = '?'; }
     try { ks = ownNames(v).join(','); } catch (e) { ks = '?'; }
     o.k = ks.length > 256 ? hash(ks) : ks;
     if (so) o.x = so;
     return o;
+  }
+  function userProto(p) {
+    try {
+      var c = getDesc(p, 'constructor');
+      return !c || typeof c.value !== 'function' || fnToStr.call(c.value).indexOf('[native code]') < 0;
+    } catch (e) { return false; }
+  }
+  // Methods and getters of a returned object's user-defined prototypes,
+  // probed / read with the object as \`this\`, so state only they reach
+  // (private fields, closures) shows.
+  function protoMethods(v, st, depth) {
+    var out, p, n = 0;
+    try { p = getProto(v); } catch (e) { return undefined; }
+    for (var lvl = 0; p && p !== ObjProto && lvl < 4 && st.budget >= 0; lvl++) {
+      if (stubNames.has(p) || !userProto(p)) break;
+      var ks = ownNames(p).sort();
+      for (var i = 0; i < ks.length && n < 16 && st.budget >= 0; i++) {
+        var d = ks[i] === 'constructor' ? null : getDesc(p, ks[i]), val;
+        if (!d || (!d.get && typeof d.value !== 'function')) continue;
+        if (!out) out = {};
+        n++;
+        if (d.get) {
+          try { val = apply(d.get, v, []); } catch (e) { out[lvl + ':^' + ks[i]] = { t: 'throw', error: describeThrown(e) }; continue; }
+        } else val = d.value;
+        out[lvl + ':' + (d.get ? '^' : '') + ks[i]] = ser(val, st, depth + 1, v);
+      }
+      try { p = getProto(p); } catch (e) { break; }
+    }
+    return out;
   }
   // Own string and symbol keys, enumerable or not. Key prefixes: '~'
   // non-enumerable, '!' read-only, '#' non-configurable, '^' getter, '='
@@ -350,6 +391,44 @@ const PRELUDE = `(function () {
     return out;
   }
 
+  // Deferred mode, after every call: each module binding, the owner \`this\`
+  // and each export whose serialisation fits SMALL_NODES nodes (hashed when
+  // long; larger ones are only marked), until SMALL_TOTAL nodes per call.
+  // Cheap, and a mid-run difference in small state shows even when the end
+  // state agrees. An object once found too large is not walked again while
+  // its key still holds it.
+  var bigKeys = new MapC();
+  function smallDigest() {
+    var out = {}, used = 0, stubs = false;
+    function add(k, v) {
+      if (typeof v === 'function' || used >= SMALL_TOTAL) return;
+      if (bigKeys.get(k) === v && v !== null && typeof v === 'object') { out[k] = '~'; return; }
+      var st = newSt(STATE);
+      st.budget = SMALL_NODES;
+      var s = stringify(ser(v, st, 1));
+      used += st.trunc ? SMALL_NODES : SMALL_NODES - st.budget;
+      if (st.trunc) { out[k] = '~'; bigKeys.set(k, v); return; }
+      if (s.indexOf('{"t":"stub"') >= 0) stubs = true;
+      out[k] = s.length > 64 ? hash(s) + ':' + s.length : s;
+    }
+    var ex = mod && mod.exports, i, ks;
+    for (i = 0; lookup && i < bindNames.length; i++) {
+      var v;
+      try { v = lookup(bindNames[i]); } catch (e) { continue; }
+      add('b.' + bindNames[i], v);
+    }
+    if (cur && cur.t.mode === 'owner') add('self', cur.t.self);
+    if (ex !== null && (typeof ex === 'object' || typeof ex === 'function')) {
+      ks = ownNames(ex).sort();
+      for (i = 0; i < ks.length; i++) {
+        if (typeof ex === 'function' && (ks[i] === 'length' || ks[i] === 'name' || ks[i] === 'prototype')) continue;
+        var d = getDesc(ex, ks[i]);
+        if (d && 'value' in d) add('e.' + ks[i], d.value);
+      }
+    }
+    return { v: out, stub: stubs };
+  }
+
   var api = freeze({
     setup: function (names, values) { bindNames = names; pool = values; snapRealm(); },
     hit: function (k) { hits[k] = (hits[k] | 0) + 1; },
@@ -467,7 +546,7 @@ const PRELUDE = `(function () {
         rec.state = exportsState(sst);
         if (sst.trunc) rec.trunc = true;
         rec.bind = bindState();
-      }
+      } else rec.digest = smallDigest();
       rec.realm = realmDiff();
       var out = stringify(rec);
       rec = null;
@@ -607,10 +686,10 @@ function compare(a, b, opts) {
   if (refA && refB) return 'unresolved';
   if (!opts.fileMode && (refA || refB)) return refB && hallucinated(b, opts.fileText) ? 'mismatch' : 'differs';
   const callsEq = callsEqual(a, b);
-  if (!outputsDiffer(a, b) && callsEq && effectsEqual(a, b) && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state) && deepEq(a.bind, b.bind)) {
+  if (!outputsDiffer(a, b) && callsEq && effectsEqual(a, b) && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state) && deepEq(a.bind, b.bind) && (!a.digest || !b.digest || stateEq(a.digest.v, b.digest.v))) {
     return a.trunc || b.trunc ? 'unresolved' : 'equal';
   }
-  if (((a.stubbed || b.stubbed) && !callsEq) || hasStub(a) || hasStub(b)) return 'differs';
+  if (((a.stubbed || b.stubbed) && !callsEq) || hasStub(a) || hasStub(b) || (a.digest && a.digest.stub) || (b.digest && b.digest.stub)) return 'differs';
   if (a.kind === 'throw' && engineTypeError(a.error)) return 'ood';
   return 'mismatch';
 }
@@ -657,8 +736,8 @@ function main(data) {
     };
   }
   if (!targets.length) return load ? { verdict: 'inconclusive', runs: 1, reason: load.note } : withHits({ verdict: 'equivalent', runs: 1 }, cur, data);
-  // Large module state is compared once per target, after its runs, instead
-  // of after every call.
+  // Large module state is compared in full once per target, after its runs;
+  // after every call only its small parts are (smallDigest).
   const defer = Math.max(cur.load.nodes | 0, prop.load.nodes | 0) > STATE_NODES;
   if (defer) for (const s of [cur, prop]) vm.runInContext('__dt.defer()', s.ctx, { timeout: loadTimeoutMs });
 

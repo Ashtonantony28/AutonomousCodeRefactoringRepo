@@ -191,3 +191,27 @@ test('editMutants: line numbers from line starts, one mutant set per hunk, under
   assert.strictEqual(r.capped, true);
   assert.strictEqual(r.length, 0);
 });
+
+// ---------- SG22: per-site mutants, gaps ----------
+
+test('changeHunks groups changed tokens by the stretch between matched tokens (gaps)', () => {
+  const before = "function scale(n) {\n  if (typeof n === 'bigint') {\n    return n * 1000n;\n  }\n  return n * 1000;\n}\n";
+  const after = 'function scale(n) {\n  return 1000 * n;\n}\n';
+  const [h] = bugInjector.changeHunks(before, after, 's.js');
+  const gaps = h.gaps.map(g => ({ ins: g.ins.map(r => after.slice(...r)), del: g.del.map(r => before.slice(...r)) }));
+  assert.deepStrictEqual(gaps[0], { ins: [], del: ['if', '(', 'typeof', 'n', '===', "'bigint'", ')', '{'] });
+  assert.deepStrictEqual(gaps.flatMap(g => g.ins), h.ranges.map(r => after.slice(...r)));
+  assert.deepStrictEqual(gaps.flatMap(g => g.del), h.deleted.map(r => before.slice(...r)));
+});
+
+test('editMutants: mutants per site (each mutable inserted token), tagged with the site (AUDIT-12 H3)', () => {
+  const before = 'function body(s) {\n  return String(s);\n}\n';
+  const after = 'function body(s) {\n  return String(s).slice(0, 1000);\n}\n';
+  const ms = bugInjector.editMutants(after, { file: 'b.js', before, max: 1 });
+  assert.deepStrictEqual(ms.map(m => after.slice(m.site, m.site + 4)), ['0, 1', '1000'], 'one mutant for each of the two literals');
+  assert(ms[1].src.includes('slice(0, 1001)'));
+  const many = Array.from({ length: bugInjector.EDIT_MAX_SITES + 1 }, (_, i) => `x > ${i + 1}`).join(' && ');
+  const capped = bugInjector.editMutants(`function f(x) {\n  return ${many};\n}\n`, { file: 'c.js', before: 'function f(x) {\n  return x;\n}\n' });
+  assert.strictEqual(capped.capped, true, 'more sites in a hunk than EDIT_MAX_SITES: not judged');
+  assert.strictEqual(capped.length, 0);
+});

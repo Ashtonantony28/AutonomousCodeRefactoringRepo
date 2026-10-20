@@ -3,8 +3,9 @@
 // Change hunks between two versions of a source file: a line-level diff of
 // the changed region, then a token-level diff inside each hunk, comments
 // ignored. A hunk's `ranges` are the inserted/changed tokens in `after`;
-// `deleted` the removed tokens in `before`. A hunk with no inserted token is
-// a deletion: there is nothing in `after` to mutate.
+// `deleted` the removed tokens in `before`; `gaps` the same tokens grouped by
+// the stretch between two matched tokens they fall in ({ ins, del }). A hunk
+// with no inserted token is a deletion: there is nothing in `after` to mutate.
 
 const { stripCode } = require('../validation/polyglot-ast');
 
@@ -69,12 +70,19 @@ function tokenHunk(bc, ac, b, a, lang) {
   const ranges = am.filter((t, j) => !ma.has(j)).map(t => [t.s, t.e]);
   const deleted = bm.filter((t, i) => !mb.has(i)).map(t => [t.s, t.e]);
   if (!ranges.length && !deleted.length) return null;
+  const gaps = [];
+  let i = 0, j = 0;
+  for (const [pi, pj] of [...pairs, [bm.length, am.length]]) {
+    if (pi > i || pj > j) gaps.push({ ins: am.slice(j, pj).map(t => [t.s, t.e]), del: bm.slice(i, pi).map(t => [t.s, t.e]) });
+    i = pi + 1; j = pj + 1;
+  }
   const point = a.length ? a[0].s : null;
   const h = {
     start: ranges.length ? ranges[0][0] : point,
     end: ranges.length ? ranges[ranges.length - 1][1] : point,
     ranges,
     deleted,
+    gaps,
     deletion: !ranges.length
   };
   if (!mid) h.capped = true;
@@ -90,7 +98,7 @@ function lineCounter(s) {
   };
 }
 
-// -> [{ start, end, ranges, deleted, deletion, line, capped? }] in source
+// -> [{ start, end, ranges, deleted, gaps, deletion, line, capped? }] in source
 // order; `capped` marks a hunk whose diff was over MAX_CELLS (every token in
 // it counts as changed).
 function changeHunks(before, after, file) {

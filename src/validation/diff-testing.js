@@ -438,43 +438,98 @@ function hostGlobals(a, b, aliases = []) {
   return [...new Set([...HOST_GLOBALS, ...aliases])].filter(g => count(a, g) !== count(b, g));
 }
 
-const FN_TYPES = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod', 'ClassBody']);
+// Children that may not run when their parent does: a probe placed in one
+// tells whether that part ran, not just its statement.
+const COND_EXPR = {
+  LogicalExpression: ['right'],
+  ConditionalExpression: ['consequent', 'alternate'],
+  AssignmentPattern: ['right'],
+  ClassProperty: ['value'],
+  ClassPrivateProperty: ['value'],
+  SwitchCase: ['test'],
+  ForStatement: ['update'],
+  OptionalCallExpression: ['arguments'],
+  OptionalMemberExpression: ['property']
+};
+const COND_STMT = {
+  IfStatement: ['consequent', 'alternate'],
+  ForStatement: ['body'],
+  ForInStatement: ['body'],
+  ForOfStatement: ['body'],
+  WhileStatement: ['body'],
+  DoWhileStatement: ['body']
+};
+const FN_NODES = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod']);
 
-// Innermost statement of a statement list that overlaps [a, b).
-function listStatementAt(node, a, b, best = null) {
-  for (const k of Object.keys(node)) {
-    if (k === 'loc' || k === 'extra' || k.endsWith('Comments')) continue;
-    const v = node[k];
-    for (const c of Array.isArray(v) ? v : [v]) {
-      if (!c || typeof c.type !== 'string' || c.end <= a || c.start >= b) continue;
-      if (Array.isArray(v) && (k === 'body' || k === 'consequent') && /(Statement|Declaration)$/.test(c.type)) best = c;
-      best = listStatementAt(c, a, b, best);
+// Where to probe a deleted token at [a, b): the deepest of the innermost
+// statement of a statement list ('list'), a braceless branch or loop body
+// ('stmt'), a conditionally evaluated expression ('expr': right of &&/||/??,
+// ternary branches, defaults, ...) and a function's entry for a parameter
+// ('entry'). null when the token is outside every statement. A node's
+// parentheses count as part of it.
+function probeSite(src, root, a, b) {
+  const span = (c) => {
+    if (!c.extra || !c.extra.parenthesized) return [c.start, c.end];
+    let open = (src.slice(c.extra.parenStart, c.start).match(/\(/g) || []).length, e = c.end;
+    while (open && e < src.length) { if (src[e] === ')') open--; else if (!/\s/.test(src[e])) break; e++; }
+    return [c.extra.parenStart, e];
+  };
+  let site = null;
+  for (let node = root, next; node; node = next) {
+    next = null;
+    for (const k of Object.keys(node)) {
+      if (k === 'loc' || k === 'extra' || k.endsWith('Comments')) continue;
+      const v = node[k];
+      for (const c of Array.isArray(v) ? v : [v]) {
+        if (!c || typeof c.type !== 'string') continue;
+        const [s, e] = span(c);
+        if (s > a || e < b) continue;
+        if (Array.isArray(v) && (k === 'body' || k === 'consequent') && /(Statement|Declaration)$/.test(c.type)) site = { kind: 'list', node: c };
+        else if ((COND_STMT[node.type] || []).includes(k) && c.type !== 'BlockStatement') site = { kind: 'stmt', node: c };
+        else if ((COND_EXPR[node.type] || []).includes(k) && c.type !== 'SpreadElement' && !(k === 'property' && !node.computed)) site = { kind: 'expr', node: c };
+        else if (k === 'right' && node.type === 'AssignmentExpression' && /^(&&|\|\||\?\?)=$/.test(node.operator)) site = { kind: 'expr', node: c };
+        else if (k === 'body' && node.type === 'ArrowFunctionExpression' && c.type !== 'BlockStatement') site = { kind: 'expr', node: c };
+        else if (k === 'params' && FN_NODES.has(node.type) && node.body.type === 'BlockStatement') site = { kind: 'entry', node: node.body };
+        next = c;
+        break;
+      }
+      if (next) break;
     }
   }
-  return best;
+  return site;
 }
 
-// The current source with `__dt.hit(k);` before the innermost statement
-// holding each deleted token, so the sandbox can tell whether deleted code
-// ran. -> { code, n } or null when a deleted token is not reached by running
-// its statement (a parameter, an expression-bodied function, a class body).
+// The current source with a `__dt.hit(k)` probe at each deleted token's
+// site (probeSite), so the sandbox can tell whether the deleted code itself
+// ran. -> { code, n } or null when a token has no site or the probed source
+// does not parse.
 function probeDeletions(src, ranges) {
   const ast = tryParse(src);
   if (!ast) return null;
-  const points = new Set();
+  const sites = new Map();
   for (const [a, b] of ranges) {
-    const st = listStatementAt(ast.program, a, b);
-    if (!st) return null;
-    let inner = false;
-    walk(st, (n) => { if (FN_TYPES.has(n.type) && n.start <= a && b <= n.end) inner = true; });
-    if (inner) return null;
-    points.add(st.start);
+    const s = probeSite(src, ast.program, a, b);
+    if (!s) return null;
+    sites.set(`${s.kind}:${s.node.start}:${s.node.end}`, s);
   }
-  const at = [...points].sort((x, y) => y - x);
+  const edits = [];
+  [...sites.values()].forEach(({ kind, node }, k) => {
+    const hit = `__dt.hit(${k})`, size = node.end - node.start;
+    if (kind === 'list') edits.push({ at: node.start, text: `${hit};`, size, open: true });
+    else if (kind === 'stmt') edits.push({ at: node.start, text: `{${hit};`, size, open: true }, { at: node.end, text: '}', size, open: false });
+    else if (kind === 'expr') edits.push({ at: node.start, text: `(${hit}, `, size, open: true }, { at: node.end, text: ')', size, open: false });
+    else {
+      const dirs = node.directives || [];
+      edits.push({ at: dirs.length ? dirs[dirs.length - 1].end : node.start + 1, text: `${hit};`, size: 0, open: true });
+    }
+  });
+  // Applied right to left. At one offset: openers before closers, inner
+  // openers and outer closers first, so the outer text ends up outside.
+  edits.sort((x, y) => y.at - x.at || (x.open !== y.open ? (x.open ? -1 : 1) : x.open ? x.size - y.size : y.size - x.size));
   let out = src;
-  at.forEach((p, k) => { out = `${out.slice(0, p)}__dt.hit(${k});${out.slice(p)}`; });
+  for (const e of edits) out = `${out.slice(0, e.at)}${e.text}${out.slice(e.at)}`;
   const past = tryParse(out);
-  return past ? { code: toScript(out, past), n: at.length } : null;
+  return past ? { code: toScript(out, past), n: sites.size } : null;
 }
 
 const keyOf = (t) => `${t.kind}:${t.className || t.owner || ''}:${t.isStatic ? 's' : ''}:${t.accessor || ''}:${t.name}`;
@@ -1177,7 +1232,7 @@ function prepareAndExecute(opts, deadline, progress) {
     return { desc, label: labelOf(t), removed: !!p.removed, arity: built.arity, inputs: built.inputs, probes: built.probes };
   });
 
-  const deleted = changeHunks(currentSrc, proposedSrc, 'edit.js').filter(h => h.deletion).flatMap(h => h.deleted);
+  const deleted = changeHunks(currentSrc, proposedSrc, 'edit.js').flatMap(h => h.deleted);
   let probe = null;
   if (deleted.length && cur.parsed) {
     probe = mode === 'file' ? probeDeletions(fileSrc, deleted.map(([a, b]) => [a + at, b + at])) : probeDeletions(currentSrc, deleted);
