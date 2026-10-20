@@ -296,6 +296,16 @@ test('Python condition_change does not veto a reworded comparison the diff test 
   assert.match(q.veto.reasons.join(' '), /guard_removal/);
 });
 
+test('Python condition_change stays a veto when part of a condition is deleted, even on an equivalent diff test (AUDIT-13 L1, U01)', async (t) => {
+  const ctx = setup(t);
+  const cur = 'def needs_bigint(n):\n    return 2 ** 53 < n <= 2 ** 64';
+  fs.writeFileSync(path.join(ctx.repo, 'b.py'), `${cur}\n`);
+  const p = await viaPipeline(ctx, makeProposal('b.py', cur, 'def needs_bigint(n):\n    return 2 ** 53 < n'), APPROVE_RAW);
+  assert.strictEqual(p.diff_test.verdict, 'equivalent');
+  assert.strictEqual(p.test_outcome.status, 'vetoed');
+  assert.match(p.veto.reasons.join(' '), /condition_change/);
+});
+
 test('fusion and gate use only JuryVerdict / DiffTest contract fields', async (t) => {
   const { repo, tracker } = setup(t);
   const diffTesting = require('../src/validation/diff-testing');

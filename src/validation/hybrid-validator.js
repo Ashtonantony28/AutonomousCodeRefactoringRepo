@@ -69,11 +69,13 @@ function unconfirmedBlock({ jury, checks, dt, file = null }) {
 // The Python `condition_change` check is lexical: a reworded comparison
 // (`== None` -> `is None`, chained comparisons, if/else -> conditional) looks
 // like a lost one. An `equivalent` diff test shows the behaviour is kept, so
-// the check then only lowers the score instead of vetoing.
+// the check then only lowers the score instead of vetoing, unless part of a
+// condition was deleted (`deletes_condition`): an equivalent verdict may
+// only mean the inputs never reached it (`a < n <= b` -> `a < n`).
 function relaxConditionChange(ast, dt) {
   if (!dt || dt.verdict !== 'equivalent') return;
   for (const c of ast.checks) {
-    if (c.check_name === 'condition_change' && !c.passed && c.severity === 'veto') {
+    if (c.check_name === 'condition_change' && !c.passed && c.severity === 'veto' && !c.deletes_condition) {
       c.severity = 'score';
       c.detail = `${c.detail} (not a veto: the Python diff test is equivalent)`;
     }

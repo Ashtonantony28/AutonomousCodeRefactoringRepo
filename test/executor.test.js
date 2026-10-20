@@ -730,3 +730,94 @@ test('a killed mutant counts only for the token it mutates: slice(0, 1000) kille
   assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
   assert.strictEqual(strong.res.mutation.run, 6, 'one confirmed kill (three runs) per site');
 });
+
+// ---------- SG25: evidence relevance, Python mutant runs ----------
+
+test('a change carried by a named constant needs a kill of that constant: slice(0, MAX_BODY) killed via 0 -> 1 keeps nothing (AUDIT-13 H1, T06)', async (t) => {
+  const cur = 'function body(s) {\n  return String(s);\n}';
+  const prop = 'function body(s) {\n  return String(s).slice(0, MAX_BODY);\n}';
+  const rest = 'const MAX_BODY = 4096;\nmodule.exports = { body };';
+  const weak = await execOn(t, 'src/body.js', cur, prop, rest,
+    "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body(42), '42'); });");
+  assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
+  assert.strictEqual(weak.res.reason, 'tests_insensitive');
+  assert.strictEqual(weak.res.mutation.surviving_ref, 'MAX_BODY');
+  assertReverted(weak.res, weak.repo, 'src/body.js', weak.before, weak.kept);
+  const strong = await execOn(t, 'src/body.js', cur, prop, rest,
+    "const m = require('../src/body');\ntest('body', () => { assert.strictEqual(m.body('abc'), 'abc'); assert.strictEqual(m.body('x'.repeat(5000)).length, 4096); });");
+  assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
+});
+
+test('a guard through an existing helper needs a kill at every site of the helper, not just the if (AUDIT-13 H1, U04)', async (t) => {
+  const cur = 'function addPoints(user, n) {\n  user.points += n;\n  return user;\n}';
+  const prop = 'function addPoints(user, n) {\n  if (isSafe(n)) user.points += n;\n  return user;\n}';
+  const { res, repo, before, kept } = await execOn(t, 'src/pts.js', cur, prop,
+    'function isSafe(n) {\n  return !(Math.abs(n) > Number.MAX_SAFE_INTEGER);\n}\nmodule.exports = { addPoints };',
+    "const m = require('../src/pts');\ntest('pts', () => { assert.deepStrictEqual(m.addPoints({ points: 1 }, 2), { points: 3 }); });");
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.surviving_ref, 'isSafe');
+  assertReverted(res, repo, 'src/pts.js', before, kept);
+});
+
+test('a replaced method reference with nothing to mutate is no evidence: includes -> indexOf !== -1 (AUDIT-13 H1, G05)', async (t) => {
+  const { res, repo, before, kept } = await execOn(t, 'src/has.js', 'function has(xs, x) {\n  return xs.includes(x);\n}',
+    'function has(xs, x) {\n  return xs.indexOf(x) !== -1;\n}', 'module.exports = { has };',
+    "const m = require('../src/has');\ntest('has', () => { assert.strictEqual(m.has([1, 2], 2), true); assert.strictEqual(m.has([1, 2], 3), false); });");
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.unmutated_ref, 'indexOf');
+  assert.strictEqual(res.mutation.run, 0);
+  assertReverted(res, repo, 'src/has.js', before, kept);
+});
+
+test('editMutants: references carried by the change add their definition sites; moved ones do not', () => {
+  const b = "'use strict';\nconst LIMIT = 500;\nfunction f(s) {\n  return s;\n}\n";
+  const a = "'use strict';\nconst LIMIT = 500;\nfunction f(s) {\n  return s.slice(0, LIMIT);\n}\n";
+  const ms = editMutants(a, { file: 'f.js', before: b });
+  assert.deepStrictEqual([...new Set(ms.filter(m => m.ref).map(m => `${m.ref}@${m.line}`))], ['LIMIT@2']);
+  const pb = 'LIMIT = 500\n\n\ndef body(s):\n    return str(s)\n';
+  const pa = 'LIMIT = 500\n\n\ndef body(s):\n    return str(s)[0:LIMIT]\n';
+  assert(editMutants(pa, { file: 'm.py', before: pb }).some(m => m.ref === 'LIMIT' && m.line === 1));
+  // A reference already in the deleted code is moved, not new.
+  const mb = "'use strict';\nconst K = 3;\nfunction g(x) {\n  return x * K;\n}\n";
+  const mv = editMutants("'use strict';\nconst K = 3;\nfunction g(x) {\n  const y = x * K;\n  return y + 1;\n}\n", { file: 'g.js', before: mb });
+  assert(!mv.some(m => m.ref) && !mv.unmutated_ref, JSON.stringify(mv.unmutated_ref));
+  // A replaced identifier with no definition here has nothing to mutate.
+  assert.deepStrictEqual(editMutants("'use strict';\nfunction t(s) {\n  return s.trimStart() + 1;\n}\n",
+    { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.trim() + 1;\n}\n" }).unmutated_ref, { name: 'trimStart', line: 3, hunk: 0 });
+});
+
+const hasPyTooling = require('../src/runner/test-runner').coverageTool('a.py', { cmd: 'pytest' }) === 'coverage.py';
+
+function pyPkgRepo(t, mod, body) {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-sg25-'));
+  t.after(() => env.rm(repo));
+  fs.writeFileSync(path.join(repo, 'pytest.ini'), '[pytest]\n');
+  fs.mkdirSync(path.join(repo, 'app'));
+  fs.mkdirSync(path.join(repo, 'tests'));
+  fs.writeFileSync(path.join(repo, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(repo, 'app/m.py'), mod);
+  fs.writeFileSync(path.join(repo, 'tests/test_m.py'), `import app.m as m\n\n\n${body}`);
+  return repo;
+}
+
+test('Python mutant runs import the package like the edit run: a sensitive suite keeps the edit (AUDIT-13 C2)', { skip: hasPyTooling ? false : 'pytest + coverage.py not installed' }, async (t) => {
+  const cur = 'def scale(x, n):\n    return x + n * 2\n';
+  const repo = pyPkgRepo(t, cur, 'def test_scale():\n    assert m.scale(1, 2) == 7\n');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('app/m.py', cur, 'def scale(x, n):\n    return x + n * 3\n'), repoRoot: repo, onKept: () => 'c1' }));
+  assert.strictEqual(res.status, 'passed', `${res.reason} ${JSON.stringify(res.mutation)} ${res.stdout_tail}`);
+  assert(!res.mutation.flaky && !res.mutation.collection_errors, JSON.stringify(res.mutation));
+});
+
+test('a Python mutant that fails at import (collection) is no kill (AUDIT-13 C2)', { skip: hasPyTooling ? false : 'pytest + coverage.py not installed' }, async (t) => {
+  const repo = pyPkgRepo(t, 'SIZE = 2\nassert SIZE % 2 == 0\n', 'def test_loads():\n    assert m.SIZE > 0\n');
+  const before = fs.readFileSync(path.join(repo, 'app/m.py'), 'utf8');
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('app/m.py', 'SIZE = 2\n', 'SIZE = 4\n'), repoRoot: repo, onKept: () => { kept = true; return 'c1'; } }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert(res.mutation.collection_errors >= 1, JSON.stringify(res.mutation));
+  assert.strictEqual(res.mutation.killed, null);
+  assertReverted(res, repo, 'app/m.py', before, kept);
+});

@@ -15,8 +15,13 @@ const MUTANT_CAP = 3;
 // mutants of each site are applied one at a time and the suite re-run; the
 // first one that makes it fail is that site's evidence, and it counts for
 // that site only (a kill of `0 -> 1` in `slice(0, 1000)` says nothing about
-// `1000`). A hunk with inserted tokens but no site has no evidence. A mutant
-// run that times out is re-run once and counts only if that run fails. A
+// `1000`). A hunk with inserted tokens but no site has no evidence. When the
+// change is carried by a reference (an inserted identifier naming a constant
+// or helper defined elsewhere in the file, or replacing another identifier),
+// every site of that definition needs its own kill too, and a reference with
+// nothing to mutate (`unmutated_ref`) is no evidence. A mutant
+// run that times out is re-run once and counts only if that run fails. A run
+// that fails at collection or import (pytest exit 2-5) is never a kill. A
 // failure is a kill only when it reproduces: the same mutant fails again and
 // the unmutated suite then passes (a mutant that passes on the second run is
 // no kill; an unmutated failure means the suite is flaky and nothing counts).
@@ -43,6 +48,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   const done = () => { out.duration_ms = Date.now() - t0; out.suite_ms = suiteMs; return out; };
   if (mutants.capped) { out.budget_exhausted = true; out.edit_too_large = true; return done(); }
   if (mutants.unchecked) { out.budget_exhausted = true; out.parse_check_failed = true; return done(); }
+  if (mutants.unmutated_ref) { out.unmutated_ref = mutants.unmutated_ref.name; out.unmutated_hunk_line = mutants.unmutated_ref.line; return done(); }
   const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));
   if (!hunks.length || bare >= 0) {
     if (bare >= 0) out.unmutated_hunk_line = hunks[bare].line;
@@ -81,9 +87,10 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
       let killed = false;
       for (const m of mutants.filter(x => x.site === site)) {
         let r = await runSuite(m.src);
+        if (r && r.collection_error) { out.collection_errors = (out.collection_errors || 0) + 1; continue; }
         if (r && r.status === 'failed') {
           r = await runSuite(m.src);
-          if (r && r.status !== 'failed') { out.unconfirmed = (out.unconfirmed || 0) + 1; continue; }
+          if (r && (r.status !== 'failed' || r.collection_error)) { out.unconfirmed = (out.unconfirmed || 0) + 1; continue; }
           const control = r && await runSuite(edited);
           if (control && control.status !== 'passed') { out.flaky = true; return done(); }
           r = control && r;
@@ -99,6 +106,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
       if (!killed) {
         const sm = mutants.find(x => x.site === site);
         Object.assign(out, { killed: null, surviving_hunk_line: hunks[sm.hunk].line, surviving_site_line: sm.line });
+        if (sm.ref) out.surviving_ref = sm.ref;
         return done();
       }
     }

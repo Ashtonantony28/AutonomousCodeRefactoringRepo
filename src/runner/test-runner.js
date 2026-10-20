@@ -167,11 +167,13 @@ function checkDeadline(deadline) {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-// coverage.py has to be importable by the interpreter that runs pytest, so it
-// is looked up through pytest's shebang. Returns that python, or null.
+// pytest runs as `<python> -m pytest` with the interpreter behind the
+// `pytest` script on PATH (its shebang): `-m` puts the repo root on sys.path,
+// so every run (edit, mutant, control) imports the code the same way.
+// coverage.py has to be importable by that interpreter. -> { py, coverage }
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 const pyCoverage = new Map();
-function pytestPythonWithCoverage() {
+function pytestInterpreter() {
   const key = process.env.PATH || '';
   if (!pyCoverage.has(key)) {
     let py = null;
@@ -182,13 +184,15 @@ function pytestPythonWithCoverage() {
       if (m) py = path.basename(m[1]) === 'env' ? m[2] : m[1];
       break;
     }
-    let ok = false;
-    if (py) {
-      try { ok = spawnSync(py, ['-m', 'coverage', '--version'], { stdio: 'ignore', timeout: 10_000 }).status === 0; } catch { /* */ }
-    }
-    pyCoverage.set(key, ok ? py : null);
+    const ok = (args) => { try { return spawnSync(py, args, { stdio: 'ignore', timeout: 10_000 }).status === 0; } catch { return false; } };
+    const usable = !!py && ok(['-c', 'import pytest']);
+    pyCoverage.set(key, { py: usable ? py : null, coverage: usable && ok(['-m', 'coverage', '--version']) });
   }
   return pyCoverage.get(key);
+}
+function pytestPythonWithCoverage() {
+  const it = pytestInterpreter();
+  return it.coverage ? it.py : null;
 }
 
 // How execution of the edited file is observed: V8 coverage for plain JS,
@@ -401,11 +405,12 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   env.NODE_V8_COVERAGE = '';
   delete env.COVERAGE_PROCESS_START;
   let cmd = detected.cmd, args = detected.args;
+  const py = detected.cmd === 'pytest' ? pytestInterpreter().py : null;
+  if (py) { cmd = py; args = ['-m', 'pytest', ...detected.args]; }
   if (tool === 'v8') env.NODE_V8_COVERAGE = covDir;
   if (tool === 'coverage.py') {
     env.COVERAGE_FILE = path.join(covDir, 'data');
-    cmd = pytestPythonWithCoverage();
-    args = ['-m', 'coverage', 'run', '-m', 'pytest', ...detected.args];
+    args = ['-m', 'coverage', 'run', ...args];
   }
 
   let result, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
@@ -445,6 +450,9 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   else status = 'failed';
 
   const counts = parseCounts(result.stdout + '\n' + result.stderr, detected.framework);
+  // pytest exits 1 when tests failed; 2-5 when collection or an import broke,
+  // it was interrupted, misused, or collected nothing: no test judged the code.
+  const collectionError = status === 'failed' && detected.framework === 'pytest' && result.exitCode >= 2 && result.exitCode <= 5;
   const out = {
     status,
     framework: detected.framework,
@@ -458,6 +466,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     stderr: truncate(result.stderr, 4000),
     timed_out: result.timedOut
   };
+  if (collectionError) out.collection_error = true;
   if (coverage) {
     if (tCov != null) coverage.duration_ms = Date.now() - tCov;
     out.coverage = coverage;

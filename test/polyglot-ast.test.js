@@ -142,6 +142,18 @@ test('Python lexical checks veto changed comparison operators, condition literal
   assert.strictEqual(lost('def f(n):\n    if n > 3:  # > 4\n        return 1\n    return 0\n', 'def f(count):\n    if count > 3:\n        return 1\n    return 0\n'), null);
 });
 
+test('condition_change marks a deleted comparison (deletes_condition), not a reworded one (AUDIT-13 L1, U01)', () => {
+  const del = pyLex('def f(n):\n    return 2 ** 53 < n <= 2 ** 64\n', 'def f(n):\n    return 2 ** 53 < n\n').condition_change;
+  assert.strictEqual(del.passed, false);
+  assert.strictEqual(del.deletes_condition, true);
+  const guard = pyLex('def f(x):\n    if x > 0 and x < 10:\n        return 1\n    return 0\n', 'def f(x):\n    if x > 0:\n        return 1\n    return 0\n').condition_change;
+  assert.strictEqual(guard.deletes_condition, true);
+  const reworded = pyLex('def f(x):\n    return x > 0 and x < 10\n', 'def f(x):\n    return 0 < x < 10\n').condition_change;
+  assert.strictEqual(reworded.passed, false);
+  assert.strictEqual(reworded.deletes_condition, undefined);
+  assert.strictEqual(pyLex('def f(a):\n    return a >= 18\n', 'def f(a):\n    return a > 17\n').condition_change.deletes_condition, undefined);
+});
+
 test('Python lexical checks judge only the edited region of the file, and only Python', () => {
   const file = 'def a(x):\n    if x > 1:\n        raise E()\n    return x\n\n\ndef b(y):\n    r = y + 1\n    return r\n';
   const cur = 'def b(y):\n    r = y + 1\n    return r\n';
