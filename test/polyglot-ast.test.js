@@ -206,3 +206,24 @@ test('Python signature_drift over ~15 MB of files naming the function: repeat sc
   assert.strictEqual(c.passed, true, c.detail);
   assert(ms < 400, `warm runChecks took ${ms.toFixed(0)} ms`);
 });
+
+test('Python signature_drift strips at most 2 MB of files: a file over the cap is skipped, smaller ones are still scanned (AUDIT-9 H4)', () => {
+  assert.strictEqual(polyglot.SCAN_MAX_BYTES, 2_000_000);
+  const files = { 'core/util.py': `${PY_CUR}\n` };
+  for (let i = 0; i < 4; i++) {
+    let body = '# from core.util import normalize (not called)\n\n\n';
+    for (let j = 0; body.length < 900_000; j++) body += `def g${i}_${j}(a, b):\n    return a * ${j} + b\n\n\n`;
+    files[`big/m${i}.py`] = body;
+  }
+  const dir = tmpRepo(files);
+  const t0 = performance.now();
+  const c = pyDrift(dir);
+  assert(performance.now() - t0 < 3000);
+  assert.strictEqual(c.passed, true, c.detail);
+  assert.match(c.detail, /2 MB mentioning the name; rest not checked/);
+  fs.mkdirSync(path.join(dir, 'z'));
+  fs.writeFileSync(path.join(dir, 'z', 'caller.py'), 'from core.util import normalize\n\nprint(normalize(1, 2))\n');
+  const c2 = pyDrift(dir);
+  assert.strictEqual(c2.passed, false, c2.detail);
+  assert.match(c2.detail, /normalize in z\/caller\.py \(1\)/);
+});

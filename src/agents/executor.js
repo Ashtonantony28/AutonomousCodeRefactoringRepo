@@ -12,46 +12,59 @@ const MUTANT_CAP = 3;
 
 // The suite has to notice a bug in each change hunk: up to MUTANT_CAP
 // mutants of the tokens a hunk changed are applied one at a time and the
-// suite re-run; the first one that makes it fail (or run out its full slice)
-// is that hunk's evidence. A hunk that only deletes has nothing to mutate: it
-// stands only when the diff test is `equivalent` and executed the deleted
-// code. The mutant runs share what the main run left of the test budget,
-// each getting at most 2x the main run's time + 1 s, and stop when less than
-// the main run's time + 0.5 s is left. The edited content is always written
-// back. `ok` is the verdict; `killed` names the last killing mutant.
-async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest, budgetMs, usedMs, coverageMs = 0 }) {
+// suite re-run; the first one that makes it fail is that hunk's evidence. A
+// mutant run that times out is re-run once and counts only if that run fails.
+// A hunk that only deletes has nothing to mutate: it stands only when the
+// diff test is `equivalent` and executed the deleted code. Mutant runs
+// collect no coverage and have their own budget (`budgetMs`): each gets at
+// most 2x the plain suite time + 1 s, and none starts after the first when
+// less than that time + 0.5 s is left. The plain suite time is the main
+// run's (instrumented, so an upper bound) until a surviving mutant run
+// measures it. `budget_exhausted` (also set when the edit is too large to
+// mutate) means the tests were not judged. The edited content is always
+// written back. `ok` is the verdict; `killed` names the last killing mutant.
+async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest, budgetMs, usedMs }) {
   const t0 = Date.now();
   const abs = path.join(repoRoot, file);
-  const suiteMs = usedMs;
-  usedMs += coverageMs; // the main run's coverage evaluation shares the budget; mutant runs collect none
+  let suiteMs = Math.max(1, usedMs);
+  let spent = 0;
   const hunks = changeHunks(before, edited, file);
   const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP, before });
   const out = { hunks: hunks.length, mutants: mutants.length, run: 0, killed: null, ok: false };
-  const done = () => { out.duration_ms = Date.now() - t0; return out; };
+  const done = () => { out.duration_ms = Date.now() - t0; out.suite_ms = suiteMs; return out; };
   const deletions = hunks.filter(h => h.deletion);
   if (deletions.length && !(diffTest && diffTest.verdict === 'equivalent' && diffTest.deletions_observed === true)) {
     out.unobserved_deletion_line = deletions[0].line;
     return done();
   }
+  if (mutants.capped) { out.budget_exhausted = true; out.edit_too_large = true; return done(); }
   const open = hunks.map((h, i) => i).filter(i => !hunks[i].deletion);
   const bare = open.find(i => !mutants.some(m => m.hunk === i));
   if (!hunks.length || bare !== undefined) {
     if (bare !== undefined) out.unmutated_hunk_line = hunks[bare].line;
     return done();
   }
+  const runMutant = async () => {
+    const left = budgetMs - spent;
+    if (out.run && left < suiteMs + 500) return null;
+    const r = await runTests({ repoRoot, timeoutMs: Math.min(left, 2 * suiteMs + 1000) });
+    spent += r.execution_time_ms;
+    out.run++;
+    return r;
+  };
   try {
     for (const hi of open) {
       let killed = false;
       for (const m of mutants.filter(x => x.hunk === hi)) {
-        const left = budgetMs - usedMs;
-        const full = 2 * suiteMs + 1000;
-        if (left < suiteMs + 500) { out.budget_exhausted = true; return done(); }
-        const slice = Math.min(left, full);
         fs.writeFileSync(abs, m.src);
-        const r = await runTests({ repoRoot, timeoutMs: slice });
-        usedMs += r.execution_time_ms;
-        out.run++;
-        if (r.status === 'failed' || (r.status === 'timeout' && slice === full)) {
+        let r = await runMutant();
+        if (r && r.status === 'timeout') {
+          out.timeouts = (out.timeouts || 0) + 1;
+          r = await runMutant();
+        }
+        if (!r) { out.budget_exhausted = true; return done(); }
+        if (r.status === 'passed') suiteMs = Math.max(1, r.execution_time_ms);
+        if (r.status === 'failed') {
           out.killed = m.mutation;
           out.killed_line = m.line;
           killed = true;
@@ -72,8 +85,9 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
 // pass that executed every changed function and killed a mutant of every
 // change hunk. Otherwise it is reverted: `reverted` with reason `edit_not_exercised`
 // / `no_coverage_tool` when no test ran the edit (pass or fail), `coverage_timeout`
-// when evaluating coverage overran the test budget, or
-// `tests_insensitive` when a hunk has no mutant that fails the suite. `snapshotPath` persists
+// when evaluating coverage overran the test budget,
+// `tests_insensitive` when a hunk has no mutant that fails the suite, or
+// `mutation_budget` when the mutant runs did not fit their budget. `snapshotPath` persists
 // the pre-edit content so a signal or crash mid-test can be undone. `onKept`
 // runs once an edit is final (the worktree commit) and its return value is
 // reported as `commit`.
@@ -158,18 +172,19 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
     try {
       mutation = await mutationEvidence({
         repoRoot, file: proposal.file, before, edited, span, diffTest: proposal.diff_test,
-        budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs: testResult.execution_time_ms, coverageMs: coverage.duration_ms || 0
+        budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs: testResult.execution_time_ms
       });
     } catch (err) {
       mutation = { killed: null, ok: false, error: err.message };
     }
     if (!mutation.ok) {
       // Green on the edit and on every mutant of a hunk, or a deletion no
-      // oracle observed: the tests cannot tell.
+      // oracle observed: the tests cannot tell. Out of mutant budget (or an
+      // edit too large to mutate): they were not asked.
       snap.restoreAll();
       reverted = true;
       status = 'reverted';
-      reason = 'tests_insensitive';
+      reason = mutation.budget_exhausted ? 'mutation_budget' : 'tests_insensitive';
     }
   }
 

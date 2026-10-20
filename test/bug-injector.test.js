@@ -135,3 +135,59 @@ test('editMutants with the pre-edit file: only changed tokens are mutated, tagge
   const pyAfter = 'def charge(user, amt):\n    fee = amt // 10\n    return amt - fee\n';
   assert.deepStrictEqual(bugInjector.editMutants(pyAfter, { file: 'pay.py', before: pyBefore }), [], 'a pure deletion has nothing to mutate');
 });
+
+// ---------- SG20: mutant generation is linear in the edit ----------
+
+const fnJs = (i) => `function f${i}(a, b) {\n  if (a > ${i} && b < ${i + 1}) return a + b;\n  return a - b === ${i} ? 1 : 0;\n}\n`;
+const fnPy = (i) => `def f${i}(a, b):\n    if a > ${i} and b < ${i + 1}:\n        return a + b\n    return 1 if a - b == ${i} else 0\n\n\n`;
+function fill(gen, bytes) {
+  let s = '', i = 0;
+  while (s.length < bytes) s += gen(i++);
+  return s;
+}
+
+test('changeHunks on a long minified line diffs only the changed tokens (AUDIT-9 H1)', () => {
+  const before = fill(fnJs, 190_000).replace(/\n\s*/g, ' ');
+  const at = before.indexOf('return a + b;', before.length / 2);
+  const after = before.slice(0, at) + 'return b + a;' + before.slice(at + 'return a + b;'.length);
+  const t0 = performance.now();
+  const hunks = bugInjector.changeHunks(before, after, 'min.js');
+  assert(performance.now() - t0 < 2000);
+  assert.strictEqual(hunks.length, 1);
+  assert(!hunks[0].capped);
+  const changed = hunks[0].ranges.reduce((n, [a, b]) => n + b - a, 0);
+  assert(changed <= 'b + a'.length, JSON.stringify(hunks[0].ranges));
+  assert(hunks[0].ranges.every(([a]) => a >= at && a < at + 13));
+  const ms = bugInjector.editMutants(after, { file: 'min.js', max: 3, before });
+  assert(ms.length >= 1 && ms.every(m => m.line === 1 && m.hunk === 0));
+});
+
+test('editMutants: an edit spanning 100 KB is over the cap: no mutants, marked capped, fast (AUDIT-9 H1)', () => {
+  for (const [file, gen, re, to] of [['m.js', fnJs, /return a \+ b;/g, 'return b + a;'], ['m.py', fnPy, /return a \+ b/g, 'return b + a']]) {
+    const before = fill(gen, 199_000);
+    const after = before.slice(0, 100_000).replace(re, to) + before.slice(100_000);
+    const t0 = performance.now();
+    const withBefore = bugInjector.editMutants(after, { file, max: 3, before });
+    const bySpan = bugInjector.editMutants(after, { start: 0, end: 100_000, file, max: 3 });
+    assert(performance.now() - t0 < 5000, `${file}: ${performance.now() - t0} ms`);
+    for (const r of [withBefore, bySpan]) {
+      assert.strictEqual(r.length, 0, file);
+      assert.strictEqual(r.capped, true, file);
+    }
+  }
+});
+
+test('editMutants: line numbers from line starts, one mutant set per hunk, under the hunk cap', () => {
+  const n = bugInjector.EDIT_MAX_HUNKS;
+  const fnSrc = (i, op) => `function f${i}(x) {\n  return x ${op} ${i};\n}\n`;
+  const before = Array.from({ length: n }, (_, i) => fnSrc(i, '+')).join('');
+  const after = Array.from({ length: n }, (_, i) => fnSrc(i, '-')).join('');
+  const ms = bugInjector.editMutants(after, { file: 'a.js', max: 1, before });
+  assert.strictEqual(ms.capped, undefined);
+  assert.deepStrictEqual(ms.map(m => m.hunk), Array.from({ length: n }, (_, i) => i));
+  assert.deepStrictEqual(ms.map(m => m.line), Array.from({ length: n }, (_, i) => 3 * i + 2));
+  const over = before + fnSrc(n, '+');
+  const r = bugInjector.editMutants(after + fnSrc(n, '-'), { file: 'a.js', max: 1, before: over });
+  assert.strictEqual(r.capped, true);
+  assert.strictEqual(r.length, 0);
+});

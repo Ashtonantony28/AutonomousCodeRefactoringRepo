@@ -485,8 +485,9 @@ function findCallSites({ lang, names, file, proposedSrc, region, repoRoot }) {
   if (!repoRoot) return hits;
   // Repo scan, bounded like the JS one: only files naming a function on a
   // word boundary, those that also name the edited module first; at most
-  // SCAN_MAX_FILES are scanned, stripped sources are cached per run, and the
-  // scan stops at the first call site (it already fails the check).
+  // SCAN_MAX_FILES files / SCAN_MAX_BYTES are scanned (a file that would go
+  // over the byte cap is skipped), stripped sources are cached per run, and
+  // the scan stops at the first call site (it already fails the check).
   const target = file ? path.resolve(repoRoot, file) : null;
   const nameRe = new RegExp(`(?<![\\w])(?:${names.map(escapeRe).join('|')})(?![\\w])`);
   const stem = target ? path.basename(target).replace(EXTENSIONS[lang], '') : '';
@@ -498,11 +499,13 @@ function findCallSites({ lang, names, file, proposedSrc, region, repoRoot }) {
     if (!src || !nameRe.test(src)) continue;
     (modRe && modRe.test(src) ? near : far).push({ f, src });
   }
-  let scanned = 0;
+  let scanned = 0, bytes = 0;
   for (const { f, src } of near.concat(far)) {
     if (hits.length) { hits.stopped = true; break; }
     if (scanned >= SCAN_MAX_FILES) { hits.capped = true; break; }
+    if (bytes + src.length > SCAN_MAX_BYTES) { hits.capped = true; continue; }
     scanned++;
+    bytes += src.length;
     const stripped = strippedFor(f, src, lang);
     for (const n of names) {
       const c = countCallSites(src, lang, n, null, stripped);
@@ -514,6 +517,7 @@ function findCallSites({ lang, names, file, proposedSrc, region, repoRoot }) {
 
 const SCAN_MAX_WALK = 2000;
 const SCAN_MAX_FILES = 200;
+const SCAN_MAX_BYTES = 2_000_000;
 const STRIP_CACHE_MAX_BYTES = 64e6;
 const stripCache = new Map();
 let stripCacheBytes = 0;
@@ -557,7 +561,7 @@ function checkSignatureDrift(before, after, ctx = {}) {
   const hits = findCallSites({ lang: before.lang, names: [...new Set(all.map(d => d.name))], file: ctx.file, proposedSrc: ctx.proposedSrc || '', region: ctx.region, repoRoot: ctx.repoRoot });
   const where = hits.map(h => `${h.name} in ${h.file} (${h.count})`).join(', ');
   const scan = hits.stopped ? ' (repo scan stops at the first call site)'
-    : hits.capped ? ` (repo scan capped at ${SCAN_MAX_FILES} files mentioning the name; rest not checked)` : '';
+    : hits.capped ? ` (repo scan capped at ${SCAN_MAX_FILES} files / ${SCAN_MAX_BYTES / 1e6} MB mentioning the name; rest not checked)` : '';
   return {
     check_name: 'signature_drift',
     passed: hits.length === 0,
@@ -792,5 +796,6 @@ module.exports = {
   collectRepoFiles,
   safeRead,
   SCAN_MAX_WALK,
+  SCAN_MAX_BYTES,
   PYTHON_STDLIB
 };

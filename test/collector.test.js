@@ -69,6 +69,15 @@ test('an edit reverted because no mutant of it failed the suite (tests_insensiti
   assert.strictEqual(calibration.executedPoints([q]).length, 0);
 });
 
+test('an edit reverted because the mutant runs did not fit their budget (mutation_budget) is not a label', () => {
+  const calibration = require('../src/rl/calibration');
+  const repo = path.join(env.root, 'collector-mutation-budget');
+  const q = { ...fakeProposals()[1], issue_id: 'mutation-budget', combined_confidence: 0.8, test_outcome: { status: 'reverted', reason: 'mutation_budget' } };
+  assert.strictEqual(collectSample(q, repo), null);
+  assert.strictEqual(calibration.executedPoints([q]).length, 0);
+  assert.strictEqual(loadSamples(repo).length, 0);
+});
+
 // ---------- SG17: samples are keyed by the edit, not the snippet ----------
 
 test('a different edit of the same snippet adds a sample; the same edit stays one', () => {

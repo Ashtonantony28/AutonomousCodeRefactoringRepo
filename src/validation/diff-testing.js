@@ -35,7 +35,9 @@
 // When the edit deletes code, the current version is probed so the result
 // says whether that code ran (`deletions_observed`).
 // run() is synchronous: the caller blocks on Atomics.wait until the worker
-// reports or the hard kill fires. Python edits (`file` *.py or
+// (which prepares the inputs, then runs the sandbox worker) reports or the
+// hard kill fires. Generated inputs are capped in source size per input and
+// per target. Python edits (`file` *.py or
 // `lang: 'python'`) go to py-diff-testing.js.
 
 const path = require('path');
@@ -44,6 +46,7 @@ const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads
 const { parse } = require('@babel/parser');
 
 const WORKER_FILE = path.join(__dirname, 'diff-sandbox-worker.js');
+const PREP_FILE = path.join(__dirname, 'diff-prep-worker.js');
 const MAX_RUNS = 40;
 const MAX_TARGETS = 8;
 const MIN_VALUE_RUNS = 10;
@@ -55,6 +58,10 @@ const SEED = 42;
 const CLASS_WRAP = '__DT_Class__';
 const N_CALLBACKS = 9;
 const ITER_CALLBACK = 9;
+const MAX_INPUT_CHARS = 64_000;
+const MAX_TARGET_CHARS = 1_000_000;
+const PREP_MARGIN_MS = 100;
+const PREP_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 };
 const RESOURCE_LIMITS = { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 16, stackSizeMb: 4 };
 // Globals a Node module can see that the sandbox does not provide.
 const HOST_GLOBALS = ['process', 'Buffer', 'setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval',
@@ -852,11 +859,18 @@ function generator(h, rand, pools) {
     if (r < 0.85) return rand() < 0.5;
     return rand() < 0.5 ? null : undefined;
   };
+  // A forced length applies to one array level only (the outermost, or with
+  // `inner` the one inside it), so a forced input grows linearly in n.
+  let nest = 0;
   const arrLen = (depth) => {
-    if (force) return force.as === 'arr' && depth < 2 ? force.n : 2;
+    if (force) return force.as === 'arr' && depth < 2 && nest === (force.inner ? 1 : 0) ? force.n : 2;
     return lengths.length && rand() < 0.2 ? pick(lengths) : Math.floor(rand() * 5);
   };
-  const arr = (el, depth) => Array.from({ length: arrLen(depth) }, el);
+  const arr = (el, depth) => {
+    const n = arrLen(depth);
+    nest++;
+    try { return Array.from({ length: n }, el); } finally { nest--; }
+  };
   const obj = (keys, val) => {
     const o = {};
     for (const k of keys) if (force || rand() < 0.8) o[k] = val(k);
@@ -951,13 +965,18 @@ function buildInputs(pair, runs, seed, arityOpt) {
   const self = () => (selfKeys.length ? gen.forPaths(['this']) : undefined);
   const seen = new Set();
   const out = [];
-  // Adds an in-domain input not seen before (arity-0 calls repeat).
+  let chars = 0;
+  // Adds an in-domain input not seen before (arity-0 calls repeat), within
+  // the per-input and per-target source size caps.
   const add = (args, s) => {
     if (!inDomain(args)) return false;
     const lit = [tupleLit(args), toLiteral(s)];
+    const size = lit[0].length + lit[1].length;
+    if (size > MAX_INPUT_CHARS || chars + size > MAX_TARGET_CHARS) return false;
     const key = lit.join('|');
     if ((k > 0 || selfKeys.length) && seen.has(key)) return false;
     seen.add(key);
+    chars += size;
     out.push({ args, self: s, lit });
     return true;
   };
@@ -974,9 +993,12 @@ function buildInputs(pair, runs, seed, arityOpt) {
   if (k > 0 || selfKeys.length) {
     const stringish = paths.flat().concat(selfKeys.length ? ['this'] : []).some(p => [...(h.keys.get(p) || [])].some(x => STRING_HINTS.has(x)));
     const forces = [];
+    const listy = (p) => h.indexed.has(p) || h.iterated.has(p);
+    const nestedArr = [...h.indexed, ...h.iterated].some(p => p.includes('.$el')) || [...h.alias].some(([a, b]) => a.endsWith('.$el') && listy(b));
     for (const n of pools.nums) {
       forces.push({ n, as: 'num' });
       if (Number.isInteger(n) && n >= 0 && n <= 2000) forces.push({ n, as: 'arr' });
+      if (nestedArr && Number.isInteger(n) && n >= 0 && n <= 2000) forces.push({ n, as: 'arr', inner: true });
       if (stringish && Number.isInteger(n) && n >= 0 && n <= 5000) forces.push({ n, as: 'str' });
     }
     for (const s of pools.strs) forces.push({ s });
@@ -1014,15 +1036,20 @@ function jsonSafe(v) {
 
 // --- execution --------------------------------------------------------------
 
-function execute(payload, hardKillMs) {
+const absNow = () => performance.timeOrigin + performance.now();
+
+// Runs `file` in a worker and blocks until it signals or `hardKillMs` passes.
+// -> { result, runs, phase } (result null on a hard kill).
+function inWorker(file, workerData, hardKillMs, resourceLimits, transfer = []) {
   const sab = new SharedArrayBuffer(4);
   const { port1, port2 } = new MessageChannel();
+  const prog = new MessageChannel();
   let worker;
   try {
-    worker = new Worker(WORKER_FILE, {
-      workerData: { ...payload, flag: sab, port: port2 },
-      transferList: [port2],
-      resourceLimits: RESOURCE_LIMITS,
+    worker = new Worker(file, {
+      workerData: { ...workerData, flag: sab, port: port2, progress: prog.port2 },
+      transferList: [port2, prog.port2, ...transfer],
+      resourceLimits,
       env: {},
       argv: [],
       execArgv: [],
@@ -1031,21 +1058,34 @@ function execute(payload, hardKillMs) {
     });
   } catch (err) {
     port1.close();
-    return { verdict: 'inconclusive', reason: `worker failed to start: ${err.message}`, runs: 0 };
+    prog.port1.close();
+    return { error: err };
   }
   worker.on('error', () => {});
   worker.unref();
   Atomics.wait(new Int32Array(sab), 0, 0, Math.max(1, hardKillMs));
-  let result = null, runs = 0, m;
-  while ((m = receiveMessageOnPort(port1))) {
-    const msg = m.message;
-    if (msg.type === 'result') result = msg.result;
-    else if (msg.type === 'compared') runs = msg.runs;
+  let result = null, runs = 0, phase = null, m;
+  for (const port of [port1, prog.port1]) {
+    while ((m = receiveMessageOnPort(port))) {
+      if (m.message.type === 'result') result = m.message.result;
+      else if (m.message.type === 'phase') phase = m.message.phase;
+      else if (m.message.type === 'compared') runs = m.message.runs;
+    }
   }
   worker.terminate().catch(() => {});
   port1.close();
-  if (result) return result;
-  return { verdict: 'inconclusive', reason: `hard kill: sandbox did not finish within ${Math.round(hardKillMs)} ms (after ${runs} runs)`, runs };
+  prog.port1.close();
+  return { result, runs, phase };
+}
+
+// The sandbox run, killed after `waitMs`; `progress` (optional) also
+// receives its run counts. `hardKillMs` is the whole run's limit.
+function execute(payload, waitMs, progress, hardKillMs) {
+  if (progress) progress.postMessage({ type: 'phase', phase: 'execute' });
+  const r = inWorker(WORKER_FILE, { ...payload, relay: progress || null }, waitMs, RESOURCE_LIMITS, progress ? [progress] : []);
+  if (r.error) return { verdict: 'inconclusive', reason: `worker failed to start: ${r.error.message}`, runs: 0 };
+  if (r.result) return r.result;
+  return { verdict: 'inconclusive', reason: `hard kill: sandbox did not finish within ${Math.round(hardKillMs)} ms (after ${r.runs} runs)`, runs: r.runs };
 }
 
 function finish(t0, fields) {
@@ -1059,15 +1099,34 @@ function finish(t0, fields) {
 
 const labelOf = (t) => (t.className ? `${t.className}.${t.name}` : t.owner ? `${t.owner}.${t.name}` : t.name);
 
+const OPT_KEYS = ['currentSrc', 'proposedSrc', 'fileSrc', 'functionName', 'arity', 'runs', 'callTimeoutMs', 'budgetMs', 'minValueRuns'];
+
+// Parsing, target location and input construction run in a worker together
+// with the sandbox run, so the hard kill bounds all of it and the main thread
+// only waits.
 function run(opts) {
   if (opts && (opts.lang === 'python' || /\.py$/i.test(opts.file || ''))) return require('./py-diff-testing').run(opts);
   const t0 = performance.now();
-  const { currentSrc, proposedSrc, fileSrc, functionName, arity, runs = MAX_RUNS } = opts;
   const hardKillMs = opts.hardKillMs || HARD_KILL_MS;
-  if (typeof currentSrc !== 'string' || typeof proposedSrc !== 'string') {
+  if (typeof opts.currentSrc !== 'string' || typeof opts.proposedSrc !== 'string') {
     return finish(t0, { verdict: 'inconclusive', reason: 'currentSrc and proposedSrc must be strings', runs: 0 });
   }
+  const data = {};
+  for (const k of OPT_KEYS) if (opts[k] !== undefined && typeof opts[k] !== 'function') data[k] = opts[k];
+  data.hardKillMs = hardKillMs;
+  const r = inWorker(PREP_FILE, { opts: data, deadline: absNow() + hardKillMs }, hardKillMs, PREP_LIMITS);
+  if (r.error) return finish(t0, { verdict: 'inconclusive', reason: `worker failed to start: ${r.error.message}`, runs: 0 });
+  if (r.result) return finish(t0, r.result);
+  const why = r.phase === 'execute' ? `sandbox did not finish within ${Math.round(hardKillMs)} ms (after ${r.runs} runs)`
+    : `input preparation did not finish within ${Math.round(hardKillMs)} ms`;
+  return finish(t0, { verdict: 'inconclusive', reason: `hard kill: ${why}`, runs: r.runs });
+}
 
+// Worker side of run(): everything up to and including the sandbox run, which
+// gets what is left before `deadline` (epoch ms). `progress` is the port run()
+// listens on.
+function prepareAndExecute(opts, deadline, progress) {
+  const { currentSrc, proposedSrc, fileSrc, functionName, arity, runs = MAX_RUNS } = opts;
   let mode = 'snippet';
   let cur, prop;
   const at = typeof fileSrc === 'string' && currentSrc ? fileSrc.indexOf(currentSrc) : -1;
@@ -1107,7 +1166,7 @@ function run(opts) {
   const globals = hostGlobals(currentSrc, proposedSrc, globalAliases(typeof fileSrc === 'string' ? fileSrc : currentSrc));
   if (globals.length) caps.push(`the edit changes references to host globals the sandbox does not provide (${globals.join(', ')})`);
   if (!pairs.length && (mode !== 'file' || !caps.length)) {
-    return finish(t0, { verdict: 'inconclusive', reason: ['no callable function or constant located in the edit', ...caps].join('; '), runs: 0, mode });
+    return { verdict: 'inconclusive', reason: ['no callable function or constant located in the edit', ...caps].join('; '), runs: 0, mode };
   }
   const pool = { nums: new Set(), strs: new Set() };
   const plan = pairs.map((p, i) => {
@@ -1124,7 +1183,6 @@ function run(opts) {
     probe = mode === 'file' ? probeDeletions(fileSrc, deleted.map(([a, b]) => [a + at, b + at])) : probeDeletions(currentSrc, deleted);
   }
 
-  const elapsed = performance.now() - t0;
   let res = execute({
     currentCode: probe ? probe.code : cur.code,
     hitCount: probe ? probe.n : 0,
@@ -1138,7 +1196,7 @@ function run(opts) {
     minValueRuns: opts.minValueRuns || MIN_VALUE_RUNS,
     fileMode: mode === 'file',
     fileText: mode === 'snippet' && typeof fileSrc === 'string' ? `${fileSrc}\n${currentSrc}` : undefined
-  }, hardKillMs - elapsed);
+  }, deadline - PREP_MARGIN_MS - absNow(), progress, opts.hardKillMs || HARD_KILL_MS);
 
   if (res.verdict !== 'divergent' && (caps.length || !pairs.length)) {
     const why = pairs.length ? caps : ['no callable function or constant located in the edit', ...caps];
@@ -1153,12 +1211,12 @@ function run(opts) {
   if (deleted.length) res.deletions_observed = !!probe && res.verdict === 'equivalent' && res.deletions_observed === true;
   else delete res.deletions_observed;
   const callables = plan.filter(p => p.desc.kind !== 'value');
-  return finish(t0, {
+  return {
     ...res,
     function_name: plan.map(p => p.label).join(', '),
     arity: callables.length ? callables[0].arity : 0,
     mode
-  });
+  };
 }
 
-module.exports = { run, collectTargets, toLiteral, HARD_KILL_MS };
+module.exports = { run, prepareAndExecute, collectTargets, toLiteral, HARD_KILL_MS };

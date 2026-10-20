@@ -73,15 +73,18 @@ saturation figures are reported on the dashboard as a spend indicator only.
   comments, whitespace and docstrings are no evidence), and fails on at least
   one of up to 3 bug-injected mutants of the changed characters (or, when no
   operator applies to them, of the edited lines; `bug-injector.editMutants`,
-  parse-valid only). Mutant runs re-run the whole suite and share the main
-  run's 60 s budget: each gets at most 2× the main run's time + 1 s, none
-  starts with less than the main run's time + 0.5 s left; a run that fails,
-  or times out on its full slice, kills the mutant. Otherwise `reverted` with
-  reason `edit_not_exercised` / `no_coverage_tool` (no test ran the edit,
-  whether the suite passed or failed), `coverage_timeout` (coverage
-  post-processing overran the test budget) or `tests_insensitive` (no mutant
-  failed). These four reasons are untested outcomes: no sample, calibration
-  point, reward or Reflexion repair.
+  parse-valid only). Mutant runs re-run the whole suite without coverage and
+  have their own 60 s budget: each gets at most 2× the plain suite time + 1 s
+  (the main run's time until a surviving mutant run measures it), none after
+  the first starts with less than that time + 0.5 s left. Only a failing run
+  kills a mutant; a timed-out run is re-run once and counts only if that run
+  fails. Otherwise `reverted` with reason `edit_not_exercised` /
+  `no_coverage_tool` (no test ran the edit, whether the suite passed or
+  failed), `coverage_timeout` (coverage post-processing overran the test
+  budget), `tests_insensitive` (no mutant failed) or `mutation_budget` (the
+  mutant runs did not fit their budget, or the edit is over 16 change hunks /
+  32,000 changed characters). These five reasons are untested outcomes: no
+  sample, calibration point, reward or Reflexion repair.
 - If `git worktree add` fails (e.g. a user branch named `refactor` blocks
   the `refactor/` ref namespace), it is retried once on `refactor-run/<run_id>`
   (`refactor-run-<run_id>` when a `refactor-run` branch exists); if that fails
@@ -229,7 +232,8 @@ same snippet in a later run adds a sample/point. Entries stored without
 - **Samples**: one per executed proposal with a label (`passed` = 1,
   `reverted`/`failed` = 0; environment errors, apply failures and untested
   edits, i.e. `reverted` with `edit_not_exercised` / `no_coverage_tool` /
-  `coverage_timeout` / `tests_insensitive`, are not samples).
+  `coverage_timeout` / `tests_insensitive` / `mutation_budget`, are not
+  samples).
 - **Features** (`FEATURE_NAMES` in `src/rl/features.js`):
   `[p_preserves, pattern_score, proposal_complexity, risk_estimate]`
   (`p_preserves` = jury mean). Weights saved under a different feature list

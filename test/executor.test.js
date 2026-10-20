@@ -367,19 +367,87 @@ test('green suite that runs the edit but cannot tell a mutant of it: reverted te
   assertReverted(res, repo, 'src/scale.js', before, kept);
 });
 
-test('mutant runs share the test budget: none fits -> tests_insensitive with budget_exhausted', async (t) => {
-  const cur = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
+// ---------- SG20: mutant budget, timeouts and edit size ----------
+
+const SLOW_CUR = 'function inc(x) {\n  const y = x + 1;\n  return y;\n}';
+const SLOW_PROP = 'function inc(x) {\n  return x + 1;\n}';
+
+test('mutant runs have their own budget: a suite that uses most of the test budget still gets a mutant run (AUDIT-9 C2)', async (t) => {
   const repo = nodeRepo(t, {
-    'src/inc.js': `'use strict';\n${cur}\nmodule.exports = { inc };\n`,
+    'src/inc.js': `'use strict';\n${SLOW_CUR}\nmodule.exports = { inc };\n`,
     'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('assert').strictEqual(require('./src/inc').inc(1), 2);\n"
   }, 'node check.js');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo, testTimeoutMs: 2500 }));
+  assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
+  assert(res.mutation.run >= 1 && res.mutation.killed, JSON.stringify(res.mutation));
+});
+
+test('out of mutant budget: reverted mutation_budget, not tests_insensitive, and not a label (AUDIT-9 C2)', async (t) => {
+  const cur = 'function f(a, b) {\n  return a;\n}';
+  const prop = 'function f(a, b) {\n  return a > 1 && b < 2 ? a + 1 : 3;\n}';
+  const repo = nodeRepo(t, {
+    'src/f.js': `'use strict';\n${cur}\nmodule.exports = { f };\n`,
+    'check.js': "const t0 = Date.now(); while (Date.now() - t0 < 900); require('./src/f').f(0, 0);\n"
+  }, 'node check.js');
+  const before = fs.readFileSync(path.join(repo, 'src/f.js'), 'utf8');
+  let kept = false;
   const res = await withoutTestContext(() => runExecutor({
-    proposal: makeProposal('src/inc.js', cur, 'function inc(x) {\n  return x + 1;\n}'), repoRoot: repo, testTimeoutMs: 2500
+    proposal: makeProposal('src/f.js', cur, prop), repoRoot: repo, testTimeoutMs: 1500, onKept: () => { kept = true; }
   }));
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
-  assert.strictEqual(res.reason, 'tests_insensitive');
-  assert.strictEqual(res.mutation.run, 0);
+  assert.strictEqual(res.reason, 'mutation_budget');
   assert.strictEqual(res.mutation.budget_exhausted, true);
+  assert.strictEqual(res.mutation.run, 1, JSON.stringify(res.mutation));
+  assert(res.mutation.mutants >= 2);
+  assert(!isLabeled(res));
+  assertReverted(res, repo, 'src/f.js', before, kept);
+});
+
+// The suite never asserts; its n-th invocation (counted in a file outside
+// the repo) runs `slow` instead of finishing at once.
+function countingSuite(t, slow) {
+  const counter = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sg20-count-')), 'n');
+  t.after(() => env.rm(path.dirname(counter)));
+  return nodeRepo(t, {
+    'src/inc.js': `'use strict';\n${SLOW_CUR}\nmodule.exports = { inc };\n`,
+    'check.js': `const fs = require('fs');\nconst p = ${JSON.stringify(counter)};\nconst n = (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : 0) + 1;\nfs.writeFileSync(p, String(n));\nrequire('./src/inc').inc(1);\n${slow}\n`
+  }, 'node check.js');
+}
+
+test('a mutant run that times out is no kill: it is re-run once (AUDIT-9 H2)', async (t) => {
+  const repo = countingSuite(t, 'if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.timeouts, 1);
+  assert.strictEqual(res.mutation.killed, null);
+  assert(res.mutation.run >= 2);
+});
+
+test('a timed-out mutant whose re-run fails is killed', async (t) => {
+  const repo = countingSuite(t, 'if (n === 2) { const t0 = Date.now(); while (Date.now() - t0 < 8000); }\nif (n > 2) process.exit(1);');
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/inc.js', SLOW_CUR, SLOW_PROP), repoRoot: repo }));
+  assert.strictEqual(res.status, 'passed', JSON.stringify(res.mutation));
+  assert.strictEqual(res.mutation.timeouts, 1);
+  assert.strictEqual(res.mutation.run, 2);
+});
+
+test('an edit over the change-hunk cap gets no mutants: reverted mutation_budget (AUDIT-9 H1)', async (t) => {
+  const n = 17;
+  const fnSrc = (i, op) => `function f${i}(x) {\n  return x ${op} ${i};\n}\n`;
+  const cur = Array.from({ length: n }, (_, i) => fnSrc(i, '+')).join('');
+  const prop = Array.from({ length: n }, (_, i) => fnSrc(i, '-')).join('');
+  const names = Array.from({ length: n }, (_, i) => `f${i}`).join(', ');
+  const asserts = Array.from({ length: n }, (_, i) => `assert.strictEqual(m.f${i}(100), ${100 - i});`).join(' ');
+  const repo = nodeRepo(t, {
+    'src/many.js': `'use strict';\n${cur}module.exports = { ${names} };\n`,
+    'test/many.test.js': nodeTest(`const m = require('../src/many');\ntest('all', () => { ${asserts} });`)
+  });
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('src/many.js', cur, prop), repoRoot: repo }));
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'mutation_budget');
+  assert.strictEqual(res.mutation.edit_too_large, true);
+  assert.strictEqual(res.mutation.run, 0);
 });
 
 test('red suite that never ran the edit: reverted edit_not_exercised, not a label', async (t) => {

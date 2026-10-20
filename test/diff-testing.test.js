@@ -738,3 +738,52 @@ test('deletions: the result says whether the deleted code ran', () => {
   const noDeletion = edit('function f(x) {\n  return x + 1;\n}', 'function f(x) {\n  return 1 + x;\n}');
   assert(!('deletions_observed' in noDeletion));
 });
+
+// ---------- SG20: bounded inputs, preparation inside the hard kill, deferred state ----------
+
+const rowsFn = (lit, op) => `function sum(m) {\n  let s = 0;\n  for (const row of m) for (let i = 0; i < row.length; i++) s ${op} row[i];\n  if (s > ${lit}) return ${lit};\n  return s;\n}\nmodule.exports = { sum };\n`;
+
+test('nested-row inputs grow linearly: a literal near 2000 stays in budget and is decided (AUDIT-9 C1)', () => {
+  const cur = rowsFn(1999, '+='), prop = rowsFn(1999, '= s +');
+  const t0 = performance.now();
+  const r = run({ currentSrc: cur, proposedSrc: prop, fileSrc: cur });
+  const ms = performance.now() - t0;
+  assert(ms < 5000, `${ms} ms`);
+  assert.strictEqual(r.verdict, 'equivalent', r.reason);
+  assert(r.runs > 0);
+});
+
+test('a forced length also reaches the arrays inside an array: row-length boundaries separate the versions', () => {
+  const cur = 'function f(m) {\n  let s = 0;\n  for (const row of m) { if (row.length > 1000) return -1; for (let i = 0; i < row.length; i++) s += row[i]; }\n  return s;\n}\nmodule.exports = { f };\n';
+  const r = run({ currentSrc: cur, proposedSrc: cur.replace('> 1000', '> 1001'), fileSrc: cur });
+  assert.strictEqual(r.verdict, 'divergent', r.reason);
+});
+
+test('the hard kill bounds input preparation too, and never reports a negative budget (AUDIT-9 L3)', () => {
+  const cur = rowsFn(1999, '+='), prop = rowsFn(1999, '= s +');
+  const t0 = performance.now();
+  const r = run({ currentSrc: cur, proposedSrc: prop, fileSrc: cur, hardKillMs: 30 });
+  assert(performance.now() - t0 < 1500);
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /hard kill: (input preparation|sandbox) did not finish within 30 ms/);
+  const hang = run({
+    currentSrc: 'function f(x) { return 1; }\nmodule.exports = { f };',
+    proposedSrc: 'function f(x) { if (x === 1) while (true) {} return 1; }\nmodule.exports = { f };',
+    callTimeoutMs: 10000,
+    hardKillMs: 1500
+  });
+  assert.match(hang.reason, /^hard kill: sandbox did not finish within 1500 ms \(after [1-9]\d* runs\)/);
+  assert(hang.runs > 0);
+});
+
+test('large module state is compared once per target: equivalent edits stay equivalent, a state change is still divergent (AUDIT-9 H3)', () => {
+  const data = `const table = [${Array.from({ length: 19000 }, (_, i) => i).join(', ')}];\nconst seen = [];\n`;
+  const fn = (body) => `${data}function twice(x) {\n  if (typeof x !== 'number') return 0;\n  ${body}\n}\nmodule.exports = { twice, table, seen };\n`;
+  const cur = fn('return x * 2;');
+  const same = run({ currentSrc: cur, proposedSrc: fn('return x + x;'), fileSrc: cur });
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+  const writes = run({ currentSrc: cur, proposedSrc: fn('if (x === 1) seen.push(x);\n  return x * 2;'), fileSrc: cur });
+  assert.strictEqual(writes.verdict, 'divergent', writes.reason);
+  const big = run({ currentSrc: cur, proposedSrc: fn('if (x === 1) table[18999] = 0;\n  return x * 2;'), fileSrc: cur });
+  assert.strictEqual(big.verdict, 'divergent', big.reason);
+});

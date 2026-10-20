@@ -54,25 +54,45 @@ function tokensOf(code, lo, hi, lang) {
   return out.sort((x, y) => x.s - y.s);
 }
 
+// Common leading/trailing tokens are matched first (they are part of some
+// LCS), so a small change in a long line costs a diff of the change only.
 function tokenHunk(bc, ac, b, a, lang) {
   const bt = b.length ? tokensOf(bc, b[0].s, b[b.length - 1].e, lang) : [];
   const at = a.length ? tokensOf(ac, a[0].s, a[a.length - 1].e, lang) : [];
-  const pairs = lcs(bt.map(t => t.v), at.map(t => t.v)) || [];
-  const mb = new Set(pairs.map(p => p[0])), ma = new Set(pairs.map(p => p[1]));
-  const ranges = at.filter((t, j) => !ma.has(j)).map(t => [t.s, t.e]);
-  const deleted = bt.filter((t, i) => !mb.has(i)).map(t => [t.s, t.e]);
+  let p = 0, q = 0;
+  while (p < bt.length && p < at.length && bt[p].v === at[p].v) p++;
+  while (q < bt.length - p && q < at.length - p && bt[bt.length - 1 - q].v === at[at.length - 1 - q].v) q++;
+  const bm = bt.slice(p, bt.length - q), am = at.slice(p, at.length - q);
+  const mid = lcs(bm.map(t => t.v), am.map(t => t.v));
+  const pairs = mid || [];
+  const mb = new Set(pairs.map(x => x[0])), ma = new Set(pairs.map(x => x[1]));
+  const ranges = am.filter((t, j) => !ma.has(j)).map(t => [t.s, t.e]);
+  const deleted = bm.filter((t, i) => !mb.has(i)).map(t => [t.s, t.e]);
   if (!ranges.length && !deleted.length) return null;
   const point = a.length ? a[0].s : null;
-  return {
+  const h = {
     start: ranges.length ? ranges[0][0] : point,
     end: ranges.length ? ranges[ranges.length - 1][1] : point,
     ranges,
     deleted,
     deletion: !ranges.length
   };
+  if (!mid) h.capped = true;
+  return h;
 }
 
-// -> [{ start, end, ranges, deleted, deletion, line }] in source order.
+// Line number of offset i in s; offsets must not decrease between calls.
+function lineCounter(s) {
+  let at = 0, n = 1;
+  return (i) => {
+    for (let k = s.indexOf('\n', at); k >= 0 && k < i; k = s.indexOf('\n', k + 1)) { n++; at = k + 1; }
+    return n;
+  };
+}
+
+// -> [{ start, end, ranges, deleted, deletion, line, capped? }] in source
+// order; `capped` marks a hunk whose diff was over MAX_CELLS (every token in
+// it counts as changed).
 function changeHunks(before, after, file) {
   if (typeof before !== 'string' || typeof after !== 'string' || before === after) return [];
   const lang = langOf(file);
@@ -86,16 +106,19 @@ function changeHunks(before, after, file) {
   while (suf > 0 && before[before.length - suf - 1] !== '\n') suf--;
   const bc = stripCode(before, lang, { keepStrings: true }), ac = stripCode(after, lang, { keepStrings: true });
   const bl = linesOf(bc, pre, before.length - suf, lang), al = linesOf(ac, pre, after.length - suf, lang);
-  const pairs = lcs(bl.map(l => l.key), al.map(l => l.key)) || [];
+  const lined = lcs(bl.map(l => l.key), al.map(l => l.key));
+  const pairs = lined || [];
   pairs.push([bl.length, al.length]);
   const out = [];
+  const lineAt = lineCounter(after);
   let i = 0, j = 0;
   for (const [pi, pj] of pairs) {
     if (pi > i || pj > j) {
       const h = tokenHunk(bc, ac, bl.slice(i, pi), al.slice(j, pj), lang);
       if (h) {
         if (h.start === null) h.start = h.end = pj < al.length ? al[pj].s : after.length - suf;
-        h.line = after.slice(0, h.start).split('\n').length;
+        h.line = lineAt(h.start);
+        if (!lined) h.capped = true;
         out.push(h);
       }
     }

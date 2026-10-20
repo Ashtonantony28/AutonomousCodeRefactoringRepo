@@ -37,11 +37,11 @@ const PRELUDE = `(function () {
   var construct = Reflect.construct, apply = Reflect.apply, ownKeys = Reflect.ownKeys, keyFor = Symbol.keyFor;
   var PromiseC = Promise, MapC = Map, SetC = Set, DateC = Date, RegExpC = RegExp, ErrorC = Error, WeakSetC = WeakSet, WeakMapC = WeakMap, ProxyC = Proxy;
   var ReferenceErrorC = ReferenceError, symToPrim = Symbol.toPrimitive, symIter = Symbol.iterator, emptyIter = [][Symbol.iterator];
-  var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
+  var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_END_NODES = 500000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
   var STATE = 0, PLAIN = 1, PROBE = 2;
   var lookup = null, mod = null, rec = null, cur = null, targets = [], bindNames = [], pool = [], known = [];
   var probeArgs = [[0], [1], ['a']], vi = 0;
-  var stubNames = new WeakMapC(), stubCache = new MapC(), seed = 0, hits = [], realmBase = null;
+  var stubNames = new WeakMapC(), stubCache = new MapC(), seed = 0, hits = [], realmBase = null, deferState = false, bindUsed = 0;
   var REALM = [['globalThis', G], ['Object', Object], ['Object.prototype', Object.prototype], ['Array', Array], ['Array.prototype', Array.prototype],
     ['String', String], ['String.prototype', String.prototype], ['Number', Number], ['Number.prototype', Number.prototype],
     ['Boolean.prototype', Boolean.prototype], ['Function.prototype', Function.prototype], ['Symbol', Symbol], ['Symbol.prototype', Symbol.prototype],
@@ -346,6 +346,7 @@ const PRELUDE = `(function () {
       try { v = lookup(bindNames[i]); } catch (e) { continue; }
       if (typeof v !== 'function') out[bindNames[i]] = ser(v, st, 1);
     }
+    bindUsed = MAX_BIND_NODES - st.budget;
     return out;
   }
 
@@ -363,12 +364,41 @@ const PRELUDE = `(function () {
         return stringify({ ok: false, error: describeThrown(e) });
       }
       rec = null;
+      bindUsed = 0;
       r.bind = bindState();
-      r.state = exportsState(newSt(STATE));
+      var est = newSt(STATE);
+      r.state = exportsState(est);
+      r.nodes = MAX_NODES - est.budget + bindUsed;
       r.realm = realmDiff();
       return stringify({ ok: true, load: r });
     },
     capture: function (fn) { lookup = fn; },
+    defer: function () { deferState = true; },
+    // Exports, module bindings and the target's owner, hashed per key, for
+    // a deferred (end-of-target) state comparison; MAX_END_NODES in all.
+    state: function (ti) {
+      var st = newSt(STATE), t = targets[ti] || {}, out = { kind: 'state', state: {}, bind: {} }, stubs = false;
+      st.budget = MAX_END_NODES;
+      function digest(v) { var s = stringify(ser(v, st, 1)); if (s.indexOf('{"t":"stub"') >= 0) stubs = true; return hash(s) + ':' + s.length; }
+      var ex = mod && mod.exports, i, ks;
+      if (ex !== null && (typeof ex === 'object' || typeof ex === 'function')) {
+        ks = ownNames(ex);
+        for (i = 0; i < ks.length; i++) {
+          if (typeof ex === 'function' && (ks[i] === 'length' || ks[i] === 'name' || ks[i] === 'prototype')) continue;
+          var d = getDesc(ex, ks[i]);
+          if (d && 'value' in d && typeof d.value !== 'function') out.state[ks[i]] = digest(d.value);
+        }
+      }
+      for (i = 0; lookup && i < bindNames.length; i++) {
+        var v;
+        try { v = lookup(bindNames[i]); } catch (e) { continue; }
+        if (typeof v !== 'function') out.bind[bindNames[i]] = digest(v);
+      }
+      if (t.mode === 'owner') out.self = digest(t.self);
+      if (st.trunc) out.trunc = true;
+      if (stubs) out.stubbed = true;
+      return stringify(out);
+    },
     cb: function (id) {
       var f = CALLBACKS[id];
       return function () { note('cb' + id, arguments); return apply(f, this, arguments); };
@@ -426,16 +456,18 @@ const PRELUDE = `(function () {
       return out;
     },
     take: function () {
-      var parts = [['args', cur.args], ['self', cur.t.mode === 'instance' || cur.t.mode === 'owner' || cur.t.mode === 'field' ? cur.self : undefined]];
+      var parts = [['args', cur.args], ['self', cur.t.mode === 'instance' || (cur.t.mode === 'owner' && !deferState) || cur.t.mode === 'field' ? cur.self : undefined]];
       for (var i = 0; i < parts.length; i++) {
         var st = newSt(STATE);
         rec[parts[i][0]] = ser(parts[i][1], st, 0);
         if (st.trunc) rec.trunc = true;
       }
-      var sst = newSt(STATE);
-      rec.state = exportsState(sst);
-      if (sst.trunc) rec.trunc = true;
-      rec.bind = bindState();
+      if (!deferState) {
+        var sst = newSt(STATE);
+        rec.state = exportsState(sst);
+        if (sst.trunc) rec.trunc = true;
+        rec.bind = bindState();
+      }
       rec.realm = realmDiff();
       var out = stringify(rec);
       rec = null;
@@ -450,6 +482,8 @@ const PRELUDE = `(function () {
 })();`;
 
 const CALL_TAKE = new vm.Script('__dt.take()', { filename: 'diff-test-take.js' });
+
+const STATE_NODES = 2000;
 
 function now() { return performance.now(); }
 
@@ -495,6 +529,14 @@ function runIn(side, src, timeoutMs) {
     const e = hostError(err);
     if (e.name === 'Timeout') return { kind: 'timeout' };
     return { kind: 'throw', async: false, error: e };
+  }
+}
+
+function stateOf(side, ti, timeoutMs) {
+  try {
+    return JSON.parse(vm.runInContext(`__dt.state(${ti})`, side.ctx, { timeout: timeoutMs }));
+  } catch (err) {
+    return { kind: 'timeout' };
   }
 }
 
@@ -588,7 +630,7 @@ function compareLoad(a, b) {
 function main(data) {
   const t0 = now();
   const { currentCode, proposedCode, targets, callTimeoutMs, loadTimeoutMs, budgetMs, fileMode, fileText, minValueRuns } = data;
-  const post = (msg) => data.port.postMessage(msg);
+  const post = (msg) => { data.port.postMessage(msg); if (data.relay) data.relay.postMessage(msg); };
   const descs = targets.map(t => t.desc);
   const opts = { fileMode, fileText };
 
@@ -615,6 +657,10 @@ function main(data) {
     };
   }
   if (!targets.length) return load ? { verdict: 'inconclusive', runs: 1, reason: load.note } : withHits({ verdict: 'equivalent', runs: 1 }, cur, data);
+  // Large module state is compared once per target, after its runs, instead
+  // of after every call.
+  const defer = Math.max(cur.load.nodes | 0, prop.load.nodes | 0) > STATE_NODES;
+  if (defer) for (const s of [cur, prop]) vm.runInContext('__dt.defer()', s.ctx, { timeout: loadTimeoutMs });
 
   let runs = 0, tested = 0, inconclusive = false;
   const notes = [];
@@ -675,6 +721,20 @@ function main(data) {
       } else if (c === 'differs') differs++;
       else if (c === 'ood') ood++;
       else if (isRefError(a) && isRefError(b)) refBoth++;
+    }
+    if (defer && n) {
+      const sa = stateOf(cur, ti, loadTimeoutMs), sb = stateOf(prop, ti, loadTimeoutMs);
+      if (sa.kind === 'timeout' || sb.kind === 'timeout') { inconclusive = true; notes.push(`${t.label}: module state could not be compared in time`); continue; }
+      if (!(stateEq(sa.state, sb.state) && deepEq(sa.bind, sb.bind) && deepEq(sa.self, sb.self))) {
+        if (!sa.stubbed && !sb.stubbed) {
+          return {
+            verdict: 'divergent', runs,
+            reason: `${t.label}: module state differs after ${n} runs`,
+            counterexample: { phase: 'state', target: t.label, current: sa, proposed: sb }
+          };
+        }
+        differs++;
+      } else if (sa.trunc || sb.trunc) { inconclusive = true; notes.push(`${t.label}: module state too large to compare`); continue; }
     }
     if (value >= need && valued.length >= distinct && !differs && !ood && n >= calls.length) continue;
     inconclusive = true;
