@@ -353,6 +353,81 @@ function parsesPython(src, muts, lineOf, starts, timeoutMs = 10_000) {
   } catch { return null; }
 }
 
+const KEYWORDS = {
+  javascript: new Set(('break case catch class const continue debugger default delete do else export extends finally for function if import in ' +
+    'instanceof let new return super switch this throw try typeof var void while with yield await async of static get set true false null ' +
+    'undefined NaN Infinity arguments').split(' ')),
+  python: new Set(('False None True and as assert async await break class continue def del elif else except finally for from global if ' +
+    'import in is lambda nonlocal not or pass raise return try while with yield self cls match case').split(' '))
+};
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+
+// Top-level bindings of the file -> Map(name -> [start, end) of the
+// definition): JS declarators / functions / classes (babel), Python
+// column-0 assignments, defs and classes (lexical, on the blanked source).
+function moduleBindings(src, code, lang, file) {
+  const out = new Map();
+  if (lang === 'javascript') {
+    const { ast } = require('../validation/ast-checker').parseJs(src, file);
+    for (let s of (ast && ast.program.body) || []) {
+      if (/^Export(?:Named|Default)Declaration$/.test(s.type) && s.declaration) s = s.declaration;
+      if (s.type === 'VariableDeclaration') {
+        for (const d of s.declarations) if (d.id.type === 'Identifier' && d.init) out.set(d.id.name, [d.init.start, d.init.end]);
+      } else if (/^(?:Function|Class)Declaration$/.test(s.type) && s.id) {
+        out.set(s.id.name, [s.start, s.end]);
+      }
+    }
+    return out;
+  }
+  const re = /^(?:(?:async[ \t]+)?def[ \t]+(\w+)|class[ \t]+(\w+)|(\w+)[ \t]*(?::[^=\n]*)?=(?!=))/gm;
+  let m;
+  while ((m = re.exec(code))) {
+    let j = m.index + m[0].length, depth = 0;
+    if (m[3]) {
+      for (; j < code.length; j++) {
+        const c = code[j];
+        if ('([{'.includes(c)) depth++;
+        else if (')]}'.includes(c)) depth--;
+        else if (c === '\n' && depth <= 0 && code[j - 1] !== '\\') break;
+      }
+    } else {
+      const next = /\n(?=\S)/g;
+      next.lastIndex = j;
+      const n = next.exec(code);
+      j = n ? n.index : code.length;
+    }
+    out.set(m[1] || m[2] || m[3], [m[3] ? m.index + m[0].length : m.index, j]);
+  }
+  return out;
+}
+
+// References a hunk's behaviour change is carried by: an inserted identifier
+// (not a keyword, not named among the hunk's deleted tokens) that either
+// names a top-level binding of the file defined outside the edit (a
+// constant, a helper), or replaces another identifier in the same gap (a
+// changed call, method or variable). `h` is a changeHunks hunk of `before`
+// -> `src`. -> [{ name, at, def: [s, e) | null }]
+function carriedReferences(src, before, h, lang, bindings, inEdit) {
+  const word = (r) => src.slice(r[0], r[1]);
+  const was = (r) => before.slice(r[0], r[1]);
+  const kw = KEYWORDS[lang];
+  const isRef = (t) => IDENT.test(t) && !kw.has(t) && !/^\d/.test(t);
+  const deleted = new Set((h.deleted || []).map(was).filter(isRef));
+  const out = [];
+  for (const g of h.gaps || []) {
+    const replaced = g.del.map(was).some(isRef);
+    for (const r of g.ins) {
+      const name = word(r);
+      if (!isRef(name) || deleted.has(name)) continue;
+      const member = /\??\.\s*$/.test(src.slice(Math.max(0, r[0] - 8), r[0]));
+      const def = member ? null : bindings().get(name);
+      if (def && !inEdit(def)) out.push({ name, at: r[0], def });
+      else if (replaced && !def) out.push({ name, at: r[0], def: null });
+    }
+  }
+  return out;
+}
+
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
@@ -369,7 +444,10 @@ const EDIT_MAX_SITES = 12;
 // a Python parse check that did not finish within `timeoutMs` (default 10 s)
 // gives none either, marked `unchecked`. Each mutant is parse-checked on the
 // smallest statement around it (jsParseCheck / parsesPython), not the file.
-// -> [{ mutation, src, line, hunk, site }] (site: the token's offset in src)
+// A reference the hunk's change is carried by (carriedReferences) adds every
+// site of its definition (mutants marked `ref`); one with no definition in
+// the file or no parse-valid mutant of it gives none, marked `unmutated_ref`.
+// -> [{ mutation, src, line, hunk, site, ref? }] (site: the token's offset in src)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -385,6 +463,11 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     return lo + 1;
   };
   const candidates = [];
+  let bound;
+  const bindings = () => bound || (bound = moduleBindings(src, code, lang, file));
+  const inEdit = ([s, e]) => hunks.some(h => h.ranges.some(([a, b]) => a < e && b > s));
+  const defsDone = new Set();
+  const needed = [];
   for (let hi = 0; hi < hunks.length; hi++) {
     const h = hunks[hi];
     if (!h.ranges.length) continue;
@@ -411,6 +494,31 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
         if (l.length < max) l.push({ op, m, hunk: hi, site });
       }
     });
+    // A carried reference needs a kill at every site of its definition; one
+    // with no definition here, or none that mutates, has no evidence.
+    for (const ref of carriedReferences(src, before || '', h, lang, bindings, inEdit)) {
+      const key = ref.def && ref.def.join(':');
+      if (key && defsDone.has(key)) continue;
+      let found = 0;
+      if (ref.def) {
+        defsDone.add(key);
+        EDIT_OPS[lang].forEach((op, oi) => {
+          const re = new RegExp(op.re.source, op.re.flags);
+          re.lastIndex = ref.def[0];
+          let m;
+          while ((m = re.exec(code)) && m.index < ref.def[1]) {
+            if (op.to && op.to(m[0]) === m[0]) continue;
+            found++;
+            if (!sites.has(m.index)) sites.set(m.index, EDIT_OPS[lang].map(() => []));
+            const l = sites.get(m.index)[oi];
+            if (l.length < max) l.push({ op, m, hunk: hi, site: m.index, ref: ref.name });
+          }
+        });
+      }
+      const need = { name: ref.name, line: lineOf(ref.at), hunk: hi };
+      if (!found) return Object.assign([], { unmutated_ref: need });
+      needed.push(need);
+    }
     if (sites.size > EDIT_MAX_SITES) return Object.assign([], { capped: true });
     for (const perOp of sites.values()) {
       const order = [];
@@ -420,7 +528,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const build = (c) => {
     const mut = mutateAt(src, code, c.op, c.m, lang);
-    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
+    return mut && { ...mut, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site, ...(c.ref ? { ref: c.ref } : {}) };
   };
   const kept = new Map();
   const out = [];
@@ -439,6 +547,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       if (b && parses(b)) take(b);
     }
   }
+  const lost = needed.find(n => !out.some(m => m.ref === n.name));
+  if (lost) return Object.assign([], { unmutated_ref: lost });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 

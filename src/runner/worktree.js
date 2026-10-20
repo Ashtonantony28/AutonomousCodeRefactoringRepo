@@ -230,4 +230,15 @@ function commitsSinceBase(info) {
   return out ? out.split('\n').filter(Boolean) : [];
 }
 
-module.exports = { createWorktree, resumeWorktree, commitProposal, commitsSinceBase, committedIssues, syncDirtyFiles, branchFor, gitToplevel };
+// A crashed edit whose commit already landed: HEAD of `dir` carries the
+// `issue_id` trailer and `files` match HEAD. -> that commit's sha, or null.
+function headCommitOf(dir, issueId, files) {
+  if (!issueId || !files.length || !gitToplevel(dir)) return null;
+  const msg = tryGitRaw(dir, ['log', '-1', '--format=%B', 'HEAD']);
+  const m = msg && msg.split('\n').map(l => /^issue_id: (\S+)$/.exec(l.trim())).filter(Boolean).pop();
+  if (!m || m[1] !== issueId) return null;
+  if (tryGit(dir, ['diff', '--quiet', 'HEAD', '--', ...files]) == null) return null;
+  return tryGit(dir, ['rev-parse', 'HEAD']);
+}
+
+module.exports = { createWorktree, resumeWorktree, commitProposal, commitsSinceBase, committedIssues, headCommitOf, syncDirtyFiles, branchFor, gitToplevel };

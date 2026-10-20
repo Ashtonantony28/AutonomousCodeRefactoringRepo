@@ -723,9 +723,17 @@ function checkPyGuardRemoval(curR, propR) {
   return { check_name: 'guard_removal', passed: true, severity: 'score', detail: `raise=${b.raise} assert=${b.assert} guard=${b.guard} kept` };
 }
 
+// `deletes_condition`: fewer comparisons than before, i.e. part of a
+// condition is gone, not reworded (stays a veto whatever the diff test says).
 function checkPyConditionChange(curR, propR) {
-  const gone = lostTokens(conditionTokens(curR), conditionTokens(propR));
-  if (gone.length) return { check_name: 'condition_change', passed: false, severity: 'veto', detail: `lost: ${gone.join(', ')}` };
+  const b = conditionTokens(curR), a = conditionTokens(propR);
+  const gone = lostTokens(b, a);
+  const cmps = (t) => t.filter(x => /^(?:comparison|condition operator) /.test(x)).length;
+  if (gone.length) {
+    const out = { check_name: 'condition_change', passed: false, severity: 'veto', detail: `lost: ${gone.join(', ')}` };
+    if (cmps(a) < cmps(b)) out.deletes_condition = true;
+    return out;
+  }
   return { check_name: 'condition_change', passed: true, severity: 'score', detail: 'comparisons, condition literals and defaults kept' };
 }
 

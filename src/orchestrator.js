@@ -285,8 +285,12 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   apiCache.setMode(cache);
 
   // A previous process died mid-edit: put the file back before anything else.
-  const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo));
-  if (crashed && crashed.discarded) logWarn(`discarded in-flight snapshot from a previous run (${crashed.files.join(', ')}): ${crashed.repo_root} no longer exists`);
+  // A snapshot whose edit is already committed (crash right after the
+  // commit) is dropped: the branch holds the edit and resume reconciles it.
+  const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo), {
+    committed: (d) => worktree.headCommitOf(d.repo_root, d.meta && d.meta.issue_id, Object.keys(d.files))
+  });
+  if (crashed && crashed.discarded) logWarn(`discarded in-flight snapshot from a previous run (${crashed.files.join(', ')}): ${crashed.discarded}`);
   else if (crashed) logWarn(`restored in-flight edit from a previous run: ${crashed.files.join(', ')} in ${crashed.repo_root}`);
 
   const session = loadOrInit(absRepo, { resume });

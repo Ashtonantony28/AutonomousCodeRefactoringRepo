@@ -301,3 +301,24 @@ test('input preparation that overruns the hard kill says so; Python never gets a
   assert.strictEqual(r.verdict, 'inconclusive');
   assert.match(r.reason, /^hard kill: input preparation did not finish within/);
 });
+
+// ---------- SG25 ----------
+
+test('a deleted chained-comparison tail is observed only if it ran, like a JS && operand (AUDIT-13 C1, U01)', () => {
+  const never = run('def needs_bigint(n):\n    return 2 ** 53 < n <= 2 ** 64\n', 'def needs_bigint(n):\n    return 2 ** 53 < n\n');
+  assert.strictEqual(never.verdict, 'equivalent', never.reason);
+  assert.strictEqual(never.deletions_observed, false, 'n <= 2 ** 64 never ran: 2 ** 53 < n was always false');
+  const ran = run('def f(n):\n    return 0 <= n <= 10 ** 30\n', 'def f(n):\n    return 0 <= n\n');
+  assert.strictEqual(ran.verdict, 'equivalent', ran.reason);
+  assert.strictEqual(ran.deletions_observed, true);
+});
+
+test('a later generator of a comprehension and a match guard are probe sites of their own (AUDIT-13 C1)', () => {
+  const gen = run('def f(b):\n    return [y for x in () for y in list(b)]\n', 'def f(b):\n    return [y for x in () for y in b]\n');
+  assert.strictEqual(gen.verdict, 'equivalent', gen.reason);
+  assert.strictEqual(gen.deletions_observed, false, 'the inner iterable is built only per outer element');
+  const guard = run('def f(x):\n    match x:\n        case P() if x.n > 0:\n            return 1\n    return 0\n',
+    'def f(x):\n    match x:\n        case P():\n            return 1\n    return 0\n', { pre: 'class P:\n    n = 0\n\n\n' });
+  assert.strictEqual(guard.verdict, 'equivalent', guard.reason);
+  assert.strictEqual(guard.deletions_observed, false);
+});

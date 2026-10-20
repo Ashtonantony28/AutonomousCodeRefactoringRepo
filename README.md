@@ -234,3 +234,20 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   in pre-identified hotspots. Test files (`test/`, `tests/`, `__tests__/`,
   `spec/`, `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, `*_test.go`) are
   neither sent nor proposed, and the gate rejects edits to them.
+
+## Known limits
+
+- **Diff-test blind spots.** The differential test only sees inputs its
+  generator builds and effects its oracle records. Behaviour confined to
+  inputs it never builds (tabs, zero-width or compatibility characters,
+  lists past a length cap, deeper nesting, `NaN` in arrays) or effects it
+  cannot observe (a dropped `await` on a stub that never rejects, module
+  state across chained calls such as a missing `global`) reads as
+  `equivalent` (AUDIT-12 H1/H2, AUDIT-13 H2/H3). For those edits the only
+  backstop is the executor bar: the suite must run the edit and kill a
+  mutant of every changed token and carried reference, and pure deletions
+  stand on `deletions_observed`. A suite that never tests such an input can
+  still let a deletion through.
+- **Slow suites.** Every mutant kill takes three suite runs (mutant, mutant
+  again, unmutated control) inside one 60 s mutant budget, so suites slower
+  than about a third of that budget end `reverted` with `mutation_budget`.

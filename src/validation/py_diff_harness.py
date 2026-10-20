@@ -1054,6 +1054,8 @@ def show(v):
 # after the first of and/or).
 COND_EXPR = {ast.IfExp: ('body', 'orelse'), ast.Lambda: ('body',), ast.Assert: ('msg',), ast.ListComp: ('elt',),
              ast.SetComp: ('elt',), ast.GeneratorExp: ('elt',), ast.DictComp: ('key', 'value'), ast.comprehension: ('ifs',)}
+if hasattr(ast, 'match_case'):
+    COND_EXPR[ast.match_case] = ('guard',)
 
 
 def probe(src, ranges, tree=None):
@@ -1116,9 +1118,29 @@ def probe(src, ranges, tree=None):
         i = bisect.bisect_right(starts_, a) - 1
         return [(i, value[i])] if i >= 0 else []
 
+    def tail(node, a, b):
+        # A chained comparison's i-th operator and operand (i > 0) run only
+        # when the comparisons before them held; so does a later generator's
+        # iterable of a comprehension. -> (probe site, node to descend) or None.
+        if isinstance(node, ast.Compare):
+            cs = node.comparators
+            for i in range(1, len(cs)):
+                lo, hi = span(cs[i - 1]), span(cs[i])
+                if lo and hi and lo[1] <= a and b <= hi[1]:
+                    return cs[i], (cs[i] if holds(cs[i], a, b) else None)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            for g in node.generators[1:]:
+                if holds(g.iter, a, b):
+                    return g.iter, g.iter
+        return None
+
     def site(a, b):
         node, found = tree, None
         while node is not None:
+            t = tail(node, a, b)
+            if t is not None:
+                found, node = ('expr', t[0]), t[1]
+                continue
             nxt = None
             for field, value in ast.iter_fields(node):
                 for i, c in candidates(value, a):

@@ -154,6 +154,35 @@ test('a crash snapshot whose worktree is gone is discarded; resume re-creates th
   assert.deepStrictEqual(treeHash(repo), tree);
 });
 
+test('a crash between the commit and dropping the snapshot never reverts the committed edit on resume (AUDIT-15 H1)', async (t) => {
+  const { inflightPath } = require('../src/utils/checkpoint');
+  const path = require('path');
+  let pre, head, wtRoot;
+  // The state a SIGKILL right after `git commit` leaves: the commit on the
+  // branch tip, no test_outcome yet, inflight.json still holding the pre-edit file.
+  const { repo, passed, tree, treeHash, stub } = await crashedRunWithBrokenWorktree(t, (r, wt, git) => {
+    head = git(wt.path, ['rev-parse', 'HEAD']);
+    const msg = git(wt.path, ['log', '-1', '--format=%B']);
+    const id = /^issue_id: (\S+)$/m.exec(msg)[1];
+    const file = /^file: (\S+)$/m.exec(msg)[1];
+    pre = git(wt.path, ['show', `HEAD~1:${file}`]);
+    wtRoot = wt.root;
+    fs.writeFileSync(inflightPath(r), JSON.stringify({
+      repo_root: wt.root, meta: { issue_id: id, file },
+      files: { [file]: { existed: true, content: pre } }, captured_at: new Date().toISOString()
+    }));
+  });
+  assert.strictEqual(passed.test_outcome.commit, head, 'the reconciled edit is the branch tip');
+  const s2 = await withoutTestContext(() => runPipeline({ repo, cache: 'off', resume: true }));
+  assert.strictEqual(fs.existsSync(inflightPath(repo)), false);
+  assert.strictEqual(s2.proposals.find(x => x.issue_id === passed.issue_id).test_outcome.commit, head);
+  assert.notStrictEqual(fs.readFileSync(path.join(wtRoot, passed.file), 'utf8').trim(), pre, 'the pre-edit snapshot was not written back');
+  const { execFileSync } = require('child_process');
+  assert.strictEqual(execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: s2.worktree.path, encoding: 'utf8' }), '');
+  assert.strictEqual(stub.count(), 0);
+  assert.deepStrictEqual(treeHash(repo), tree);
+});
+
 test('a run on another target does not discard a resumable session', async (t) => {
   const A = gitInit(env.copyFixture('js-basic'));
   const B = env.copyFixture('no-tests');

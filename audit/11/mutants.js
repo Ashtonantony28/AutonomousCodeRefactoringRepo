@@ -153,7 +153,7 @@ const MUTANTS = [
   M('S-kill', 'safety', OR, 'signal handler no longer kills the in-flight test process group',
     '  try { killActive(); } catch { /* */ }\n', ''),
   M('O5', 'control', OR, 'persisted in-flight snapshot not restored on start',
-    'const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo));', 'const crashed = null;'),
+    'const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo), {', 'const crashed = null && FileSnapshot.restoreFromDisk(inflightPath(absRepo), {'),
 
   // --- hybrid validator (SG9, SG14, SG19)
   M('HV-js0', 'safety', HV, 'SG14: a JS/Python edit the diff test ran no input on proceeds on jury + AST alone',
@@ -268,7 +268,23 @@ const MUTANTS = [
   M('L-budget', 'label', 'src/rl/collector.js', 'SG20: mutation_budget reverts become label-0 samples',
     "'tests_insensitive', 'mutation_budget'];", "'tests_insensitive'];"),
   M('L-covto', 'label', 'src/rl/collector.js', 'SG16: coverage_timeout reverts become label-0 samples',
-    "'no_coverage_tool', 'coverage_timeout', ", "'no_coverage_tool', ")
+    "'no_coverage_tool', 'coverage_timeout', ", "'no_coverage_tool', "),
+
+  // --- SG25 (AUDIT-13 C1/C2/H1/L1, AUDIT-15 H1)
+  M('T-coll', 'safety', TR, 'SG25: a pytest run that failed at collection/import is not flagged (counts as a mutant kill)',
+    '  if (collectionError) out.collection_error = true;', ''),
+  M('T-bare', 'safety', TR, 'SG25: runs without coverage use the bare pytest script (repo root off sys.path)',
+    '  if (py) { cmd = py; args', '  if (false) { cmd = py; args'),
+  M('BI-refs', 'safety', 'src/rl/bug-injector.js', 'SG25: references carrying the change are never required (a kill on an unrelated token stands in)',
+    '  const out = [];\n  for (const g of h.gaps || []) {', '  const out = [];\n  for (const g of []) {'),
+  M('BI-unref', 'redundant', 'src/rl/bug-injector.js', 'SG25: early block on a carried reference with no mutable site removed (backed by the final check that every needed reference kept a parse-valid mutant)',
+    '      if (!found) return Object.assign([], { unmutated_ref: need });', '      if (false) return Object.assign([], { unmutated_ref: need });'),
+  M('PH-tail', 'safety', PH, 'SG25: chained-comparison tails / later generators are no probe sites (the enclosing statement is)',
+    '        t = tail(node, a, b)', '        t = None'),
+  M('HV-delcond', 'safety', HV, 'SG25: condition_change relaxed although part of a condition was deleted',
+    " && !c.deletes_condition) {", ') {'),
+  M('R-committed', 'safety', RV, 'SG25: a snapshot whose edit is already committed is restored over it',
+    '    if (sha) {', '    if (false) {')
 ];
 
 function copyRepo() {

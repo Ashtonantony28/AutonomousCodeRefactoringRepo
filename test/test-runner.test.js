@@ -454,3 +454,31 @@ test('coverage.py reports only the edited file: megabytes of other imported modu
   assert.strictEqual(orphan.coverage.reason, 'edit_not_exercised');
   assert.match(orphan.coverage.detail, /never imported/);
 });
+
+// ---------- SG25: one invocation for every run ----------
+
+test('pytest runs as `python -m pytest` with or without coverage: a package the tests import resolves in both (AUDIT-13 C2)', { skip: hasPyCoverage ? false : 'coverage.py/pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-pyimp-');
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.mkdirSync(path.join(dir, 'app'));
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'def f(x):\n    return x + 1\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_m.py'), 'import app.m as m\n\n\ndef test_f():\n    assert m.f(1) == 2\n');
+  const edited = await runTests({ repoRoot: dir, edit: { file: 'app/m.py', start: 15, end: 27 } });
+  const plain = await runTests({ repoRoot: dir });
+  assert.strictEqual(edited.status, 'passed', edited.stdout + edited.stderr);
+  assert.strictEqual(plain.status, 'passed', plain.stdout + plain.stderr);
+  assert.match(plain.command, / -m pytest -q$/);
+  assert.strictEqual(edited.command.replace(' -m coverage run', ''), plain.command, 'same interpreter and arguments, minus coverage');
+  assert.strictEqual(plain.collection_error, undefined);
+  // An import that breaks at collection is flagged: no test judged the code.
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'raise ImportError("broken")\n');
+  const broken = await runTests({ repoRoot: dir });
+  assert.strictEqual(broken.status, 'failed');
+  assert.strictEqual(broken.collection_error, true);
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'def f(x):\n    return x + 2\n');
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed');
+  assert.strictEqual(red.collection_error, undefined, 'a failing test is a real failure');
+});

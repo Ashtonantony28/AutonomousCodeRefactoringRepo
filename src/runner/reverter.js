@@ -85,7 +85,10 @@ class FileSnapshot {
   }
 
   // Restore a snapshot persisted by a process that died mid-edit.
-  static restoreFromDisk(persistPath) {
+  // `committed(data)` -> a commit sha when the edit already landed (a crash
+  // between the commit and the release): that snapshot is dropped, not
+  // restored over the committed edit.
+  static restoreFromDisk(persistPath, { committed = null } = {}) {
     if (!persistPath || !fs.existsSync(persistPath)) return null;
     let data;
     try { data = JSON.parse(fs.readFileSync(persistPath, 'utf8')); } catch { data = null; }
@@ -96,7 +99,13 @@ class FileSnapshot {
     // The run worktree it belonged to is gone: nothing left to restore.
     if (!fs.existsSync(data.repo_root)) {
       try { fs.unlinkSync(persistPath); } catch { /* */ }
-      return { repo_root: data.repo_root, meta: data.meta || null, files: Object.keys(data.files), restored: 0, discarded: 'repo_root no longer exists' };
+      return { repo_root: data.repo_root, meta: data.meta || null, files: Object.keys(data.files), restored: 0, discarded: `${data.repo_root} no longer exists` };
+    }
+    let sha = null;
+    try { sha = committed ? committed(data) : null; } catch { sha = null; }
+    if (sha) {
+      try { fs.unlinkSync(persistPath); } catch { /* */ }
+      return { repo_root: data.repo_root, meta: data.meta || null, files: Object.keys(data.files), restored: 0, discarded: `edit already committed as ${String(sha).slice(0, 12)}` };
     }
     const snap = new FileSnapshot(data.repo_root);
     for (const [rel, entry] of Object.entries(data.files)) snap.snapshots.set(rel, entry);

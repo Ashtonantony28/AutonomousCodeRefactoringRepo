@@ -45,7 +45,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   group killed), state is flushed and the process exits 0. The pre-edit
   snapshot is also persisted (`<state>/targets/<sha256(repo)>/inflight.json`)
   so after a crash the next start restores it before doing anything else
-  (a snapshot whose worktree no longer exists is discarded with a warning).
+  (a snapshot whose worktree no longer exists, or whose edit is already the
+  worktree's `HEAD` commit, is discarded with a warning).
 - `--resume` with proposals in the session skips the Analyzer and processes
   every proposal without a `test_outcome`, including pending Reflexion repairs.
   It first reconciles with the `refactor/<run_id>` branch: a proposal whose
@@ -83,15 +84,31 @@ saturation figures are reported on the dashboard as a spend indicator only.
     site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers `0`, never
     `1000`. A hunk with inserted tokens but no site has no evidence; more
     than 12 sites in one hunk is not judged (`mutation_budget`).
+  - **Carried references.** When the change is carried by an identifier,
+    helper call or constant — an inserted identifier (not a keyword, not
+    among the hunk's deleted tokens) that names a top-level binding of the
+    file defined outside the edit, or replaces another identifier in the
+    same stretch — every site of that binding's definition is a site of the
+    hunk and needs its own kill (`slice(0, MAX_BODY)` needs a kill of
+    `MAX_BODY = 4096`; `if (isSafe(n))` a kill at every site of `isSafe`). A
+    reference with no definition in the file (`includes` → `indexOf`) or no
+    parse-valid mutant of it is no evidence (`tests_insensitive`,
+    `mutation.unmutated_ref`); a kill of another token never stands in.
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
     statement, or the braceless branch / loop body, right of `&&`/`||`/`??`,
     ternary branch, default value, arrow body, parameter entry holding it;
     Python: its statement, if-expression branch, later `and`/`or` operand,
-    lambda body, comprehension element/condition), and every probe must run.
+    chained-comparison tail (`<= b` in `a < n <= b`), lambda body,
+    comprehension element/condition/later iterable, `match` guard), and
+    every probe must run.
     Otherwise only a stretch whose deleted tokens are replaced by at least as
     many inserted tokens holding a site stands, on that site's kill.
+  Mutant and control runs use the main run's command, interpreter, import
+  path and env minus coverage (pytest always runs as `<pytest's python> -m
+  pytest`, so the repo root is on `sys.path`); a run that fails at
+  collection or import (pytest exit 2–5) is never a kill.
   Mutant runs re-run the whole suite without coverage and
   have their own 60 s budget: each gets at most 2× the plain suite time + 1 s
   (the main run's time until a surviving mutant run measures it), none after
@@ -203,7 +220,8 @@ test ran no input on (Python runs in an isolated `python3 -I` harness,
 `src/validation/py_diff_harness.py`), and an edit in another language
 (`runs = 0`) proceeds only with every check passed. Python's
 `condition_change` check drops from veto to a score penalty when the Python
-diff test is `equivalent`; `guard_removal` always vetoes. The gate and fusion
+diff test is `equivalent`, unless the edit deletes a comparison
+(`deletes_condition`); `guard_removal` always vetoes. The gate and fusion
 read only contract fields (`panel`, `p_preserves`, `agreement`, verdict
 `edge_cases`; `applicable`, `verdict`, `runs`); the diff score is derived
 from `verdict`. Independently of the score, a proposal is **vetoed**
