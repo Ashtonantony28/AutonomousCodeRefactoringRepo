@@ -12,10 +12,13 @@
 // recorded during load are compared. A run then compares, per input: the
 // return value (and whether it is an object an earlier call returned;
 // returned functions are probed with shaped argument lists and their owner as
-// `this`; generators are drained; thrown errors include own props), the
-// arguments after the call, the `this` object, recorded calls into callbacks
-// and dependency stubs, the non-function exports and the module-scope
-// bindings. Dependency stubs answer with values from the mined literals on
+// `this`; generators are drained; thrown errors include own props and name),
+// the arguments after the call, the `this` object, recorded calls into
+// callbacks and dependency stubs, console output, changes to the global
+// object and the builtins (prototypes, Math, JSON, ...), the non-function
+// exports and the module-scope bindings. Objects are compared with their key
+// order, property attributes (enumerable, writable, configurable, accessor),
+// frozen / sealed / extensible state and null prototype. Dependency stubs answer with values from the mined literals on
 // alternate runs. Only value/throw/side-effect mismatches are divergent, and
 // not when the original threw an engine TypeError (the input is outside its
 // domain); timeouts, unrun inputs and too few normal returns are inconclusive.
@@ -30,14 +33,21 @@ const PRELUDE = `(function () {
   var create = Object.create, freeze = Object.freeze, assign = Object.assign, getDesc = Object.getOwnPropertyDescriptor;
   var ownNames = Object.getOwnPropertyNames, ownSymbols = Object.getOwnPropertySymbols, objToStr = Object.prototype.toString;
   var objIs = Object.is, toStr = String, defineProperty = Object.defineProperty, imul = Math.imul;
-  var construct = Reflect.construct, apply = Reflect.apply;
+  var getProto = Object.getPrototypeOf, isFrozen = Object.isFrozen, isSealed = Object.isSealed, isExt = Object.isExtensible;
+  var construct = Reflect.construct, apply = Reflect.apply, ownKeys = Reflect.ownKeys, keyFor = Symbol.keyFor;
   var PromiseC = Promise, MapC = Map, SetC = Set, DateC = Date, RegExpC = RegExp, ErrorC = Error, WeakSetC = WeakSet, WeakMapC = WeakMap, ProxyC = Proxy;
   var ReferenceErrorC = ReferenceError, symToPrim = Symbol.toPrimitive, symIter = Symbol.iterator, emptyIter = [][Symbol.iterator];
   var MAX_NODES = 20000, MAX_BIND_NODES = 5000, MAX_DEPTH = 24, MAX_CALLS = 50, MAX_KNOWN = 64, FIXED_NOW = 1700000000000;
   var STATE = 0, PLAIN = 1, PROBE = 2;
   var lookup = null, mod = null, rec = null, cur = null, targets = [], bindNames = [], pool = [], known = [];
   var probeArgs = [[0], [1], ['a']], vi = 0;
-  var stubNames = new WeakMapC(), stubCache = new MapC(), seed = 0;
+  var stubNames = new WeakMapC(), stubCache = new MapC(), seed = 0, hits = [], realmBase = null;
+  var REALM = [['globalThis', G], ['Object', Object], ['Object.prototype', Object.prototype], ['Array', Array], ['Array.prototype', Array.prototype],
+    ['String', String], ['String.prototype', String.prototype], ['Number', Number], ['Number.prototype', Number.prototype],
+    ['Boolean.prototype', Boolean.prototype], ['Function.prototype', Function.prototype], ['Symbol', Symbol], ['Symbol.prototype', Symbol.prototype],
+    ['Math', Math], ['JSON', JSON], ['Reflect', Reflect], ['Promise', PromiseC], ['Promise.prototype', PromiseC.prototype],
+    ['Map.prototype', MapC.prototype], ['Set.prototype', SetC.prototype], ['Date', DateC], ['Date.prototype', DateC.prototype],
+    ['RegExp', RegExpC], ['RegExp.prototype', RegExpC.prototype], ['Error', ErrorC], ['Error.prototype', ErrorC.prototype]];
 
   Math.random = function () {
     seed = (seed + 0x6D2B79F5) | 0;
@@ -51,6 +61,37 @@ const PRELUDE = `(function () {
   });
   DateC.now = function () { return FIXED_NOW; };
 
+  function descOf(o, k) { var d = getDesc(o, k); return d && [d.value, d.get, d.set, d.writable, d.enumerable, d.configurable]; }
+  function snapRealm() {
+    realmBase = [];
+    for (var i = 0; i < REALM.length; i++) {
+      var o = REALM[i][1], m = new MapC(), ks = ownKeys(o);
+      for (var j = 0; j < ks.length; j++) m.set(ks[j], descOf(o, ks[j]));
+      realmBase[i] = { m: m, ext: isExt(o) };
+    }
+  }
+  // Properties of the global object and the builtins added, changed or
+  // removed since setup, as 'Owner.key+|~|-'; undefined when none.
+  function realmDiff() {
+    if (!realmBase) return undefined;
+    var out = [];
+    for (var i = 0; i < REALM.length; i++) {
+      var o = REALM[i][1], b = realmBase[i], ks = ownKeys(o), name = REALM[i][0], n = 0;
+      for (var j = 0; j < ks.length; j++) {
+        var d = descOf(o, ks[j]), was = b.m.get(ks[j]), key = name + '.' + toStr(typeof ks[j] === 'symbol' ? ks[j].description : ks[j]);
+        if (!was) { out[out.length] = key + '+'; continue; }
+        n++;
+        for (var q = 0; q < 6; q++) if (!objIs(d[q], was[q])) { out[out.length] = key + '~'; break; }
+      }
+      if (n < b.m.size) b.m.forEach(function (x, k) { if (!getDesc(o, k)) out[out.length] = name + '.' + toStr(typeof k === 'symbol' ? k.description : k) + '-'; });
+      if (isExt(o) !== b.ext) out[out.length] = name + ' extensible';
+    }
+    return out.length ? out : undefined;
+  }
+  // 'F' frozen, 'S' sealed, 'N' not extensible, '' otherwise.
+  function shape(v) {
+    try { return isFrozen(v) ? 'F' : isSealed(v) ? 'S' : isExt(v) ? '' : 'N'; } catch (e) { return '?'; }
+  }
   function newSt(mode) { return { seen: new WeakSetC(), budget: MAX_NODES, trunc: false, mode: mode, probes: 0, pi: 0 }; }
   function ctorName(v) {
     try { var c = v.constructor; return c && typeof c.name === 'string' ? c.name : 'Object'; } catch (e) { return '?'; }
@@ -74,7 +115,7 @@ const PRELUDE = `(function () {
     if (t === 'string') return v.length > 256 ? { t: 's', len: v.length, h: hash(v) } : v;
     if (t === 'boolean') return v;
     if (t === 'bigint') return { t: 'big', v: toStr(v) };
-    if (t === 'symbol') return { t: 'sym', v: toStr(v.description) };
+    if (t === 'symbol') return { t: 'sym', v: toStr(v.description), g: keyFor(v) !== undefined };
     if (stubNames.has(v)) return { t: 'stub', name: stubNames.get(v) };
     if (depth > MAX_DEPTH) { st.trunc = true; return { t: 'deep' }; }
     if (t === 'function') {
@@ -100,7 +141,9 @@ const PRELUDE = `(function () {
       out = [];
       for (i = 0; i < v.length && st.budget >= 0; i++) out[i] = ser(v[i], st, depth + 1);
       if (i < v.length) st.trunc = true;
-      return { t: 'arr', len: v.length, v: out };
+      var a = { t: 'arr', len: v.length, v: out }, sa = shape(v);
+      if (sa) a.x = sa;
+      return a;
     }
     if (v instanceof DateC) return { t: 'date', v: toStr(v.getTime()) };
     if (v instanceof RegExpC) return { t: 're', v: toStr(v) };
@@ -115,9 +158,16 @@ const PRELUDE = `(function () {
       return { t: 'gen', v: out };
     }
     if (v instanceof ErrorC) return { t: 'err', name: ctorName(v), message: toStr(v.message), v: props(v, st, depth, true) };
-    return { t: 'obj', c: ctorName(v), v: props(v, st, depth, false) };
+    var o = { t: 'obj', c: ctorName(v), v: props(v, st, depth, false) }, so = shape(v), ks;
+    try { if (getProto(v) === null) o.c = '(null)'; } catch (e) { o.c = '?'; }
+    try { ks = ownNames(v).join(','); } catch (e) { ks = '?'; }
+    o.k = ks.length > 256 ? hash(ks) : ks;
+    if (so) o.x = so;
+    return o;
   }
-  // Own string and symbol keys, enumerable or not ('~' marks non-enumerable).
+  // Own string and symbol keys, enumerable or not. Key prefixes: '~'
+  // non-enumerable, '!' read-only, '#' non-configurable, '^' getter, '='
+  // setter.
   // Methods are serialised (probed, with the object as \`this\`) before the
   // data properties, so their effects on the object show.
   function props(v, st, depth, isErr) {
@@ -129,6 +179,10 @@ const PRELUDE = `(function () {
       if (!d) continue;
       var key = (typeof k === 'symbol' ? '@@' + toStr(k.description) : k);
       if (!d.enumerable) key = '~' + key;
+      if (d.writable === false) key = '!' + key;
+      if (!d.configurable) key = '#' + key;
+      if (d.get) key = '^' + key;
+      if (d.set) key = '=' + key;
       var val;
       if ('value' in d) val = d.value;
       else if (d.get) {
@@ -147,9 +201,11 @@ const PRELUDE = `(function () {
   function describeThrown(e) {
     if (e !== null && (typeof e === 'object' || typeof e === 'function')) {
       var msg, extra;
+      var ename;
       try { msg = toStr(e.message); } catch (x) { msg = '?'; }
+      try { ename = toStr(e.name); } catch (x) { ename = '?'; }
       try { extra = props(e, newSt(PLAIN), 1, true); } catch (x) { extra = null; }
-      return { name: ctorName(e), message: msg, props: extra };
+      return { name: ctorName(e), ename: ename, message: msg, props: extra };
     }
     return { name: typeof e, message: stringify(ser(e, newSt(PLAIN), 0)) };
   }
@@ -161,6 +217,15 @@ const PRELUDE = `(function () {
     var st = newSt(PLAIN), a = [];
     for (var i = 0; i < args.length; i++) a[i] = ser(args[i], st, 1);
     rec.calls[rec.calls.length] = [label, a];
+  }
+  function logged(method, args) {
+    if (!rec) return;
+    rec.nout = (rec.nout | 0) + 1;
+    if (!rec.out) rec.out = [];
+    if (rec.out.length >= MAX_CALLS) return;
+    var st = newSt(PLAIN), a = [];
+    for (var i = 0; i < args.length; i++) a[i] = ser(args[i], st, 1);
+    rec.out[rec.out.length] = [method, a];
   }
   // Inert dependency stub: every access, call and construction yields
   // another stub. Interactions are recorded; the host treats differences
@@ -285,7 +350,9 @@ const PRELUDE = `(function () {
   }
 
   var api = freeze({
-    setup: function (names, values) { bindNames = names; pool = values; },
+    setup: function (names, values) { bindNames = names; pool = values; snapRealm(); },
+    hit: function (k) { hits[k] = (hits[k] | 0) + 1; },
+    hits: function () { return stringify(hits); },
     load: function (wrapper) {
       mod = { exports: {} };
       var r = rec = { kind: 'load', calls: [], ncalls: 0 };
@@ -298,6 +365,7 @@ const PRELUDE = `(function () {
       rec = null;
       r.bind = bindState();
       r.state = exportsState(newSt(STATE));
+      r.realm = realmDiff();
       return stringify({ ok: true, load: r });
     },
     capture: function (fn) { lookup = fn; },
@@ -368,13 +436,17 @@ const PRELUDE = `(function () {
       rec.state = exportsState(sst);
       if (sst.trunc) rec.trunc = true;
       rec.bind = bindState();
+      rec.realm = realmDiff();
       var out = stringify(rec);
       rec = null;
       return out;
     }
   });
   defineProperty(G, '__dt', { value: api, writable: false, configurable: false, enumerable: false });
-  G.console = freeze({ log: function () {}, info: function () {}, warn: function () {}, error: function () {}, debug: function () {} });
+  var con = {}, methods = ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'dirxml', 'table', 'assert', 'group', 'groupCollapsed',
+    'groupEnd', 'time', 'timeEnd', 'timeLog', 'count', 'countReset', 'clear'];
+  for (var ci = 0; ci < methods.length; ci++) (function (m) { con[m] = function () { logged(m, arguments); }; })(methods[ci]);
+  G.console = freeze(con);
 })();`;
 
 const CALL_TAKE = new vm.Script('__dt.take()', { filename: 'diff-test-take.js' });
@@ -461,7 +533,7 @@ function hallucinated(r, fileText) {
   return !new RegExp(`(^|[^\\w$])${m[1].replace(/\$/g, '\\$')}([^\\w$]|$)`).test(fileText);
 }
 
-const hasStub = (r) => JSON.stringify([r.value, r.error, r.self, r.state, r.bind]).includes('{"t":"stub"');
+const hasStub = (r) => JSON.stringify([r.value, r.error, r.self, r.state, r.bind, r.out]).includes('{"t":"stub"');
 
 // V8's own TypeError wording depends on the expression shape, not on the
 // behaviour; two engine TypeErrors count as the same throw.
@@ -478,6 +550,8 @@ function outputsDiffer(a, b) {
 }
 
 const callsEqual = (a, b) => deepEq(a.calls, b.calls) && a.ncalls === b.ncalls;
+// Console output and changes to the global object / builtins.
+const effectsEqual = (a, b) => deepEq(a.out, b.out) && (a.nout | 0) === (b.nout | 0) && deepEq(a.realm, b.realm);
 
 // 'equal' | 'mismatch' | 'differs' | 'ood' | 'unresolved' | 'timeout'. Stubs
 // stand for unknown dependency behaviour: a difference is only a mismatch
@@ -491,7 +565,7 @@ function compare(a, b, opts) {
   if (refA && refB) return 'unresolved';
   if (!opts.fileMode && (refA || refB)) return refB && hallucinated(b, opts.fileText) ? 'mismatch' : 'differs';
   const callsEq = callsEqual(a, b);
-  if (!outputsDiffer(a, b) && callsEq && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state) && deepEq(a.bind, b.bind)) {
+  if (!outputsDiffer(a, b) && callsEq && effectsEqual(a, b) && deepEq(a.args, b.args) && deepEq(a.self, b.self) && stateEq(a.state, b.state) && deepEq(a.bind, b.bind)) {
     return a.trunc || b.trunc ? 'unresolved' : 'equal';
   }
   if (((a.stubbed || b.stubbed) && !callsEq) || hasStub(a) || hasStub(b)) return 'differs';
@@ -503,7 +577,7 @@ function compare(a, b, opts) {
 // the interactions recorded while loading. -> null | { divergent } | { note }
 function compareLoad(a, b) {
   if (!a || !b) return null;
-  const stateSame = deepEq(a.bind, b.bind) && stateEq(a.state, b.state);
+  const stateSame = deepEq(a.bind, b.bind) && stateEq(a.state, b.state) && effectsEqual(a, b);
   const callsEq = callsEqual(a, b);
   if (!stateSame && callsEq && !hasStub(a) && !hasStub(b)) return { divergent: true };
   if (!stateSame) return { note: 'module-scope state after load differs through dependency stubs' };
@@ -540,7 +614,7 @@ function main(data) {
       counterexample: { phase: 'load', current: cur.load, proposed: prop.load }
     };
   }
-  if (!targets.length) return load ? { verdict: 'inconclusive', runs: 1, reason: load.note } : { verdict: 'equivalent', runs: 1 };
+  if (!targets.length) return load ? { verdict: 'inconclusive', runs: 1, reason: load.note } : withHits({ verdict: 'equivalent', runs: 1 }, cur, data);
 
   let runs = 0, tested = 0, inconclusive = false;
   const notes = [];
@@ -563,15 +637,22 @@ function main(data) {
     tested++;
     const end = now() + (t0 + budgetMs - now()) / (targets.length - ti);
     const calls = t.desc.kind === 'value' ? [null] : t.inputs;
+    // minValueRuns value-returning runs: at least one in five distinct inputs
+    // (all of them when there are 3 or fewer) returns a value, and those
+    // inputs are called again (new run index) until minValueRuns is reached.
+    const distinct = t.desc.kind === 'value' ? 1 : Math.min(minValueRuns, Math.max(Math.ceil(calls.length / 5), Math.min(3, calls.length)));
+    const need = t.desc.kind === 'value' ? 1 : minValueRuns;
+    const valued = [];
     let value = 0, thrown = 0, refBoth = 0, differs = 0, ood = 0, n = 0;
-    for (let i = 0; i < calls.length; i++) {
+    for (let i = 0; i < calls.length || (i < calls.length + 2 * need && value < need && valued.length >= distinct && !differs && !ood); i++) {
       if (now() - t0 > budgetMs || now() > end) break;
+      const at = i < calls.length ? i : valued[(i - calls.length) % valued.length];
       let a, b;
-      if (calls[i] === null) {
+      if (calls[at] === null) {
         a = valueOf(cur, ti, callTimeoutMs);
         b = valueOf(prop, ti, callTimeoutMs);
       } else {
-        const src = `__dt.call(${ti}, ${calls[i][0]}, ${calls[i][1]}, ${i}, ${t.probes || '[]'})`;
+        const src = `__dt.call(${ti}, ${calls[at][0]}, ${calls[at][1]}, ${i}, ${t.probes || '[]'})`;
         a = runIn(cur, src, callTimeoutMs);
         b = runIn(prop, src, callTimeoutMs);
       }
@@ -586,29 +667,37 @@ function main(data) {
         return {
           verdict: 'divergent', runs,
           reason: `${t.label}: ${outputsDiffer(a, b) ? 'outputs differ' : 'side effects differ'}`,
-          counterexample: { target: t.label, ti, index: i, input: calls[i] && calls[i][0], self: calls[i] ? calls[i][1] : undefined, current: a, proposed: b }
+          counterexample: { target: t.label, ti, index: at, input: calls[at] && calls[at][0], self: calls[at] ? calls[at][1] : undefined, current: a, proposed: b }
         };
       }
-      if (c === 'equal') { if (a.kind === 'value') value++; else thrown++; } else if (c === 'differs') differs++;
+      if (c === 'equal') {
+        if (a.kind === 'value') { value++; if (i < calls.length) valued.push(i); } else thrown++;
+      } else if (c === 'differs') differs++;
       else if (c === 'ood') ood++;
       else if (isRefError(a) && isRefError(b)) refBoth++;
     }
-    // At least one in five distinct inputs (all of them when there are 3 or
-    // fewer), up to minValueRuns.
-    const need = t.desc.kind === 'value' ? 1 : Math.min(minValueRuns, Math.max(Math.ceil(calls.length / 5), Math.min(3, calls.length)));
-    if (value >= need && !differs && !ood && n === calls.length) continue;
+    if (value >= need && valued.length >= distinct && !differs && !ood && n >= calls.length) continue;
     inconclusive = true;
     if (differs) notes.push(`${t.label}: ${differs} of ${n} runs differ only through dependency stubs or missing snippet context`);
     else if (ood) notes.push(`${t.label}: ${ood} of ${n} runs differ only on inputs the current version rejects with a TypeError (outside its domain)`);
     else if (n < calls.length) notes.push(`${t.label}: time budget reached after ${n} of ${calls.length} inputs`);
     else if (refBoth === n) notes.push(`${t.label}: both sides threw ReferenceError on every input (${fileMode ? 'unresolved name in the file' : 'missing context; pass fileSrc'})`);
     else if (thrown === n) notes.push(`${t.label}: both sides threw on every input (${n} runs)`);
-    else notes.push(`${t.label}: only ${value} of ${n} runs returned comparable values on both sides (need ${need})`);
+    else notes.push(`${t.label}: only ${value} of ${n} runs returned comparable values on both sides (${valued.length} of ${calls.length} inputs; need ${distinct} inputs, ${need} runs)`);
   }
   if (!tested) return { verdict: 'inconclusive', runs, reason: `no changed callable could be resolved (${notes.join('; ')})` };
   if (inconclusive) return { verdict: 'inconclusive', runs, reason: notes.join('; ') };
   const out = { verdict: 'equivalent', runs };
   if (notes.length) out.reason = notes.join('; ');
+  return withHits(out, cur, data);
+}
+
+// Whether every deletion probe in the current version ran.
+function withHits(out, side, data) {
+  if (!data.hitCount) return out;
+  let hits = [];
+  try { hits = JSON.parse(vm.runInContext('__dt.hits()', side.ctx, { timeout: data.loadTimeoutMs })); } catch { hits = []; }
+  out.deletions_observed = Array.from({ length: data.hitCount }, (_, k) => hits[k] > 0).every(Boolean);
   return out;
 }
 

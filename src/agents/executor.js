@@ -6,52 +6,74 @@ const { spawnSync } = require('child_process');
 const { FileSnapshot, applyEdit } = require('../runner/reverter');
 const { runTests, changedSpan, TIMEOUT_MS } = require('../runner/test-runner');
 const { editMutants } = require('../rl/bug-injector');
+const { changeHunks } = require('../utils/hunks');
 
 const MUTANT_CAP = 3;
 
-// The suite has to notice a bug in the edited lines: up to MUTANT_CAP mutants
-// of them are applied one at a time and the suite re-run; the first one that
-// makes it fail (or run out its full slice) is the evidence. The mutant runs
-// share what the main run left of the test budget, each getting at most
-// 2x the main run's time + 1 s, and stop when less than the main run's time
-// + 0.5 s is left. The edited content is always written back.
-async function mutationEvidence({ repoRoot, file, edited, span, budgetMs, usedMs, coverageMs = 0 }) {
+// The suite has to notice a bug in each change hunk: up to MUTANT_CAP
+// mutants of the tokens a hunk changed are applied one at a time and the
+// suite re-run; the first one that makes it fail (or run out its full slice)
+// is that hunk's evidence. A hunk that only deletes has nothing to mutate: it
+// stands only when the diff test is `equivalent` and executed the deleted
+// code. The mutant runs share what the main run left of the test budget,
+// each getting at most 2x the main run's time + 1 s, and stop when less than
+// the main run's time + 0.5 s is left. The edited content is always written
+// back. `ok` is the verdict; `killed` names the last killing mutant.
+async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest, budgetMs, usedMs, coverageMs = 0 }) {
   const t0 = Date.now();
   const abs = path.join(repoRoot, file);
   const suiteMs = usedMs;
   usedMs += coverageMs; // the main run's coverage evaluation shares the budget; mutant runs collect none
-  const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP });
-  const out = { mutants: mutants.length, run: 0, killed: null };
+  const hunks = changeHunks(before, edited, file);
+  const mutants = editMutants(edited, { ...span, file, max: MUTANT_CAP, before });
+  const out = { hunks: hunks.length, mutants: mutants.length, run: 0, killed: null, ok: false };
+  const done = () => { out.duration_ms = Date.now() - t0; return out; };
+  const deletions = hunks.filter(h => h.deletion);
+  if (deletions.length && !(diffTest && diffTest.verdict === 'equivalent' && diffTest.deletions_observed === true)) {
+    out.unobserved_deletion_line = deletions[0].line;
+    return done();
+  }
+  const open = hunks.map((h, i) => i).filter(i => !hunks[i].deletion);
+  const bare = open.find(i => !mutants.some(m => m.hunk === i));
+  if (!hunks.length || bare !== undefined) {
+    if (bare !== undefined) out.unmutated_hunk_line = hunks[bare].line;
+    return done();
+  }
   try {
-    for (const m of mutants) {
-      const left = budgetMs - usedMs;
-      const full = 2 * suiteMs + 1000;
-      if (left < suiteMs + 500) { out.budget_exhausted = true; break; }
-      const slice = Math.min(left, full);
-      fs.writeFileSync(abs, m.src);
-      const r = await runTests({ repoRoot, timeoutMs: slice });
-      usedMs += r.execution_time_ms;
-      out.run++;
-      if (r.status === 'failed' || (r.status === 'timeout' && slice === full)) {
-        out.killed = m.mutation;
-        out.killed_line = m.line;
-        break;
+    for (const hi of open) {
+      let killed = false;
+      for (const m of mutants.filter(x => x.hunk === hi)) {
+        const left = budgetMs - usedMs;
+        const full = 2 * suiteMs + 1000;
+        if (left < suiteMs + 500) { out.budget_exhausted = true; return done(); }
+        const slice = Math.min(left, full);
+        fs.writeFileSync(abs, m.src);
+        const r = await runTests({ repoRoot, timeoutMs: slice });
+        usedMs += r.execution_time_ms;
+        out.run++;
+        if (r.status === 'failed' || (r.status === 'timeout' && slice === full)) {
+          out.killed = m.mutation;
+          out.killed_line = m.line;
+          killed = true;
+          break;
+        }
       }
+      if (!killed) { out.killed = null; out.surviving_hunk_line = hunks[hi].line; return done(); }
     }
+    out.ok = true;
   } finally {
     fs.writeFileSync(abs, edited);
   }
-  out.duration_ms = Date.now() - t0;
-  return out;
+  return done();
 }
 
 // Applies an approved proposal in `repoRoot` (the run's worktree, or the target
 // itself in the non-git fallback), runs the tests and keeps the edit only on a
-// pass that executed every changed function and killed a mutant of the edited
-// lines. Otherwise it is reverted: `reverted` with reason `edit_not_exercised`
+// pass that executed every changed function and killed a mutant of every
+// change hunk. Otherwise it is reverted: `reverted` with reason `edit_not_exercised`
 // / `no_coverage_tool` when no test ran the edit (pass or fail), `coverage_timeout`
 // when evaluating coverage overran the test budget, or
-// `tests_insensitive` when no mutant failed the suite. `snapshotPath` persists
+// `tests_insensitive` when a hunk has no mutant that fails the suite. `snapshotPath` persists
 // the pre-edit content so a signal or crash mid-test can be undone. `onKept`
 // runs once an edit is final (the worktree commit) and its return value is
 // reported as `commit`.
@@ -89,8 +111,8 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
 
   // Test, recording which characters of the change the tests executed
   let testResult, edited, span;
+  const before = (snap.snapshots.get(proposal.file) || {}).content || '';
   try {
-    const before = (snap.snapshots.get(proposal.file) || {}).content || '';
     edited = fs.readFileSync(path.join(repoRoot, proposal.file), 'utf8');
     span = changedSpan(before, edited);
     testResult = await runTests({ repoRoot, timeoutMs: testTimeoutMs, edit: { file: proposal.file, ...span } });
@@ -135,14 +157,15 @@ async function runExecutor({ proposal, repoRoot, snapshotPath = null, onKept = n
   } else if (status === 'passed') {
     try {
       mutation = await mutationEvidence({
-        repoRoot, file: proposal.file, edited, span,
+        repoRoot, file: proposal.file, before, edited, span, diffTest: proposal.diff_test,
         budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs: testResult.execution_time_ms, coverageMs: coverage.duration_ms || 0
       });
     } catch (err) {
-      mutation = { killed: null, error: err.message };
+      mutation = { killed: null, ok: false, error: err.message };
     }
-    if (!mutation.killed) {
-      // Green on the edit and on every mutant of it: the tests cannot tell.
+    if (!mutation.ok) {
+      // Green on the edit and on every mutant of a hunk, or a deletion no
+      // oracle observed: the tests cannot tell.
       snap.restoreAll();
       reverted = true;
       status = 'reverted';

@@ -280,19 +280,19 @@ test('criticGate derives majority and unanimity from panel[]', () => {
 
 // ---------- SG14: commit bar ----------
 
-// The sandbox's console is a no-op, so the diff test sees this behaviour change
-// as `equivalent`; only the jury can stop it.
-const LOG_CUR = "function audit(user) {\n  console.log('audit', user);\n  return String(user).length;\n}";
-const LOG_PROP = "function audit(user) {\n  console.log('audit:', user);\n  return String(user).length;\n}";
+// The diff test never generates strings past 1000 characters, so it sees
+// this behaviour change as `equivalent`; only the jury can stop it.
+const CUT_CUR = 'function body(s) {\n  return String(s);\n}';
+const CUT_PROP = 'function body(s) {\n  return String(s).slice(0, 1000);\n}';
 
-function logRepo(ctx) {
-  fs.writeFileSync(path.join(ctx.repo, 'audit.js'), `'use strict';\n${LOG_CUR}\nmodule.exports = { audit };\n`);
+function cutRepo(ctx) {
+  fs.writeFileSync(path.join(ctx.repo, 'body.js'), `'use strict';\n${CUT_CUR}\nmodule.exports = { body };\n`);
 }
 
 test('a 2/3 jury is critic_rejected even when the diff test says equivalent (AUDIT-5 C1)', async (t) => {
   const ctx = setup(t);
-  logRepo(ctx);
-  const p = await viaPipeline(ctx, makeProposal('audit.js', LOG_CUR, LOG_PROP),
+  cutRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('body.js', CUT_CUR, CUT_PROP),
     perPersona(persona => persona === 'strict' ? { ...base, preserves_semantics: false, p_preserves: 0.2 } : APPROVE_RAW));
   assert.strictEqual(p.diff_test.verdict, 'equivalent');
   assert(p.combined_confidence >= 0.5);
@@ -302,12 +302,12 @@ test('a 2/3 jury is critic_rejected even when the diff test says equivalent (AUD
 
 test('an approving persona listing a behaviour-changing edge case blocks the edit (AUDIT-5 M2 K2)', async (t) => {
   const ctx = setup(t);
-  logRepo(ctx);
-  const p = await viaPipeline(ctx, makeProposal('audit.js', LOG_CUR, LOG_PROP),
-    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ["every call logs 'audit:' instead of 'audit'"] } : APPROVE_RAW));
+  cutRepo(ctx);
+  const p = await viaPipeline(ctx, makeProposal('body.js', CUT_CUR, CUT_PROP),
+    perPersona(persona => persona === 'security' ? { ...APPROVE_RAW, edge_cases: ['inputs over 1000 characters are truncated'] } : APPROVE_RAW));
   assert.strictEqual(p.diff_test.verdict, 'equivalent');
   assert.strictEqual(p.test_outcome.status, 'critic_rejected');
-  assert.match(p.test_outcome.reason, /edge cases: security: every call logs 'audit:'/);
+  assert.match(p.test_outcome.reason, /edge cases: security: inputs over 1000 characters are truncated/);
 });
 
 test('criticGate: a persona below the p_preserves floor blocks a unanimous approve', () => {

@@ -18,9 +18,9 @@ const CUR = "console.log('greet', name);";
 (async () => {
   const repo = gitInit(env.copyFixture('js-failing-after-edit'));
 
-  // Run 1: an edit whose tests fail (the fixture's log-message change).
+  // Run 1: an edit whose tests fail (the fixture's BigInt-logging change).
   const r1 = await runWith(repo, proposals([{ file: 'src/greet.js', current_code: CUR,
-    proposed_code: "console.log('greet:', name);" }]));
+    proposed_code: "console.log('greet', typeof name === 'bigint' ? Number(name) : name);" }]));
   const p1 = r1.s.proposals[0];
   const after1 = loadSamples(repo).filter(s => !s.synthetic);
   console.log(`run 1: ${p1.issue_id} -> ${p1.test_outcome.status}; real samples ${JSON.stringify(after1.map(s => [s.proposal_id, s.label]))}; calibration points ${calibration.loadPoints(repo).length}`);

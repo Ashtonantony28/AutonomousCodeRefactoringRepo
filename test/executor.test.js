@@ -413,15 +413,13 @@ test('a doc comment edit is no evidence: the changed function no test calls is r
   assert.strictEqual(res.coverage.exercised, false);
 });
 
-test('editMutants: parse-valid mutants of the changed characters, else of the edited lines', () => {
+test('editMutants: parse-valid mutants of the changed characters only', () => {
   const src = "'use strict';\nconst x = require('./y');\nfunction g(s) {\n  if (s.length > 255) throw new RangeError('too long');\n  return s;\n}\n";
   const at = (needle) => ({ start: src.indexOf(needle), end: src.indexOf(needle) + needle.length, file: 'g.js' });
   const changed = editMutants(src, at('255'));
   assert.deepStrictEqual(changed.map(m => m.mutation), ['numeric_off_by_one']);
   assert(changed[0].src.includes('s.length > 256'));
-  const lines = editMutants(src, at('throw'));
-  assert(lines.length >= 2 && lines.length <= 3, JSON.stringify(lines.map(m => m.mutation)));
-  assert(lines.every(m => m.line === 4));
+  assert.deepStrictEqual(editMutants(src, at('throw')), [], 'unchanged tokens on the edited line are not mutated (AUDIT-8 C1/C2)');
   assert.deepStrictEqual(editMutants(src, at("require('./y')")), [], 'module specifiers are not mutated');
   const py = 'def f(x):\n    if x > 3:\n        return x + 1\n    return 0\n';
   const pm = editMutants(py, { start: py.indexOf('    if'), end: py.indexOf('    return 0'), file: 'f.py' });
@@ -462,4 +460,74 @@ test('mutant runs collect no coverage, even with NODE_V8_COVERAGE inherited', as
   assert(res.mutation.run >= 1);
   assert.strictEqual(res.coverage.exercised, true);
   assert.deepStrictEqual(fs.readdirSync(covDir), []);
+});
+
+// ---------- SG18: mutation evidence on the change itself ----------
+
+const diffTesting = require('../src/validation/diff-testing');
+
+async function execOn(t, file, cur, prop, rest, testBody, diffTest) {
+  const repo = nodeRepo(t, { [file]: `'use strict';\n${cur}\n${rest}\n`, 'test/a.test.js': nodeTest(testBody) });
+  const before = fs.readFileSync(path.join(repo, file), 'utf8');
+  const proposal = makeProposal(file, cur, prop);
+  proposal.diff_test = diffTest === undefined ? diffTesting.run({ currentSrc: cur, proposedSrc: prop, fileSrc: before }) : diffTest;
+  let kept = false;
+  const res = await withoutTestContext(() => runExecutor({ proposal, repoRoot: repo, onKept: () => { kept = true; return 'c1'; } }));
+  return { res, repo, before, kept };
+}
+
+test('a deleted line is no mutation evidence: a mutant of the adjacent tested line does not keep it (AUDIT-8 C1)', async (t) => {
+  const cur = "function discount(price) {\n  const d = price > 100 ? price * 0.9 : price;\n  console.log('discount applied', price);\n  return d;\n}";
+  const prop = 'function discount(price) {\n  const d = price > 100 ? price * 0.9 : price;\n  return d;\n}';
+  const { res, repo, before, kept } = await execOn(t, 'src/billing.js', cur, prop, 'module.exports = { discount };',
+    "const m = require('../src/billing');\ntest('discount', () => { assert.strictEqual(m.discount(50), 50); assert.strictEqual(m.discount(200), 180); });", null);
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.run, 0, 'no mutant of an unedited line is run');
+  assert.strictEqual(res.mutation.unobserved_deletion_line, 4, 'the deletion point in the edited file');
+  assertReverted(res, repo, 'src/billing.js', before, kept);
+});
+
+test('a deletion stands only on an equivalent diff test that ran the deleted code', async (t) => {
+  const cur = 'function area(w, h) {\n  const unused = w * 2;\n  return w * h;\n}';
+  const prop = 'function area(w, h) {\n  return w * h;\n}';
+  const body = "const m = require('../src/area');\ntest('area', () => { assert.strictEqual(m.area(2, 3), 6); });";
+  const ok = await execOn(t, 'src/area.js', cur, prop, 'module.exports = { area };', body);
+  assert.strictEqual(ok.res.status, 'passed', JSON.stringify(ok.res.mutation));
+  assert.strictEqual(ok.res.mutation.ok, true);
+  assert.strictEqual(ok.res.mutation.run, 0);
+  const unseen = await execOn(t, 'src/area.js', cur, prop, 'module.exports = { area };', body, { applicable: true, verdict: 'equivalent', runs: 12, deletions_observed: false, duration_ms: 1 });
+  assert.strictEqual(unseen.res.status, 'reverted');
+  assert.strictEqual(unseen.res.reason, 'tests_insensitive');
+  assertReverted(unseen.res, unseen.repo, 'src/area.js', unseen.before, unseen.kept);
+});
+
+test('an unrelated token on the edited line is no evidence: a hunk with no mutable changed token is reverted (AUDIT-8 C2)', async (t) => {
+  const cur = "function toRow(u) {\n  return { id: u.id, name: u.name, kind: 'user' };\n}";
+  const prop = "function toRow(u) {\n  return { name: u.name, id: u.id, kind: 'user' };\n}";
+  const { res, repo, before, kept } = await execOn(t, 'src/row.js', cur, prop, 'module.exports = { toRow };',
+    "const m = require('../src/row');\ntest('toRow', () => { const r = m.toRow({ id: 1, name: 'a' }); assert.strictEqual(r.id, 1); assert.strictEqual(r.kind, 'user'); });",
+    { applicable: true, verdict: 'equivalent', runs: 12, duration_ms: 1 });
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.run, 0);
+  assert.strictEqual(res.mutation.unmutated_hunk_line, 3);
+  assertReverted(res, repo, 'src/row.js', before, kept);
+});
+
+test('every change hunk needs its own killed mutant', async (t) => {
+  const cur = 'function f(x) {\n  const a = x * 2;\n  const keep = 0;\n  const b = x > 1000 ? 1 : 0;\n  return a + b + keep;\n}';
+  const prop = 'function f(x) {\n  const a = x + x;\n  const keep = 0;\n  const b = x >= 1001 ? 1 : 0;\n  return a + b + keep;\n}';
+  const weak = await execOn(t, 'src/f.js', cur, prop, 'module.exports = { f };',
+    "const m = require('../src/f');\ntest('f', () => { assert.strictEqual(m.f(1), 2); });", null);
+  assert.strictEqual(weak.res.status, 'reverted', weak.res.stderr_tail);
+  assert.strictEqual(weak.res.reason, 'tests_insensitive');
+  assert.strictEqual(weak.res.mutation.hunks, 2);
+  assert.strictEqual(weak.res.mutation.surviving_hunk_line, 5);
+  assertReverted(weak.res, weak.repo, 'src/f.js', weak.before, weak.kept);
+  const strong = await execOn(t, 'src/f.js', cur, prop, 'module.exports = { f };',
+    "const m = require('../src/f');\ntest('f', () => { assert.strictEqual(m.f(1), 2); assert.strictEqual(m.f(1001), 2003); });", null);
+  assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
+  assert.strictEqual(strong.res.mutation.ok, true);
+  assert(strong.res.mutation.run >= 2);
 });

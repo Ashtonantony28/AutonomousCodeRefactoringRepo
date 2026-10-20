@@ -102,3 +102,36 @@ test('persists negatives to the target sample store', (t) => {
   stored.forEach(assertSample);
   assert(stored.every(s => s.target_repo === repo && s.synthetic));
 });
+
+// ---------- SG18: mutants of the change itself ----------
+
+test('changeHunks: line hunks with token-level changes; comments ignored; deletions have no inserted tokens', () => {
+  const before = "'use strict';\n// old note\nfunction f(x) {\n  const a = x * 2;\n  const keep = 0;\n  console.log('f', x);\n  return a + keep;\n}\n";
+  const after = "'use strict';\n// new note\nfunction f(x) {\n  const a = x + x;\n  const keep = 0;\n  return a + keep;\n}\n";
+  const hunks = bugInjector.changeHunks(before, after, 'f.js');
+  assert.strictEqual(hunks.length, 2, JSON.stringify(hunks));
+  assert.deepStrictEqual(hunks[0].ranges.map(([s, e]) => after.slice(s, e)), ['+', 'x']);
+  assert.strictEqual(hunks[0].deletion, false);
+  assert.strictEqual(hunks[1].deletion, true);
+  assert.strictEqual(before.slice(...hunks[1].deleted[0]), 'console');
+  const py = bugInjector.changeHunks('def f(x):\n    if x:\n        y = 1\n    return 2\n', 'def f(x):\n    if x:\n        pass\n    y = 1\n    return 2\n', 'f.py');
+  assert(py.length >= 1 && py.some(h => !h.deletion), 'a re-indented Python line is a change');
+  assert.deepStrictEqual(bugInjector.changeHunks('a = 1\n', 'a = 1\n', 'a.js'), []);
+});
+
+test('editMutants with the pre-edit file: only changed tokens are mutated, tagged by hunk (AUDIT-8 C1/C2)', () => {
+  const before = "function toRow(u) {\n  const n = 3;\n  return { id: u.id, name: u.name, kind: 'user', n: n };\n}\n";
+  const keyOrder = "function toRow(u) {\n  const n = 3;\n  return { name: u.name, id: u.id, kind: 'user', n: n };\n}\n";
+  assert.deepStrictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }), [], "'user' and 3 are unchanged: nothing to mutate");
+  const twoHunks = "function toRow(u) {\n  const n = 4;\n  return { id: u.id, name: u.name, kind: 'admin', n: n };\n}\n";
+  const ms = bugInjector.editMutants(twoHunks, { file: 'r.js', before });
+  assert.deepStrictEqual([...new Set(ms.map(m => m.hunk))], [0], 'adjacent changed lines form one hunk');
+  assert.deepStrictEqual(ms.map(m => m.mutation).sort(), ['numeric_off_by_one', 'string_literal']);
+  const deletion = "function toRow(u) {\n  return { id: u.id, name: u.name, kind: 'user', n: 3 };\n}\n";
+  const inlined = bugInjector.editMutants(deletion, { file: 'r.js', before });
+  assert.deepStrictEqual(inlined.map(m => m.mutation), ['numeric_off_by_one'], 'only the inlined literal, never the unchanged string');
+  assert(inlined[0].src.includes('n: 4'));
+  const pyBefore = 'def charge(user, amt):\n    print("charge", user, amt)\n    fee = amt // 10\n    return amt - fee\n';
+  const pyAfter = 'def charge(user, amt):\n    fee = amt // 10\n    return amt - fee\n';
+  assert.deepStrictEqual(bugInjector.editMutants(pyAfter, { file: 'pay.py', before: pyBefore }), [], 'a pure deletion has nothing to mutate');
+});

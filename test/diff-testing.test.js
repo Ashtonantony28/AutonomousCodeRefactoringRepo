@@ -114,7 +114,7 @@ test('this.constructor.constructor escape cannot see host process, env or requir
       'var env = this.constructor.constructor("try { return Object.keys(process.env).length } catch (e) { return -1 }")();',
       'function f(x) {',
       '  var inner = this.constructor.constructor("return typeof process")();',
-      '  return [leaked, inner, env, typeof globalThis.require];',
+      '  return [leaked, inner, env, typeof this.constructor.constructor("return this")().require];',
       '}'
     ].join('\n')
   });
@@ -633,4 +633,108 @@ test('inputs outside the original\'s evident domain are not generated; differenc
   const ood = edit('function inner(o) {\n  return o.a.b;\n}', 'function inner(o) {\n  return o.a && o.a.b;\n}');
   assert.strictEqual(ood.verdict, 'inconclusive', ood.reason);
   assert.match(ood.reason, /current version rejects with a TypeError/);
+});
+
+// ---------- SG18: observable effects beyond JSON returns ----------
+
+test('console output is recorded: a removed, added or changed log line is divergent; the same output is not', () => {
+  const removed = edit("function transfer(a, b) {\n  console.log('transfer', a, b);\n  return a + b;\n}", 'function transfer(a, b) {\n  return a + b;\n}');
+  assert.strictEqual(removed.verdict, 'divergent', removed.reason);
+  assert.match(removed.reason, /side effects differ/);
+  const leaked = edit("function connect(url, token) {\n  console.log('connecting', url);\n  return 1;\n}", "function connect(url, token) {\n  console.log('connecting', url, token);\n  return 1;\n}");
+  assert.strictEqual(leaked.verdict, 'divergent', leaked.reason);
+  const level = edit("function warnIt(x) {\n  console.log('bad', x);\n  return x;\n}", "function warnIt(x) {\n  console.warn('bad', x);\n  return x;\n}");
+  assert.strictEqual(level.verdict, 'divergent', level.reason);
+  const atLoad = edit('function f(x) {\n  return x;\n}', "console.info('loaded');\nfunction f(x) {\n  return x;\n}");
+  assert.notStrictEqual(atLoad.verdict, 'equivalent', atLoad.reason);
+  const same = edit("function hi(n) {\n  const msg = 'hi ' + n;\n  console.log(msg);\n  return n;\n}", "function hi(n) {\n  console.log('hi ' + n);\n  return n;\n}");
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+});
+
+test('object metadata is compared: key order, frozen/sealed, getters, read-only, null prototype, registered symbols', () => {
+  const cases = [
+    ['function toRow(u) {\n  return { id: u.id, name: u.name };\n}', 'function toRow(u) {\n  return { name: u.name, id: u.id };\n}'],
+    ['function defaults() {\n  return Object.freeze({ retries: 3 });\n}', 'function defaults() {\n  return { retries: 3 };\n}'],
+    ["function roles() {\n  return ['user'];\n}", "function roles() {\n  return Object.freeze(['user']);\n}"],
+    ['function opts() {\n  return Object.seal({ a: 1 });\n}', 'function opts() {\n  return Object.preventExtensions({ a: 1 });\n}'],
+    ['function lazy() {\n  return { get v() { return 1; } };\n}', 'function lazy() {\n  return { v: 1 };\n}'],
+    ["function ro() {\n  const o = {};\n  Object.defineProperty(o, 'k', { value: 1, enumerable: true });\n  return o;\n}", 'function ro() {\n  return { k: 1 };\n}'],
+    ['function dict() {\n  return Object.create(null);\n}', 'function dict() {\n  return {};\n}'],
+    ["function tag() {\n  return Symbol.for('app.tag');\n}", "function tag() {\n  return Symbol('app.tag');\n}"]
+  ];
+  for (const [c, p] of cases) {
+    const r = edit(c, p);
+    assert.strictEqual(r.verdict, 'divergent', `${p}: ${r.reason}`);
+  }
+  const sameShape = edit('function pair(a, b) {\n  const out = { a: a };\n  out.b = b;\n  return Object.freeze(out);\n}', 'function pair(a, b) {\n  return Object.freeze({ a, b });\n}');
+  assert.strictEqual(sameShape.verdict, 'equivalent', sameShape.reason);
+});
+
+test('mutation of builtins or the global object is a side effect', () => {
+  const cases = [
+    ['function init() {\n  return true;\n}', 'function init() {\n  if (!Array.prototype.last) Array.prototype.last = function () { return this[this.length - 1]; };\n  return true;\n}'],
+    ['function precise() {\n  return 0;\n}', 'function precise() {\n  Math.round = (x) => Math.floor(x + 0.5000001);\n  return 0;\n}'],
+    ['function serial(o) {\n  return JSON.stringify(o);\n}', 'function serial(o) {\n  JSON.parse = (s) => s;\n  return JSON.stringify(o);\n}']
+  ];
+  for (const [c, p] of cases) {
+    const r = edit(c, p);
+    assert.strictEqual(r.verdict, 'divergent', `${p}: ${r.reason}`);
+  }
+  const sloppy = run({ currentSrc: 'function boot(x) {\n  cache = { x: x };\n  return x;\n}', proposedSrc: 'function boot(x) {\n  return x;\n}' });
+  assert.strictEqual(sloppy.verdict, 'divergent', sloppy.reason);
+});
+
+test('a changed thrown error name is divergent', () => {
+  const r = edit("function check(x) {\n  const e = new Error('bad');\n  if (x === 1) throw e;\n  return x;\n}",
+    "function check(x) {\n  const e = new Error('bad');\n  if (x === 1) throw Object.setPrototypeOf(e, P);\n  return x;\n}",
+    { pre: "const P = Object.create(Error.prototype, { name: { value: 'ValidationError' } });" });
+  assert.strictEqual(r.verdict, 'divergent', r.reason);
+});
+
+test('host globals reached through globalThis, an alias or brackets, and clock reads, are inconclusive', () => {
+  const cases = [
+    ["function platform() {\n  return 'browser';\n}", "function platform() {\n  return typeof globalThis.process === 'object' ? 'node' : 'browser';\n}", ''],
+    ['function isNode() {\n  return false;\n}', 'function isNode() {\n  return !!(g.process && g.process.versions);\n}', 'const g = globalThis;'],
+    ['function later(f) {\n  return f;\n}', "function later(f) {\n  return globalThis['setTimeout'] ? 1 : f;\n}", ''],
+    ["function phase() {\n  return 'beta';\n}", "function phase() {\n  return Date.now() > 1750000000000 ? 'ga' : 'beta';\n}", ''],
+    ["function stamp(s) {\n  return '[2023] ' + s;\n}", "function stamp(s) {\n  return '[' + new Date().getFullYear() + '] ' + s;\n}", '']
+  ];
+  for (const [c, p, pre] of cases) {
+    const r = edit(c, p, { pre });
+    assert.strictEqual(r.verdict, 'inconclusive', `${p}: ${r.reason}`);
+    assert.match(r.reason, /host globals the sandbox does not provide/);
+  }
+});
+
+test('equivalent needs minValueRuns value-returning runs, repeating inputs when there are fewer', () => {
+  const r = edit("function next() {\n  n++;\n  return n > 5 ? 'many' : 'few';\n}", "function next() {\n  n++;\n  return n > 6 ? 'many' : 'few';\n}", { pre: 'let n = 0;' });
+  assert.strictEqual(r.verdict, 'divergent', r.reason);
+  const same = edit('function one() {\n  return 1;\n}', 'function one() {\n  const x = 1;\n  return x;\n}');
+  assert.strictEqual(same.verdict, 'equivalent', same.reason);
+  assert(same.runs >= 10, `runs=${same.runs}`);
+  const low = run({ currentSrc: 'function one() {\n  return 1;\n}', proposedSrc: 'function one() {\n  return 1 + 0;\n}', minValueRuns: 4 });
+  assert.strictEqual(low.verdict, 'equivalent', low.reason);
+  assert(low.runs >= 4 && low.runs < 10, `runs=${low.runs}`);
+});
+
+test('boundary inputs: folded numeric constants, astral strings and -0', () => {
+  const big = edit('function chunk(n) {\n  return Math.ceil(n / 1024);\n}', 'function chunk(n) {\n  return n > 2 ** 20 ? 1024 : Math.ceil(n / 1024);\n}');
+  assert.strictEqual(big.verdict, 'divergent', big.reason);
+  const astral = edit('function len(s) {\n  return [...s].length;\n}', 'function len(s) {\n  return s.length;\n}');
+  assert.strictEqual(astral.verdict, 'divergent', astral.reason);
+  const zero = edit("function fmt(n) {\n  return Object.is(n, -0) ? '-0' : String(n);\n}", 'function fmt(n) {\n  return String(n);\n}');
+  assert.strictEqual(zero.verdict, 'divergent', zero.reason);
+});
+
+test('deletions: the result says whether the deleted code ran', () => {
+  const ran = edit('function area(w, h) {\n  const unused = w * 2;\n  return w * h;\n}', 'function area(w, h) {\n  return w * h;\n}');
+  assert.strictEqual(ran.verdict, 'equivalent', ran.reason);
+  assert.strictEqual(ran.deletions_observed, true);
+  const dead = edit('function id(x) {\n  if (false) {\n    const t = 1;\n  }\n  return x;\n}', 'function id(x) {\n  if (false) {\n  }\n  return x;\n}');
+  assert.strictEqual(dead.verdict, 'equivalent', dead.reason);
+  assert.strictEqual(dead.deletions_observed, false);
+  const arrow = edit('const inc = (x) => (0, x + 1);', 'const inc = (x) => (x + 1);', { exp: 'module.exports = { inc };' });
+  assert.strictEqual(arrow.deletions_observed, false, 'a deletion inside an expression body cannot be probed');
+  const noDeletion = edit('function f(x) {\n  return x + 1;\n}', 'function f(x) {\n  return 1 + x;\n}');
+  assert(!('deletions_observed' in noDeletion));
 });

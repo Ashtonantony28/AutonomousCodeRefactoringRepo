@@ -23,16 +23,22 @@
 // plus legacy fields for hybrid-validator.js: score (1 / 0 / 0.5),
 // mismatches, function_name, arity, mode ('file'|'snippet').
 //
-// `equivalent` needs every input of every target run and MIN_VALUE_RUNS
-// value-returning inputs per target (fewer only when fewer distinct inputs
-// exist). It is withheld (`inconclusive`) when targets were skipped, when a
+// `equivalent` needs every input of every target run, one in five distinct
+// inputs returning a value, and MIN_VALUE_RUNS value-returning runs per
+// target (value-returning inputs are re-run when there are fewer). It is
+// withheld (`inconclusive`) when targets were skipped, when a
 // top-level statement outside a located callable changed, when a changed
 // callable writes different module-scope bindings, or when the edit changes
-// references to host globals the sandbox does not provide.
+// references to host globals the sandbox does not provide, to the global
+// object (`globalThis` or a local alias of it, however the property is
+// reached) or to the clock (`Date`; the sandbox clock is fixed).
+// When the edit deletes code, the current version is probed so the result
+// says whether that code ran (`deletions_observed`).
 // run() is synchronous: the caller blocks on Atomics.wait until the worker
 // reports or the hard kill fires.
 
 const path = require('path');
+const { changeHunks } = require('../utils/hunks');
 const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads');
 const { parse } = require('@babel/parser');
 
@@ -52,7 +58,7 @@ const RESOURCE_LIMITS = { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 
 // Globals a Node module can see that the sandbox does not provide.
 const HOST_GLOBALS = ['process', 'Buffer', 'setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval',
   'clearImmediate', 'queueMicrotask', 'global', 'window', 'document', 'navigator', 'fetch', 'performance', 'structuredClone',
-  'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder', 'AbortController', 'atob', 'btoa', 'crypto'];
+  'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder', 'AbortController', 'atob', 'btoa', 'crypto', 'globalThis', 'Date', 'Function'];
 
 function tryParse(src) {
   try {
@@ -410,11 +416,57 @@ function writes(fnNode, names) {
   return out;
 }
 
-// Identifier-like references outside strings and comments.
-function hostGlobals(a, b) {
-  const code = (src) => src.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '""');
-  const count = (src, g) => (code(src).match(new RegExp(`(?<![\\w$.])${g}(?![\\w$])`, 'g')) || []).length;
-  return HOST_GLOBALS.filter(g => count(a, g) !== count(b, g));
+const stripJs = (src) => src.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '""');
+
+// Local names bound to the global object (`const g = globalThis`).
+function globalAliases(src) {
+  return [...stripJs(src || '').matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:globalThis|global|window)\s*(?=[;,\n)])/g)].map(m => m[1]);
+}
+
+// Identifier-like references outside strings and comments. Any property of
+// the global object is reached through it or an alias, so those count too.
+function hostGlobals(a, b, aliases = []) {
+  const count = (src, g) => (stripJs(src).match(new RegExp(`(?<![\\w$.])${g.replace(/\$/g, '\\$')}(?![\\w$])`, 'g')) || []).length;
+  return [...new Set([...HOST_GLOBALS, ...aliases])].filter(g => count(a, g) !== count(b, g));
+}
+
+const FN_TYPES = new Set(['FunctionExpression', 'ArrowFunctionExpression', 'FunctionDeclaration', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod', 'ClassBody']);
+
+// Innermost statement of a statement list that overlaps [a, b).
+function listStatementAt(node, a, b, best = null) {
+  for (const k of Object.keys(node)) {
+    if (k === 'loc' || k === 'extra' || k.endsWith('Comments')) continue;
+    const v = node[k];
+    for (const c of Array.isArray(v) ? v : [v]) {
+      if (!c || typeof c.type !== 'string' || c.end <= a || c.start >= b) continue;
+      if (Array.isArray(v) && (k === 'body' || k === 'consequent') && /(Statement|Declaration)$/.test(c.type)) best = c;
+      best = listStatementAt(c, a, b, best);
+    }
+  }
+  return best;
+}
+
+// The current source with `__dt.hit(k);` before the innermost statement
+// holding each deleted token, so the sandbox can tell whether deleted code
+// ran. -> { code, n } or null when a deleted token is not reached by running
+// its statement (a parameter, an expression-bodied function, a class body).
+function probeDeletions(src, ranges) {
+  const ast = tryParse(src);
+  if (!ast) return null;
+  const points = new Set();
+  for (const [a, b] of ranges) {
+    const st = listStatementAt(ast.program, a, b);
+    if (!st) return null;
+    let inner = false;
+    walk(st, (n) => { if (FN_TYPES.has(n.type) && n.start <= a && b <= n.end) inner = true; });
+    if (inner) return null;
+    points.add(st.start);
+  }
+  const at = [...points].sort((x, y) => y - x);
+  let out = src;
+  at.forEach((p, k) => { out = `${out.slice(0, p)}__dt.hit(${k});${out.slice(p)}`; });
+  const past = tryParse(out);
+  return past ? { code: toScript(out, past), n: at.length } : null;
 }
 
 const keyOf = (t) => `${t.kind}:${t.className || t.owner || ''}:${t.isStatic ? 's' : ''}:${t.accessor || ''}:${t.name}`;
@@ -461,8 +513,8 @@ const ELEMENT_CALLBACK = { forEach: 0, map: 0, filter: 0, some: 0, every: 0, fin
 const ARITH_OPS = new Set(['-', '*', '/', '%', '**', '<<', '>>', '>>>', '&', '|', '^']);
 const NUMERIC_OPS = new Set([...ARITH_OPS, '<', '>', '<=', '>=']);
 const SKIP_KEYS = new Set(['__proto__', 'constructor', 'prototype', 'call', 'apply', 'bind', 'then', 'toString', 'valueOf', 'hasOwnProperty']);
-const EDGE_VALUES = [null, undefined, 0, '', [], {}, 1, -1, 'a', [1, 2, 3], true];
-const GENERIC_STRINGS = ['', ' a', 'a ', ' A b ', '0x10', 'a.b', 'A'];
+const EDGE_VALUES = [null, undefined, 0, '', [], {}, 1, -1, 'a', [1, 2, 3], true, -0];
+const GENERIC_STRINGS = ['', ' a', 'a ', ' A b ', '0x10', 'a.b', 'A', '\u{1F600}', 'a\u{1F600}b'];
 
 function toLiteral(v) {
   if (v === undefined) return 'undefined';
@@ -497,6 +549,17 @@ function addKey(h, p, k) {
   h.keys.get(p).add(k);
 }
 
+const FOLD = { '+': (a, b) => a + b, '-': (a, b) => a - b, '*': (a, b) => a * b, '/': (a, b) => a / b, '%': (a, b) => a % b, '**': (a, b) => a ** b, '<<': (a, b) => a << b, '>>': (a, b) => a >> b };
+
+// Value of a constant numeric expression (`2 ** 20`, `-1`), else NaN.
+function constNum(n) {
+  if (!n) return NaN;
+  if (n.type === 'NumericLiteral') return n.value;
+  if (n.type === 'UnaryExpression' && n.operator === '-') return -constNum(n.argument);
+  if (n.type === 'BinaryExpression' && FOLD[n.operator]) return FOLD[n.operator](constNum(n.left), constNum(n.right));
+  return NaN;
+}
+
 const isNullish = (n) => n.type === 'NullLiteral' || (n.type === 'Identifier' && n.name === 'undefined');
 
 // Literals, regexes, property names read per path, called / iterated /
@@ -517,6 +580,7 @@ function mine(fnNode, h) {
       case 'NumericLiteral':
         for (const d of [-1, 0, 1]) h.numbers.add(n.value + d);
         break;
+
       case 'RegExpLiteral':
         if (h.regexes.length < 8) h.regexes.push(n.pattern);
         break;
@@ -565,7 +629,9 @@ function mine(fnNode, h) {
       case 'ForStatement':
         if (n.init && n.init.type === 'VariableDeclaration') n.init.declarations.forEach(d => d.id.type === 'Identifier' && h.counters.add(d.id.name));
         break;
-      case 'BinaryExpression':
+      case 'BinaryExpression': {
+        const v = constNum(n);
+        if (Number.isFinite(v)) for (const d of [-1, 0, 1]) h.numbers.add(v + d);
         for (const side of [n.left, n.right]) {
           const p = pathOf(side);
           if (p && NUMERIC_OPS.has(n.operator)) h.numeric.add(p);
@@ -577,6 +643,7 @@ function mine(fnNode, h) {
           if (p) h.typeofs.set(p, y.value);
         }
         break;
+      }
       case 'UnaryExpression':
         if (n.operator === 'typeof' || n.operator === '!' || n.operator === '+') guard(n.argument);
         else if (n.operator === '-' || n.operator === '~') { const p = pathOf(n.argument); if (p) { h.numeric.add(p); h.arith.add(p); } }
@@ -745,7 +812,7 @@ const flipCase = (s) => [...s].map(c => (c === c.toUpperCase() ? c.toLowerCase()
 // Boundary values: mined numbers (already ±1) and strings derived from mined
 // strings and regexes (repeats, wrapped, case-flipped).
 function boundaryPools(h) {
-  const nums = [...h.numbers].filter(Number.isFinite).slice(0, 12);
+  const nums = [...h.numbers].filter(Number.isFinite).slice(0, 16);
   for (const n of [0, 1, 2, -1, 10]) if (nums.length < 4 && !nums.includes(n)) nums.push(n);
   const base = [...h.regexes.flatMap(regexSamples), ...h.strings].slice(0, 16);
   const strs = new Set();
@@ -1035,7 +1102,7 @@ function run(opts) {
     const diff = [...a].filter(n => !b.has(n)).concat([...b].filter(n => !a.has(n)));
     if (diff.length) caps.push(`${labelOf(p.cur)} writes different module-scope state (${diff.join(', ')})`);
   }
-  const globals = hostGlobals(currentSrc, proposedSrc);
+  const globals = hostGlobals(currentSrc, proposedSrc, globalAliases(typeof fileSrc === 'string' ? fileSrc : currentSrc));
   if (globals.length) caps.push(`the edit changes references to host globals the sandbox does not provide (${globals.join(', ')})`);
   if (!pairs.length && (mode !== 'file' || !caps.length)) {
     return finish(t0, { verdict: 'inconclusive', reason: ['no callable function or constant located in the edit', ...caps].join('; '), runs: 0, mode });
@@ -1049,9 +1116,16 @@ function run(opts) {
     return { desc, label: labelOf(t), removed: !!p.removed, arity: built.arity, inputs: built.inputs, probes: built.probes };
   });
 
+  const deleted = changeHunks(currentSrc, proposedSrc, 'edit.js').filter(h => h.deletion).flatMap(h => h.deleted);
+  let probe = null;
+  if (deleted.length && cur.parsed) {
+    probe = mode === 'file' ? probeDeletions(fileSrc, deleted.map(([a, b]) => [a + at, b + at])) : probeDeletions(currentSrc, deleted);
+  }
+
   const elapsed = performance.now() - t0;
   let res = execute({
-    currentCode: cur.code,
+    currentCode: probe ? probe.code : cur.code,
+    hitCount: probe ? probe.n : 0,
     proposedCode: prop.code,
     targets: plan.map(p => ({ desc: p.desc, label: p.label, removed: p.removed, inputs: p.inputs.map(x => x.lit), probes: p.probes })),
     bindings,
@@ -1074,6 +1148,8 @@ function run(opts) {
     ce.args = jsonSafe(input.args);
     if (input.self !== undefined) ce.this = jsonSafe(input.self);
   }
+  if (deleted.length) res.deletions_observed = !!probe && res.verdict === 'equivalent' && res.deletions_observed === true;
+  else delete res.deletions_observed;
   const callables = plan.filter(p => p.desc.kind !== 'value');
   return finish(t0, {
     ...res,

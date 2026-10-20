@@ -26,6 +26,7 @@ const polyglot = require('../validation/polyglot-ast');
 const { appendSamples, editId } = require('./collector');
 const { runChecks } = require('../validation/ast-checker');
 const diffTesting = require('../validation/diff-testing');
+const { changeHunks } = require('../utils/hunks');
 
 const MUTATIONS = [
   {
@@ -153,8 +154,8 @@ function syntheticNegatives(proposal, targetRepo = null, opts = {}) {
 }
 
 // ---------- Mutants of an applied edit (executor's test-sensitivity bar) ----------
-// Operators run on the comment/string-blanked source, only inside the edited
-// lines, and every mutant must still parse: a mutant that breaks the file is
+// Operators run on the comment/string-blanked source, only on tokens the edit
+// changed, and every mutant must still parse: a mutant that breaks the file is
 // "killed" by any suite that loads it, which proves nothing.
 
 const swapper = (map) => (m) => map[m];
@@ -233,46 +234,56 @@ function parsesPython(srcs) {
   try { return JSON.parse(r.stdout); } catch { return srcs.map(() => false); }
 }
 
-// Up to `max` parse-valid mutants of the changed characters [start, end) of
-// `src` (the edited file) or, when no operator applies to them, of the rest of
-// the lines holding them; operators taken round-robin.
-// -> [{ mutation, src, line }]
-function editMutants(src, { start, end, file, max = MAX_MUTANTS }) {
+// Up to `max` parse-valid mutants per change hunk of `src` (the edited
+// file), each of a token the edit inserted or changed: with `before` (the
+// file before the edit) the hunks come from a token diff, else [start, end)
+// is one hunk. Unchanged tokens, even on an edited line, are never mutated.
+// Operators are taken round-robin.
+// -> [{ mutation, src, line, hunk }]
+function editMutants(src, { start, end, file, max = MAX_MUTANTS, before }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
-  const lo = src.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
-  let hi = src.indexOf('\n', Math.max(start, end - 1));
-  if (hi < 0) hi = src.length;
+  const hunks = typeof before === 'string' ? changeHunks(before, src, file) : [{ ranges: [[start, end]] }];
   const code = polyglot.stripCode(src, lang);
-  const inSpan = [];
-  const onLines = [];
-  for (const op of EDIT_OPS[lang]) {
-    const span = [];
-    const lines = [];
-    const re = new RegExp(op.re.source, op.re.flags);
-    let m;
-    while ((m = re.exec(code)) && m.index < hi) {
-      if (m.index < lo) continue;
-      const mutated = mutateAt(src, code, op, m, lang);
-      if (!mutated || mutated === src) continue;
-      const mutant = { mutation: op.name, src: mutated, line: src.slice(0, m.index).split('\n').length };
-      (m.index < end && m.index + m[0].length > start ? span : lines).push(mutant);
-    }
-    inSpan.push(span);
-    onLines.push(lines);
-  }
-  const perOp = inSpan.some(l => l.length) ? inSpan : onLines;
-  const order = [];
-  for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
-  const candidates = order.slice(0, max * 4);
+  const candidates = [];
+  hunks.forEach((h, hi) => {
+    if (!h.ranges.length) return;
+    const lo = src.lastIndexOf('\n', Math.max(0, h.ranges[0][0] - 1)) + 1;
+    const last = h.ranges[h.ranges.length - 1][1];
+    let stop = src.indexOf('\n', Math.max(lo, last - 1));
+    if (stop < 0) stop = src.length;
+    const perOp = EDIT_OPS[lang].map((op) => {
+      const out = [];
+      const re = new RegExp(op.re.source, op.re.flags);
+      re.lastIndex = lo;
+      let m;
+      while ((m = re.exec(code)) && m.index < stop) {
+        if (m.index < lo) continue;
+        const a = m.index, b = m.index + Math.max(1, m[0].length);
+        if (!h.ranges.some(([s, e]) => a < e && b > s)) continue;
+        const mutated = mutateAt(src, code, op, m, lang);
+        if (mutated && mutated !== src) out.push({ mutation: op.name, src: mutated, line: src.slice(0, m.index).split('\n').length, hunk: hi });
+      }
+      return out;
+    });
+    const order = [];
+    for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
+    candidates.push(order.slice(0, max * 4));
+  });
+  const flat = candidates.flat();
   let ok;
-  if (lang === 'python') ok = parsesPython(candidates.map(c => c.src));
+  if (lang === 'python') ok = flat.length ? parsesPython(flat.map(c => c.src)) : [];
   else {
     const { parseJs } = require('../validation/ast-checker');
     const base = parseJs(src, file).errors.length;
-    ok = candidates.map(c => parsesJs(c.src, file, base));
+    ok = flat.map(c => parsesJs(c.src, file, base));
   }
-  return candidates.filter((c, i) => ok[i]).slice(0, max);
+  const kept = new Map();
+  return flat.filter((c, i) => {
+    if (!ok[i] || (kept.get(c.hunk) || 0) >= max) return false;
+    kept.set(c.hunk, (kept.get(c.hunk) || 0) + 1);
+    return true;
+  });
 }
 
-module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, MUTATIONS, MAX_MUTANTS };
+module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, changeHunks, MUTATIONS, MAX_MUTANTS };
