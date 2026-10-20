@@ -187,3 +187,25 @@ test('applyEdit: two reflowed copies are ambiguous at the whitespace tier and ne
   );
   assert.strictEqual(fs.readFileSync(path.join(repo, 'dup.js'), 'utf8'), original);
 });
+
+test('restoreFromDisk: a committed() check that throws restores the snapshot; a commit sha discards it (AUDIT-19 M5)', (t) => {
+  const repo = makeTempRepo();
+  const persistPath = path.join(repo, '..', `${path.basename(repo)}-inflight.json`);
+  t.after(() => { rm(repo); rm(persistPath); });
+  // The on-disk state a killed process leaves behind: snapshot + edited file.
+  const crash = () => {
+    fs.writeFileSync(persistPath, JSON.stringify({ repo_root: repo, meta: { issue_id: 'i1' }, files: { 'm.js': { existed: true, content: 'before\n' } } }));
+    writeIn(repo, 'm.js', 'crashed edit\n');
+  };
+  crash();
+  const r = FileSnapshot.restoreFromDisk(persistPath, { committed: () => { throw new Error('git gone'); } });
+  assert.strictEqual(r.restored, 1);
+  assert(!r.discarded);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'm.js'), 'utf8'), 'before\n');
+  assert(!fs.existsSync(persistPath));
+  crash();
+  const c = FileSnapshot.restoreFromDisk(persistPath, { committed: () => 'abc123' });
+  assert.strictEqual(c.restored, 0);
+  assert.match(c.discarded, /already committed as abc123/);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'm.js'), 'utf8'), 'crashed edit\n');
+});

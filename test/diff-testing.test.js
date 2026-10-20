@@ -462,11 +462,12 @@ test('snippet mode: proposed-only ReferenceError for a name absent from the file
 // --- SG15: diff-test reach, round 2 -------------------------------------------
 
 // Splices `cur` into `pre` + `cur` + `exp` (exp defaults to exporting `name`
-// or the first declared function/class).
-const edit = (cur, prop, { pre = '', exp, name } = {}) => run({
+// or the first declared function/class); other options go to run().
+const edit = (cur, prop, { pre = '', exp, name, ...opts } = {}) => run({
   currentSrc: cur,
   proposedSrc: prop,
-  fileSrc: `'use strict';\n${pre}\n${cur}\n${exp !== undefined ? exp : `module.exports = { ${name || /(?:function|class)\s+(\w+)/.exec(cur)[1]} };`}\n`
+  fileSrc: `'use strict';\n${pre}\n${cur}\n${exp !== undefined ? exp : `module.exports = { ${name || /(?:function|class)\s+(\w+)/.exec(cur)[1]} };`}\n`,
+  ...opts
 });
 
 test('module-scope bindings are compared after every call and after load', () => {
@@ -829,7 +830,9 @@ test('thousands of constant bindings: a later binding that differs mid-run is st
   // 5,000 constants before `flag`: the per-call digest used to stop after
   // SMALL_TOTAL nodes, so `flag` was never looked at between calls.
   const pre = `${Array.from({ length: 5000 }, (_, i) => `const K_${i} = ${i % 101};`).join('\n')}\nlet calls = 0;\nlet flag = 0;\nfunction setFlag(v) { flag = v; }`;
-  const opts = { pre, exp: 'module.exports = { pick, readFlag: () => flag };' };
+  // ~0.7 s per side unloaded; the time limits only keep a loaded host from
+  // ending it inconclusive (AUDIT-19 M1).
+  const opts = { pre, exp: 'module.exports = { pick, readFlag: () => flag };', hardKillMs: 20_000, budgetMs: 10_000 };
   const cur = 'function pick(i) {\n  calls++;\n  return K_1 + i;\n}';
   const mid = edit(cur, 'function pick(i) {\n  calls++;\n  if (calls === 3) setFlag(1);\n  if (calls === 6) setFlag(0);\n  return K_1 + i;\n}', opts);
   assert.strictEqual(mid.verdict, 'divergent', mid.reason);

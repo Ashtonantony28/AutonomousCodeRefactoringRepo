@@ -506,6 +506,20 @@ test('tapResults / junitResults: per-test states; a crashed test file or a failu
   assert.deepStrictEqual(junitResults(xml('<skipped message="x" />')).tests, { 't.m::ok': 'pass', 't.m::bad': 'skip' });
 });
 
+test('tapResults / junitResults: a fixture error is no test failure; duplicate ids are kept apart (AUDIT-19 M2, M3)', () => {
+  const { tapResults, junitResults } = require('../src/runner/test-runner');
+  const xml = (...cases) => `<testsuites><testsuite>${cases.join('')}</testsuite></testsuites>`;
+  const tc = (name, body = '') => `<testcase classname="t.m" name="${name}">${body}</testcase>`;
+  const setup = '<error message="failed on setup with &quot;fixture \'db\' not found&quot;">file t/m.py, line 4\n  def test_bad(db):\nE       fixture \'db\' not found</error>';
+  assert.deepStrictEqual(junitResults(xml(tc('ok'), tc('bad', setup))), { tests: { 't.m::ok': 'pass', 't.m::bad': 'error' }, load: false });
+  const fail = '<failure message="assert 1 == 2">t/m.py:5: in test_x\n    assert 1 == 2</failure>';
+  assert.deepStrictEqual(junitResults(xml(tc('x'), tc('x', fail))).tests, { 't.m::x': 'pass', 't.m::x#2': 'fail' });
+  assert.deepStrictEqual(junitResults(xml(tc('x', fail), tc('x'), tc('x'))).tests, { 't.m::x': 'fail', 't.m::x#2': 'pass', 't.m::x#3': 'pass' });
+  const entry = (n, ok) => [`# Subtest: a`, `${ok ? '' : 'not '}ok ${n} - a`, '  ---', "  type: 'test'", ...(ok ? [] : ["  failureType: 'testCodeFailure'"]), '  ...'];
+  const tap = ['TAP version 13', ...entry(1, true), ...entry(2, false), ...entry(3, true), '1..3'].join('\n');
+  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 'a#2': 'fail', 'a#3': 'pass' }, load: false });
+});
+
 test('runTests: node:test per-test results; a module that throws while loading, in a test or at a test file\'s top, is a collection error (AUDIT-16 C2)', async (t) => {
   const prev = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
