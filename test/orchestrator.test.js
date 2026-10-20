@@ -119,6 +119,41 @@ test('resume with the run branch removed stops with an error; session.worktree k
   assert.deepStrictEqual(treeHash(repo), tree);
 });
 
+// SG21: a fresh run on a git target never edits it in place.
+test('a user branch named `refactor` does not make a fresh run edit the target in place', async (t) => {
+  const { git, treeHash } = require('./helpers/git');
+  const path = require('path');
+  const repo = gitInit(env.copyFixture('js-basic'));
+  git(repo, ['branch', 'refactor']);
+  fs.appendFileSync(path.join(repo, 'src/math.js'), '\n// user work in progress\n');
+  installStub(loadFixtureResponses('js-basic'));
+  t.after(() => { resetClient(); env.rm(repo); });
+  const tree = treeHash(repo);
+  const s = await withoutTestContext(() => runPipeline({ repo, cache: 'off' }));
+  assert.strictEqual(s.worktree.mode, 'worktree');
+  assert.strictEqual(s.worktree.branch, `refactor-run/${s.run_id}`);
+  const passed = s.proposals.find(p => p.test_outcome.status === 'passed');
+  assert.deepStrictEqual(branchCommits(repo, s.worktree.branch), [passed.test_outcome.commit]);
+  assert.deepStrictEqual(treeHash(repo), tree);
+});
+
+test('a crash snapshot whose worktree is gone is discarded; resume re-creates the worktree and completes', async (t) => {
+  const { inflightPath } = require('../src/utils/checkpoint');
+  const { repo, passed, tree, treeHash, stub } = await crashedRunWithBrokenWorktree(t, (r, wt) => {
+    fs.writeFileSync(inflightPath(r), JSON.stringify({
+      repo_root: wt.root, meta: { issue_id: 'x', file: 'src/math.js' },
+      files: { 'src/math.js': { existed: true, content: 'stale\n' } }, captured_at: new Date().toISOString()
+    }));
+    fs.rmSync(wt.path, { recursive: true, force: true });
+  });
+  const s2 = await withoutTestContext(() => runPipeline({ repo, cache: 'off', resume: true }));
+  assert.strictEqual(fs.existsSync(inflightPath(repo)), false);
+  assert.strictEqual(s2.proposals.find(x => x.issue_id === passed.issue_id).test_outcome.commit, passed.test_outcome.commit);
+  assert.notStrictEqual(fs.readFileSync(require('path').join(s2.worktree.root, 'src/math.js'), 'utf8'), 'stale\n');
+  assert.strictEqual(stub.count(), 0);
+  assert.deepStrictEqual(treeHash(repo), tree);
+});
+
 test('a run on another target does not discard a resumable session', async (t) => {
   const A = gitInit(env.copyFixture('js-basic'));
   const B = env.copyFixture('no-tests');

@@ -44,7 +44,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
 - On `SIGINT`/`SIGTERM` the in-flight edit is reverted (its test process
   group killed), state is flushed and the process exits 0. The pre-edit
   snapshot is also persisted (`<state>/targets/<sha256(repo)>/inflight.json`)
-  so after a crash the next start restores it before doing anything else.
+  so after a crash the next start restores it before doing anything else
+  (a snapshot whose worktree no longer exists is discarded with a warning).
 - `--resume` with proposals in the session skips the Analyzer and processes
   every proposal without a `test_outcome`, including pending Reflexion repairs.
   It first reconciles with the `refactor/<run_id>` branch: a proposal whose
@@ -81,8 +82,13 @@ saturation figures are reported on the dashboard as a spend indicator only.
   post-processing overran the test budget) or `tests_insensitive` (no mutant
   failed). These four reasons are untested outcomes: no sample, calibration
   point, reward or Reflexion repair.
-- If the target is not a git repo (or has no commits) a fresh run falls back
-  to editing the target in place, with a warning.
+- If `git worktree add` fails (e.g. a user branch named `refactor` blocks
+  the `refactor/` ref namespace), it is retried once on `refactor-run/<run_id>`
+  (`refactor-run-<run_id>` when a `refactor-run` branch exists); if that fails
+  too the run stops with `EWORKTREE` (exit 2), target untouched. A git target
+  with commits is never edited in place.
+- Only a target that is not a git repo (or has no commits) is edited in
+  place, with a warning.
 - No test runner detected → `skipped_no_tests`, edit reverted, no RL sample.
 - Test commands run detached in their own process group; the 60 s timeout
   kills the whole group.

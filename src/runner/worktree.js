@@ -96,25 +96,54 @@ function linkNodeModules(targetRoot, workRoot) {
   try { fs.symlinkSync(src, dst, 'dir'); return true; } catch { return false; }
 }
 
+// Second branch name for when `worktree add -b refactor/<run_id>` fails, e.g.
+// because a user branch named `refactor` blocks the refs/heads/refactor/ namespace.
+function fallbackBranchFor(top, runId) {
+  return refExists(top, 'refs/heads/refactor-run') ? `refactor-run-${runId}` : `refactor-run/${runId}`;
+}
+
+function refExists(top, ref) {
+  return tryGit(top, ['rev-parse', '--verify', '--quiet', ref]) != null;
+}
+
 // Returns { mode: 'worktree', path, root, branch, base } or
-// { mode: 'in-place', root, reason } when the target is not a usable git repo.
-// Throws (worktree and branch removed) when the dirty-file sync fails.
+// { mode: 'in-place', root, reason } when the target is not a git repo or has
+// no commits. A git target with commits is never edited in place: if
+// `git worktree add` also fails on the fallback branch name, throws (code
+// EWORKTREE). Throws (worktree and branch removed) when the dirty-file sync fails.
 function createWorktree({ targetRepo, runId, baseDir }) {
   const absTarget = fs.realpathSync(path.resolve(targetRepo));
   const top = gitToplevel(absTarget);
   if (!top) return { mode: 'in-place', root: absTarget, reason: 'target is not a git repository' };
   if (!hasHead(top)) return { mode: 'in-place', root: absTarget, reason: 'target git repository has no commits' };
 
-  const branch = branchFor(runId);
   const wtPath = path.join(baseDir, runId);
   const sub = path.relative(top, absTarget);
-  if (fs.existsSync(wtPath)) return resumeWorktree({ targetRepo, info: { mode: 'worktree', path: wtPath, branch, sub } });
+  if (fs.existsSync(wtPath)) {
+    const branch = tryGit(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD']) || branchFor(runId);
+    return resumeWorktree({ targetRepo, info: { mode: 'worktree', path: wtPath, branch, sub } });
+  }
 
   fs.mkdirSync(path.dirname(wtPath), { recursive: true });
-  try {
-    git(top, ['worktree', 'add', '-b', branch, wtPath, 'HEAD']);
-  } catch (err) {
-    return { mode: 'in-place', root: absTarget, reason: `git worktree add failed: ${String(err.stderr || err.message).trim()}` };
+  const errors = [];
+  let branch = null;
+  for (const name of [branchFor(runId), fallbackBranchFor(top, runId)]) {
+    const existed = refExists(top, `refs/heads/${name}`);
+    try {
+      git(top, ['worktree', 'add', '-b', name, wtPath, 'HEAD']);
+      branch = name;
+      break;
+    } catch (err) {
+      errors.push(`${name}: ${String(err.stderr || err.message).trim()}`);
+      // Drop what a half-finished add left behind (the path did not exist before).
+      fs.rmSync(wtPath, { recursive: true, force: true });
+      tryGit(top, ['worktree', 'prune']);
+      if (!existed) tryGit(top, ['branch', '-D', name]);
+    }
+  }
+  if (!branch) {
+    throw Object.assign(new Error(`git worktree add failed (${errors.join('; ')}); the target is not edited in place. ` +
+      'Fix the repository (a ref blocking the branch name, a locked worktree, disk space) and run again'), { code: 'EWORKTREE' });
   }
   const base = git(wtPath, ['rev-parse', 'HEAD']);
   let synced;

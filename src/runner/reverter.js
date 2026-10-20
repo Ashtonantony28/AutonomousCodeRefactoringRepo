@@ -93,6 +93,11 @@ class FileSnapshot {
       try { fs.unlinkSync(persistPath); } catch { /* */ }
       return null;
     }
+    // The run worktree it belonged to is gone: nothing left to restore.
+    if (!fs.existsSync(data.repo_root)) {
+      try { fs.unlinkSync(persistPath); } catch { /* */ }
+      return { repo_root: data.repo_root, meta: data.meta || null, files: Object.keys(data.files), restored: 0, discarded: 'repo_root no longer exists' };
+    }
     const snap = new FileSnapshot(data.repo_root);
     for (const [rel, entry] of Object.entries(data.files)) snap.snapshots.set(rel, entry);
     const restored = snap.restoreAll();

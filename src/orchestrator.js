@@ -286,7 +286,8 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
 
   // A previous process died mid-edit: put the file back before anything else.
   const crashed = FileSnapshot.restoreFromDisk(inflightPath(absRepo));
-  if (crashed) logWarn(`restored in-flight edit from a previous run: ${crashed.files.join(', ')} in ${crashed.repo_root}`);
+  if (crashed && crashed.discarded) logWarn(`discarded in-flight snapshot from a previous run (${crashed.files.join(', ')}): ${crashed.repo_root} no longer exists`);
+  else if (crashed) logWarn(`restored in-flight edit from a previous run: ${crashed.files.join(', ')} in ${crashed.repo_root}`);
 
   const session = loadOrInit(absRepo, { resume });
   if (cli) installSignalHandlers(session);
@@ -383,11 +384,13 @@ async function runPipeline({ repo, dryRun, resume, cache = 'read-write', hierarc
   return session;
 }
 
-// Executor isolation: a git worktree on refactor/<run_id> under the state dir.
+// Executor isolation: a git worktree on refactor/<run_id> (or refactor-run/…
+// when that name is blocked) under the state dir.
 // Dry runs never write, so they validate against the target directly. A
 // recorded worktree that cannot be re-attached throws (resumeWorktree) and
 // leaves session.worktree as it was; only a fresh run (or a recorded in-place
-// run) gets createWorktree, whose in-place fallback is for non-git targets.
+// run) gets createWorktree, whose in-place mode is only for non-git or
+// no-commit targets; on a git target it throws EWORKTREE instead.
 function setupWorkspace({ session, absRepo, dryRun }) {
   const snapshotPath = inflightPath(absRepo);
   if (dryRun) return { root: absRepo, info: null, snapshotPath };

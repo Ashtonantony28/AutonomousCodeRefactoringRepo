@@ -74,8 +74,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 node src/orchestrator.js --repo /path/to/target/repo --serve
 
 # Edits land as commits on refactor/<run_id> in a git worktree under the
-# state dir; the target's working tree is never touched (non-git targets
-# fall back to in-place edits with a warning).
+# state dir (refactor-run/<run_id> if that name is blocked); the target's
+# working tree is never touched. If no worktree can be created the run stops
+# (exit 2); only non-git / no-commit targets are edited in place, with a warning.
 
 # Skip Executor (no file changes)
 node src/orchestrator.js --repo /path/to/target/repo --dry-run

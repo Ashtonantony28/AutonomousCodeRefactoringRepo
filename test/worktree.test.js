@@ -164,3 +164,40 @@ test('resumeWorktree refuses a directory that is not the run branch worktree', (
   fs.mkdirSync(info.path, { recursive: true });
   assert.throws(() => worktree.resumeWorktree({ targetRepo: repo, info }), (err) => err.code === 'EWORKTREE');
 });
+
+// ---------- SG21: a git target with commits is never edited in place ----------
+
+function blockedRepo(t, branches) {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-repo-'));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-base-'));
+  t.after(() => { env.rm(repo); env.rm(base); });
+  write(repo, 'src/a.js', 'module.exports = 1;\n');
+  gitInit(repo);
+  for (const b of branches) git(repo, ['branch', b]);
+  write(repo, 'src/a.js', 'module.exports = 1; // user work\n');
+  return { repo, base };
+}
+
+test('a user branch named `refactor` makes the run use refactor-run/<run_id>, not the target', (t) => {
+  const { repo, base } = blockedRepo(t, ['refactor']);
+  const info = worktree.createWorktree({ targetRepo: repo, runId: 'r1', baseDir: base });
+  assert.strictEqual(info.mode, 'worktree');
+  assert.strictEqual(info.branch, 'refactor-run/r1');
+  assert.strictEqual(git(info.path, ['rev-parse', '--abbrev-ref', 'HEAD']), 'refactor-run/r1');
+  assert.deepStrictEqual(info.dirty_synced, ['src/a.js']);
+  fs.writeFileSync(path.join(info.root, 'src', 'a.js'), 'module.exports = 2;\n');
+  assert(worktree.commitProposal(info, { issue_id: 'aaaa000011112222', file: 'src/a.js', reasoning: '' }));
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'a.js'), 'utf8'), 'module.exports = 1; // user work\n');
+  assert.strictEqual(git(repo, ['status', '--porcelain']), 'M src/a.js');
+});
+
+test('worktree add failing on both branch names throws EWORKTREE; no worktree, no new branch, target untouched', (t) => {
+  const { repo, base } = blockedRepo(t, ['refactor', 'refactor-run', 'refactor-run-r1']);
+  const refs = git(repo, ['for-each-ref', '--format=%(refname)']);
+  assert.throws(() => worktree.createWorktree({ targetRepo: repo, runId: 'r1', baseDir: base }),
+    (err) => err.code === 'EWORKTREE' && /not edited in place/.test(err.message) && err.message.includes('refactor-run-r1'));
+  assert.strictEqual(fs.existsSync(path.join(base, 'r1')), false);
+  assert.strictEqual(git(repo, ['for-each-ref', '--format=%(refname)']), refs, 'pre-existing refactor-run-r1 kept, nothing added');
+  assert.strictEqual(git(repo, ['worktree', 'list', '--porcelain']).split('\n').filter(l => l.startsWith('worktree ')).length, 1);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'src', 'a.js'), 'utf8'), 'module.exports = 1; // user work\n');
+});
