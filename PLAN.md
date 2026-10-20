@@ -88,7 +88,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG31 | Literal-aware lines, operator and keyword sites, non-whitespace sham | SG30 | thread worker | done |
 | SG32 | Linear per-test parsing, charge parse time to the mutant budget | SG31 | thread worker (with SG31) | done |
 | SG33 | Caught load failures are not collection errors | SG32 | thread worker | done |
-| SG34 | Same-text mutant switch, structural changes, continued strings | SG33 | thread worker | done |
+| SG34 | Same-text mutant switch, structural changes, continued strings | SG33 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
