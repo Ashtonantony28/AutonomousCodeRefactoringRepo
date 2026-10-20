@@ -75,6 +75,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG18 | Mutation evidence on the change; richer JS oracle | SG17 | thread worker | done |
 | SG19 | Python differential test | SG17 | thread worker | proposed |
 | SG20 | Performance, round 3 | SG19 | thread worker | proposed |
+| SG21 | Never edit a git target in place | SG17 | thread worker | proposed |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -243,6 +244,12 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/9/diff-explosion.js`, `node audit/9/validator-explosion.js`, `node audit/9/mutant-budget.js --suite-s 29,31,45`, `node audit/9/mutant-budget.js --lang py --suite-s 30,40`, `node audit/9/edit-mutants.js`, `node audit/9/mutant-timing.js --mode jitter --repeat 20`, `node audit/9/diff-state.js`, `node audit/9/drift-caps.js --cases c` all within budget / ok.
 - **Verify:** `node --test test/diff-testing.test.js test/executor.test.js test/bug-injector.test.js test/polyglot-ast.test.js && npm test && npm run bench`
 
+### SG21 — Never edit a git target in place (A10-C1, A10-M2)
+- A git repo with commits never falls back to in-place editing: if `git worktree add` fails, retry with a non-colliding branch name (e.g. `refactor-run/<run_id>` when a `refactor` ref blocks the namespace), else stop with `EWORKTREE` and leave the target untouched. In-place stays only for non-git / no-commit targets.
+- A crash snapshot (`inflight.json`) pointing at a missing worktree is discarded with a warning instead of failing every later run.
+- **Accept:** `node audit/10/branch-namespace-in-place.js` and `node audit/10/inflight-worktree-gone.js` ok; target working tree untouched.
+- **Verify:** `node --test test/worktree.test.js test/orchestrator.test.js test/executor.test.js && npm test`
+
 ## Audits (after SG8)
 
 Separate sessions, none run by a worker that wrote the code under audit. Each writes `AUDIT-<n>.md`, findings ranked by severity, each with a repro or failing test. Critical/high findings become new SGs here. Repeat until a full round has no critical/high.
@@ -282,3 +289,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-20 | audits r3 | AUDIT-8 | prior C/H repros 9/9 still fixed; 2C/3H/1M/1L new (mutants on unedited lines / unrelated tokens; JSON-only oracle; host sniffs; Python lexical-only) → SG18, SG19. |
 | 2026-10-20 | SG18 | green | diff+executor+bug-injector tests 95/95 (14 new, all fail on old code; 2 adapted), `npm test` 359/359, bench ast p95 1.2 / difftest 172 / apply 27 / validator 172 ms. Mutation evidence per change hunk (`src/utils/hunks.js`: line diff, then token diff, comments ignored): mutants only of inserted/changed tokens, each hunk needs its own kill; a deletion-only hunk stands only on an `equivalent` diff test whose probes (`__dt.hit` before the deleted statements) ran (`deletions_observed`), else `reverted` `tests_insensitive`; no line fallback. Oracle: console recorded (load + calls), builtins/global object diffed against a setup snapshot, objects carry key order, attribute prefixes (non-enumerable/read-only/non-configurable/getter/setter), frozen/sealed/non-extensible, null prototype; registered symbols; thrown `e.name`; `globalThis`/aliases/`Date`/`Function` reference counts → inconclusive; constant-folded numeric literals, astral strings, -0; ≥ 10 value runs per callable target (value-returning inputs re-run, one in five distinct inputs still required). `audit/8/e2e-commit` 0/6 committed (X1–X4 vetoed by the diff test, X5/X6 `tests_insensitive`); `--only` list 0/15 escapes; full AUDIT-8 corpus JS 35/59 → 3/59 (DM3/DM5/DM8), Python 23/24 (SG19); benign JS 2/22 (N06, N10, unchanged), Python 5/12; `audit/5/e2e-commit` 0 committed, `audit/5/mutation-corpus` U 4/97 (Python only), M 0/97, benign 1/31 (unchanged). Fixtures: `js-failing-after-edit` now proposes a BigInt-only log change its suite catches (console edits are divergent now); hybrid C1/K2 use a >1000-char truncation; `audit/7/sample-identity.js` run 1 moved to the same edit. Open: executor false rejections rise for edits whose changed tokens no operator mutates (renames, reorders) and for JS deletions in unprobeable places; inputs past 1000 chars, deep nesting and BigInt still unseen. |
 | 2026-10-20 | audits r3 | AUDIT-9 | prior perf C/H all fixed; 2C/4H/6M/6L new (diff-test input explosion, mutant budget from instrumented run, quadratic mutant generation, slow mutant counts as kill, state snapshots, Python drift byte cap) → SG20 after SG19. |
+| 2026-10-20 | audits r3 | AUDIT-10 | prior contract highs fixed; 1C/0H/9M new (in-place fallback when `worktree add` fails on a git repo) → SG21. |
