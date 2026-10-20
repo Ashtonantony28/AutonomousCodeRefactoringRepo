@@ -227,3 +227,77 @@ test('harness crashes are inconclusive and observe no deletion: bad output, harn
   assert.strictEqual(noload.verdict, 'inconclusive');
   assert.strictEqual(noload.reason, 'a sandboxed side ended before loading the module');
 });
+
+// ---------- SG24: bounded work on large modules and deletions ----------
+
+// Runs py_diff_harness.main in-process after `patch` (Python source); -> its result.
+function harness(req, patch = '') {
+  const { spawnSync } = require('child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pydt-unit-'));
+  try {
+    const script = [
+      'import json, sys', `sys.path.insert(0, ${JSON.stringify(path.join(__dirname, '..', 'src', 'validation'))})`,
+      'import py_diff_harness as H', 'req = json.load(sys.stdin)', patch, 'print(json.dumps(H.main(req)))'
+    ].join('\n');
+    const r = spawnSync('python3', ['-I', '-B', '-c', script], { cwd: dir, input: JSON.stringify({ workdir: dir, ...req }), encoding: 'utf8', timeout: 60000 });
+    assert.strictEqual(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout.trim().split('\n').pop());
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const manyFns = (n, p = 'g') => Array.from({ length: n }, (_, i) => `def ${p}_${i}(a, b):\n    return a * ${i % 9} + b\n\n\n`).join('');
+
+test('a deletion of many tokens deep in a module is mapped in one pass and probed where it runs (AUDIT-14 H1)', () => {
+  // 20,000 deleted tokens 100 KB into the file, after astral characters
+  // (UTF-16 offsets differ from Python's): the per-token rescan took ~10 s.
+  let pre = '"""module \u{1F600} \u{1F680}"""\n\n\n';
+  for (let i = 0; pre.length < 100000; i++) pre += manyFns(1, `g${i}`);
+  const cur = `def target(a, b):\n    unused = [${Array.from({ length: 10000 }, (_, i) => i).join(', ')}]\n    if a > 3:\n        return a - b\n    return a + b\n`;
+  const r = run(cur, 'def target(a, b):\n    if a > 3:\n        return a - b\n    return a + b\n', { pre, budgetMs: 4000, hardKillMs: 8000 });
+  assert.strictEqual(r.verdict, 'equivalent', r.reason);
+  assert.strictEqual(r.deletions_observed, true);
+});
+
+test('only callables on the edited lines are compared: unchanged ones are never dumped (AUDIT-14 H2)', () => {
+  const cur = `${manyFns(300)}def target(a, b):\n    t = a * 7 + b\n    if t > 100:\n        return t - 100\n    return t\n\n\n${manyFns(300, 'h')}`;
+  const prop = cur.replace('    if t > 100:\n        return t - 100\n    return t\n', '    return t - 100 if t > 100 else t\n');
+  const r = harness({ current: cur, proposed: prop, modname: 'm' }, [
+    'calls, real, main = [0], H.dump, H.main', 'def counted(n):', '    calls[0] += 1', '    return real(n)', 'H.dump = counted',
+    'H.main = lambda req: dict(main(req), dumps=calls[0])'
+  ].join('\n'));
+  assert.strictEqual(r.verdict, 'equivalent', r.reason);
+  assert(r.dumps <= 4, `dump() called ${r.dumps} times`);
+});
+
+// The third side (the current version again) is cut short by the budget.
+const cutThird = (keep) => [
+  'real, seen = H.run_side, [0]',
+  'def cut(*a):',
+  '    seen[0] += 1',
+  '    res = real(*a)',
+  '    if seen[0] == 3:',
+  keep === null
+    ? '        res.update(load=None, runs={}, hits=None, budget=False, killed=True, ended=False)'
+    : `        res.update(runs={k: v for k, v in res['runs'].items() if k[1] < ${keep}}, hits=None, budget=True, ended=False)`,
+  '    return res',
+  'H.run_side = cut'
+].join('\n');
+
+test('a budget cut on the second current run is reported as a budget cut, not as stub differences (AUDIT-14 H2, L1)', () => {
+  const [current, proposed] = INLINE;
+  const r = harness({ current, proposed, modname: 'm' }, cutThird(5));
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /^f: time budget reached after 5 of \d+ runs$/);
+  const unloaded = harness({ current, proposed, modname: 'm' }, cutThird(null));
+  assert.strictEqual(unloaded.verdict, 'inconclusive');
+  assert.match(unloaded.reason, /time budget reached before the second current run loaded the module/);
+  assert.doesNotMatch(unloaded.reason, /not deterministic/);
+});
+
+test('input preparation that overruns the hard kill says so; Python never gets a 1 ms run (AUDIT-14 H1, L1)', () => {
+  const r = run(...INLINE, { hardKillMs: 0.001 });
+  assert.strictEqual(r.verdict, 'inconclusive');
+  assert.match(r.reason, /^hard kill: input preparation did not finish within/);
+});

@@ -215,3 +215,53 @@ test('editMutants: mutants per site (each mutable inserted token), tagged with t
   assert.strictEqual(capped.capped, true, 'more sites in a hunk than EDIT_MAX_SITES: not judged');
   assert.strictEqual(capped.length, 0);
 });
+
+// ---------- SG24: per-site mutants checked on their statement, not the file ----------
+
+// n functions; every other one of the last 2 * hunks gains ` + 0 + 0` (four sites).
+function bigEdit(fn, n, hunks) {
+  let before = '', after = '';
+  for (let i = 0; i < n; i++) {
+    before += fn(i, '');
+    after += fn(i, i >= n - 2 * hunks && i % 2 === 0 ? ' + 0 + 0' : '');
+  }
+  return { before, after };
+}
+
+test('editMutants (JS) parses each mutant on its own statement: no whole-file parse per mutant (AUDIT-14 H3)', (t) => {
+  const checker = require('../src/validation/ast-checker');
+  const orig = checker.parseJs;
+  let chars = 0;
+  checker.parseJs = (src, ...rest) => { chars += src.length; return orig(src, ...rest); };
+  t.after(() => { checker.parseJs = orig; });
+  const { before, after } = bigEdit((i, x) => `function g${i}(a, b) {\n  const t = a * ${i % 9} - b;\n  return t${x};\n}\n`, 1500, 4);
+  const muts = bugInjector.editMutants(after, { file: 'src/m.js', before });
+  assert(muts.length >= 16, `${muts.length} mutants`);
+  assert(chars < 2 * after.length + 20000, `parsed ${chars} chars for a ${after.length}-char file and ${muts.length} mutants`);
+  // Checked in its statement, `return function () {}` without `return` is still no valid mutant.
+  const fnMuts = bugInjector.editMutants('function mk(a) {\n  return function () { return a; };\n}\n', { file: 'src/mk.js', before: 'function mk(a) {\n  a;\n}\n' });
+  assert(fnMuts.some(m => m.src.includes('function () { a; }')), 'the inner return is dropped');
+  assert(!fnMuts.some(m => m.src.includes('\n  function () {')), JSON.stringify(fnMuts.map(m => m.src)));
+});
+
+test('editMutants (Python) checks every candidate in one python3 run that gets the file once (AUDIT-14 H3)', (t) => {
+  const cp = require('child_process');
+  const injPath = require.resolve('../src/rl/bug-injector');
+  const [origSpawn, origMod] = [cp.spawnSync, require.cache[injPath]];
+  const inputs = [];
+  cp.spawnSync = function (cmd, args, o) { inputs.push(String((o && o.input) || '').length); return origSpawn.apply(this, arguments); };
+  t.after(() => { cp.spawnSync = origSpawn; require.cache[injPath] = origMod; });
+  delete require.cache[injPath];
+  const fresh = require('../src/rl/bug-injector');
+  const { before, after } = bigEdit((i, x) => `def g${i}(a, b):\n    t = a * ${i % 9} - b\n    return t${x}\n\n\n`, 1500, 4);
+  const muts = fresh.editMutants(after, { file: 'pkg/m.py', before });
+  assert(muts.length >= 16, `${muts.length} mutants`);
+  assert.strictEqual(inputs.length, 1, 'one python3 run');
+  assert(inputs[0] < 2 * after.length + 20000, `sent ${inputs[0]} chars for a ${after.length}-char file`);
+});
+
+test('editMutants (Python): a parse check that does not finish gives no mutants, marked unchecked (AUDIT-14 H3)', () => {
+  const muts = bugInjector.editMutants('def f(a):\n    return a + 1\n', { file: 'm.py', before: 'def f(a):\n    return a\n', timeoutMs: 1 });
+  assert.strictEqual(muts.length, 0);
+  assert.strictEqual(muts.unchecked, true);
+});

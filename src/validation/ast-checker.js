@@ -33,9 +33,9 @@ function parseOptions(file, snippet) {
 
 // -> { ast, errors: string[] } on success (errors are the recovered ones),
 //    { ast: null, errors: [msg], fatal: true } when the parser gives up.
-function parseJs(src, file = 'x.js', snippet = false) {
+function parseJs(src, file = 'x.js', snippet = false, overrides = null) {
   if (!parser) return { ast: null, errors: ['@babel/parser unavailable'], fatal: true };
-  const opts = parseOptions(file, snippet);
+  const opts = { ...parseOptions(file, snippet), ...overrides };
   try {
     const ast = parser.parse(src, opts);
     return { ast, errors: (ast.errors || []).map(errorKey) };

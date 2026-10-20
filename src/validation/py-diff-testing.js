@@ -19,14 +19,20 @@ const HARD_KILL_MS = 3000;
 const BUDGET_MS = 1500;
 const CALL_TIMEOUT_MS = 250;
 
-// UTF-16 offset -> code point offset (Python string indices).
-function cpOffset(s, i) {
-  let n = 0;
-  for (let k = 0; k < i && k < s.length; k++) {
-    const c = s.charCodeAt(k);
-    if (c < 0xdc00 || c > 0xdfff) n++;
+// UTF-16 offsets -> code point offsets (Python string indices), in one pass
+// over the sorted offsets.
+function cpOffsets(s, offsets) {
+  if (!/[\ud800-\udfff]/.test(s)) return offsets.map(i => Math.min(i, s.length));
+  const out = new Array(offsets.length);
+  let k = 0, n = 0;
+  for (const i of offsets.map((_, j) => j).sort((x, y) => offsets[x] - offsets[y])) {
+    for (const stop = Math.min(offsets[i], s.length); k < stop; k++) {
+      const c = s.charCodeAt(k);
+      if (c < 0xdc00 || c > 0xdfff) n++;
+    }
+    out[i] = n;
   }
-  return n;
+  return out;
 }
 
 function finish(t0, fields) {
@@ -52,9 +58,13 @@ function run(opts) {
   const base = Math.max(at, 0);
   let deleted = [];
   try {
-    deleted = changeHunks(currentSrc, proposedSrc, 'edit.py').flatMap(h => h.deleted)
-      .map(([a, b]) => [cpOffset(current, a + base), cpOffset(current, b + base)]);
+    const flat = changeHunks(currentSrc, proposedSrc, 'edit.py').flatMap(h => h.deleted).flat().map(i => i + base);
+    const cp = cpOffsets(current, flat);
+    for (let i = 0; i < cp.length; i += 2) deleted.push([cp[i], cp[i + 1]]);
   } catch { deleted = []; }
+  if (performance.now() - t0 >= hardKillMs) {
+    return finish(t0, { verdict: 'inconclusive', runs: 0, reason: `hard kill: input preparation did not finish within ${Math.round(hardKillMs)} ms`, mode, lang: 'python' });
+  }
   const rel = typeof file === 'string' ? file.replace(/\\/g, '/') : 'module.py';
   const modname = rel.replace(/\.py$/i, '').split('/').filter(Boolean).join('.').replace(/[^\w.]/g, '_') || '__dt_mod__';
 

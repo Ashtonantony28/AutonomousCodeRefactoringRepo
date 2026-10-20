@@ -377,18 +377,55 @@ const PRELUDE = `(function () {
     }
     return out;
   }
-  // Non-function module-scope bindings present in both versions.
+  // The values of all module bindings in one call (one eval when first
+  // needed, not one per binding per call), keyed by index in a null-prototype
+  // object; an index is missing when its binding could not be read.
+  var reader = null, safeReader = null;
+  function readBinds() {
+    if (!lookup || !bindNames.length) return {};
+    if (!reader) {
+      var all = '', each = '';
+      for (var i = 0; i < bindNames.length; i++) {
+        all += (i ? ', ' : '') + bindNames[i];
+        each += ' try { __dt_o[' + i + '] = ' + bindNames[i] + '; } catch (__dt_e) {}';
+      }
+      try { reader = lookup('(function () { return [' + all + ']; })'); } catch (e) { reader = function () { throw e; }; }
+      try { safeReader = lookup('(function () { var __dt_o = { __proto__: null };' + each + ' return __dt_o; })'); } catch (e) {
+        safeReader = function () {
+          var o = create(null);
+          for (var j = 0; j < bindNames.length; j++) { try { o[j] = lookup(bindNames[j]); } catch (e2) { /* unreadable */ } }
+          return o;
+        };
+      }
+    }
+    // A binding that cannot be read (never initialised) fails the array
+    // reader; then each one is read on its own from now on.
+    try { return reader(); } catch (e) { reader = safeReader; }
+    try { return safeReader(); } catch (e) { return {}; }
+  }
+  // Non-function module-scope bindings present in both versions, as the
+  // changes since this side's previous call (\`d\` set, \`r\` removed; the
+  // host keeps the full map): a binding still holding the primitive it held
+  // then is not serialised again.
+  var bindSent = [], bindVals = [], bindPrim = [];
   function bindState() {
     if (!lookup || !bindNames.length) return undefined;
-    var st = newSt(STATE), out = {};
+    var st = newSt(STATE), out = create(null), gone = [], vals = readBinds();
     st.budget = MAX_BIND_NODES;
     for (var i = 0; i < bindNames.length; i++) {
-      var v;
-      try { v = lookup(bindNames[i]); } catch (e) { continue; }
-      if (typeof v !== 'function') out[bindNames[i]] = ser(v, st, 1);
+      var v = vals[i];
+      if (!(i in vals) || typeof v === 'function') {
+        if (bindSent[i]) { bindSent[i] = false; gone[gone.length] = bindNames[i]; }
+        continue;
+      }
+      if (bindSent[i] && bindPrim[i] && objIs(bindVals[i], v)) continue;
+      var sv = out[bindNames[i]] = ser(v, st, 1);
+      bindSent[i] = true;
+      bindVals[i] = v;
+      bindPrim[i] = (v === null || typeof v !== 'object') && !(sv && sv.t === 'trunc');
     }
     bindUsed = MAX_BIND_NODES - st.budget;
-    return out;
+    return { d: out, r: gone };
   }
 
   // Deferred mode, after every call: each module binding, the owner \`this\`
@@ -396,37 +433,57 @@ const PRELUDE = `(function () {
   // long; larger ones are only marked), until SMALL_TOTAL nodes per call.
   // Cheap, and a mid-run difference in small state shows even when the end
   // state agrees. An object once found too large is not walked again while
-  // its key still holds it.
-  var bigKeys = new MapC();
+  // its key still holds it, and a binding holding the same primitive as at
+  // the previous digest is not looked at again. Sent as the changes since
+  // this side's previous digest (\`d\` set, \`r\` removed); the host keeps the
+  // full map.
+  var bigKeys = new MapC(), lastDigest = new MapC(), lastOther = new MapC(), lastVals = [], lastPrim = [];
   function smallDigest() {
-    var out = {}, used = 0, stubs = false;
-    function add(k, v) {
-      if (typeof v === 'function' || used >= SMALL_TOTAL) return;
-      if (bigKeys.get(k) === v && v !== null && typeof v === 'object') { out[k] = '~'; return; }
+    var delta = create(null), gone = [], used = 0, stubs = false, seen = new SetC(), i, k;
+    function enc(key, v) {
+      if (used >= SMALL_TOTAL) return undefined;
+      if (bigKeys.get(key) === v && v !== null && typeof v === 'object') return '~';
       var st = newSt(STATE);
       st.budget = SMALL_NODES;
       var s = stringify(ser(v, st, 1));
       used += st.trunc ? SMALL_NODES : SMALL_NODES - st.budget;
-      if (st.trunc) { out[k] = '~'; bigKeys.set(k, v); return; }
+      if (st.trunc) { bigKeys.set(key, v); return '~'; }
       if (s.indexOf('{"t":"stub"') >= 0) stubs = true;
-      out[k] = s.length > 64 ? hash(s) + ':' + s.length : s;
+      return s.length > 64 ? hash(s) + ':' + s.length : s;
     }
-    var ex = mod && mod.exports, i, ks;
-    for (i = 0; lookup && i < bindNames.length; i++) {
-      var v;
-      try { v = lookup(bindNames[i]); } catch (e) { continue; }
-      add('b.' + bindNames[i], v);
+    function put(last, key, s) {
+      if (s === undefined) {
+        if (last.has(key)) { last.delete(key); gone[gone.length] = key; }
+      } else if (last.get(key) !== s) { delta[key] = s; last.set(key, s); }
     }
-    if (cur && cur.t.mode === 'owner') add('self', cur.t.self);
+    var vals = readBinds();
+    for (i = 0; i < bindNames.length; i++) {
+      var has = i in vals, v = vals[i], prim = v === null || (typeof v !== 'object' && typeof v !== 'function');
+      if (has && prim && lastPrim[i] && objIs(v, lastVals[i])) continue;
+      k = 'b.' + bindNames[i];
+      var s = has && typeof v !== 'function' ? enc(k, v) : undefined;
+      put(lastDigest, k, s);
+      lastVals[i] = v;
+      lastPrim[i] = has && prim && s !== undefined;
+    }
+    var ex = mod && mod.exports, other = [];
+    if (cur && cur.t.mode === 'owner') other[other.length] = ['self', cur.t.self];
     if (ex !== null && (typeof ex === 'object' || typeof ex === 'function')) {
-      ks = ownNames(ex).sort();
+      var ks = ownNames(ex).sort();
       for (i = 0; i < ks.length; i++) {
         if (typeof ex === 'function' && (ks[i] === 'length' || ks[i] === 'name' || ks[i] === 'prototype')) continue;
         var d = getDesc(ex, ks[i]);
-        if (d && 'value' in d) add('e.' + ks[i], d.value);
+        if (d && 'value' in d) other[other.length] = ['e.' + ks[i], d.value];
       }
     }
-    return { v: out, stub: stubs };
+    for (i = 0; i < other.length; i++) {
+      seen.add(other[i][0]);
+      put(lastOther, other[i][0], typeof other[i][1] === 'function' ? undefined : enc(other[i][0], other[i][1]));
+    }
+    var left = [];
+    lastOther.forEach(function (v, key) { if (!seen.has(key)) left[left.length] = key; });
+    for (i = 0; i < left.length; i++) put(lastOther, left[i], undefined);
+    return { d: delta, r: gone, stub: stubs };
   }
 
   var api = freeze({
@@ -453,6 +510,7 @@ const PRELUDE = `(function () {
     },
     capture: function (fn) { lookup = fn; },
     defer: function () { deferState = true; },
+    resync: function () { lastDigest = new MapC(); lastOther = new MapC(); lastVals = []; lastPrim = []; bindSent = []; bindVals = []; bindPrim = []; },
     // Exports, module bindings and the target's owner, hashed per key, for
     // a deferred (end-of-target) state comparison; MAX_END_NODES in all.
     state: function (ti) {
@@ -468,11 +526,8 @@ const PRELUDE = `(function () {
           if (d && 'value' in d && typeof d.value !== 'function') out.state[ks[i]] = digest(d.value);
         }
       }
-      for (i = 0; lookup && i < bindNames.length; i++) {
-        var v;
-        try { v = lookup(bindNames[i]); } catch (e) { continue; }
-        if (typeof v !== 'function') out.bind[bindNames[i]] = digest(v);
-      }
+      var vals = readBinds();
+      for (i = 0; i < bindNames.length; i++) if (i in vals && typeof vals[i] !== 'function') out.bind[bindNames[i]] = digest(vals[i]);
       if (t.mode === 'owner') out.self = digest(t.self);
       if (st.trunc) out.trunc = true;
       if (stubs) out.stubbed = true;
@@ -597,7 +652,9 @@ function makeSide(label, code, descs, data) {
     const e = hostError(err);
     resolved = descs.map(() => ({ ok: false, error: `${e.name}: ${e.message}` }));
   }
-  return { ok: true, ctx, resolved, load: res.load };
+  const side = { ok: true, ctx, resolved, load: res.load, bmap: new Map() };
+  if (applyBinds(side, side.load.bind)) side.load.bind = Object.fromEntries(side.bmap);
+  return side;
 }
 
 function runIn(side, src, timeoutMs) {
@@ -608,6 +665,68 @@ function runIn(side, src, timeoutMs) {
     const e = hostError(err);
     if (e.name === 'Timeout') return { kind: 'timeout' };
     return { kind: 'throw', async: false, error: e };
+  }
+}
+
+// A side's binding changes applied to its full map -> the names changed
+// (undefined when the record has none).
+function applyBinds(side, delta) {
+  if (!delta) return undefined;
+  const names = Object.keys(delta.d);
+  for (const k of names) side.bmap.set(k, delta.d[k]);
+  for (const k of delta.r) side.bmap.delete(k);
+  return names.concat(delta.r);
+}
+
+// Applies both sides' digest changes for one call to the full maps kept
+// here and tracks the keys where the two sides differ; each record's
+// \`digest.v\` becomes those keys only. A call without a digest (or a side
+// out of step) starts both sides over with full digests.
+function syncDigests(cur, prop, a, b, diff, timeoutMs) {
+  if (!a.digest || !b.digest) {
+    for (const s of [cur, prop]) {
+      s.dmap = new Map();
+      try { vm.runInContext('__dt.resync()', s.ctx, { timeout: timeoutMs }); } catch { /* the run ends inconclusive */ }
+    }
+    diff.clear();
+    return;
+  }
+  const touched = new Set();
+  for (const [s, r] of [[cur, a], [prop, b]]) {
+    s.dmap = s.dmap || new Map();
+    for (const k of Object.keys(r.digest.d)) { s.dmap.set(k, r.digest.d[k]); touched.add(k); }
+    for (const k of r.digest.r) { s.dmap.delete(k); touched.add(k); }
+  }
+  for (const k of touched) {
+    const x = cur.dmap.get(k), y = prop.dmap.get(k);
+    if (x !== undefined && y !== undefined && x !== y) diff.add(k); else diff.delete(k);
+  }
+  a.digest = { v: {}, stub: a.digest.stub };
+  b.digest = { v: {}, stub: b.digest.stub };
+  for (const k of diff) { a.digest.v[k] = cur.dmap.get(k); b.digest.v[k] = prop.dmap.get(k); }
+}
+
+// Applies both sides' binding changes for one call and tracks the names
+// held by one side only or with different values; each record's \`bind\`
+// becomes those names only. A record without bindings (the call or its read
+// failed) leaves its side out of step: that side sends all of them next time.
+function syncBinds(cur, prop, a, b, diff, timeoutMs) {
+  const touched = new Set();
+  for (const [s, r] of [[cur, a], [prop, b]]) {
+    const names = applyBinds(s, r.bind);
+    if (names) { for (const k of names) touched.add(k); continue; }
+    for (const k of s.bmap.keys()) touched.add(k);
+    s.bmap = new Map();
+    try { vm.runInContext('__dt.resync()', s.ctx, { timeout: timeoutMs }); } catch { /* the run ends inconclusive */ }
+  }
+  for (const k of touched) {
+    const x = cur.bmap.has(k), y = prop.bmap.has(k);
+    if (x !== y || (x && !deepEq(cur.bmap.get(k), prop.bmap.get(k)))) diff.add(k); else diff.delete(k);
+  }
+  for (const [s, r] of [[cur, a], [prop, b]]) {
+    if (!r.bind) continue;
+    r.bind = {};
+    for (const k of diff) if (s.bmap.has(k)) r.bind[k] = s.bmap.get(k);
   }
 }
 
@@ -742,7 +861,10 @@ function main(data) {
   if (defer) for (const s of [cur, prop]) vm.runInContext('__dt.defer()', s.ctx, { timeout: loadTimeoutMs });
 
   let runs = 0, tested = 0, inconclusive = false;
-  const notes = [];
+  const notes = [], digestDiff = new Set(), bindDiff = new Set();
+  for (const k of new Set([...cur.bmap.keys(), ...prop.bmap.keys()])) {
+    if (cur.bmap.has(k) !== prop.bmap.has(k) || !deepEq(cur.bmap.get(k), prop.bmap.get(k))) bindDiff.add(k);
+  }
   if (load) { inconclusive = true; notes.push(load.note); }
   for (let ti = 0; ti < targets.length; ti++) {
     const t = targets[ti];
@@ -780,6 +902,8 @@ function main(data) {
         const src = `__dt.call(${ti}, ${calls[at][0]}, ${calls[at][1]}, ${i}, ${t.probes || '[]'})`;
         a = runIn(cur, src, callTimeoutMs);
         b = runIn(prop, src, callTimeoutMs);
+        if (defer) syncDigests(cur, prop, a, b, digestDiff, loadTimeoutMs);
+        else syncBinds(cur, prop, a, b, bindDiff, loadTimeoutMs);
       }
       n++; runs++;
       post({ type: 'compared', runs });

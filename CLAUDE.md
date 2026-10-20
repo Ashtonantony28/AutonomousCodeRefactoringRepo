@@ -76,8 +76,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
   - **Inserted tokens — relevance rule.** A *site* is one inserted/changed
     token a mutation operator applies to (literal, comparison, equality,
     `&&`/`||`, `+`/`-`, boolean, `return`, `if`/`while` condition, empty
-    string; `bug-injector.editMutants`, parse-valid, up to 3 per site). Every
-    site needs its own failing mutant run, and a kill counts only for the
+    string; `bug-injector.editMutants`, parse-valid on the smallest
+    statement around it that parses alone, Python in one `python3` batch,
+    up to 3 per site). Every site needs its own failing mutant run (a
+    confirmed kill, below), and a kill counts only for the
     site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers `0`, never
     `1000`. A hunk with inserted tokens but no site has no evidence; more
     than 12 sites in one hunk is not judged (`mutation_budget`).
@@ -95,14 +97,19 @@ saturation figures are reported on the dashboard as a spend indicator only.
   (the main run's time until a surviving mutant run measures it), none after
   the first starts with less than that time + 0.5 s left. Only a failing run
   kills a mutant; a timed-out run is re-run once and counts only if that run
-  fails. Otherwise `reverted` with reason `edit_not_exercised` /
-  `no_coverage_tool` (no test ran the edit, whether the suite passed or
-  failed), `coverage_timeout` (coverage post-processing overran the test
-  budget), `tests_insensitive` (a site survived, a hunk has no site, or a
-  deleted token is neither observed nor replaced) or `mutation_budget` (the
-  mutant runs did not fit their budget, or the edit is over 16 change hunks /
-  32,000 changed characters). These five reasons are untested outcomes: no
-  sample, calibration point, reward or Reflexion repair.
+  fails. A kill must reproduce: the same mutant fails a second run and the
+  unmutated suite then passes (three runs per kill, all inside the same
+  budget, so suites over about a third of it end `mutation_budget`); a
+  mutant passing its second run is no kill, and an unmutated failure ends
+  the evidence (`tests_insensitive`: a flaky suite). Otherwise `reverted`
+  with reason `edit_not_exercised` / `no_coverage_tool` (no test ran the
+  edit, whether the suite passed or failed), `coverage_timeout` (coverage
+  post-processing overran the test budget), `tests_insensitive` (a site
+  survived, a hunk has no site, or a deleted token is neither observed nor
+  replaced) or `mutation_budget` (the mutant runs did not fit their budget,
+  the edit is over 16 change hunks / 32,000 changed characters, or the
+  mutants' parse check did not finish). These five reasons are untested
+  outcomes: no sample, calibration point, reward or Reflexion repair.
 - If `git worktree add` fails (e.g. a user branch named `refactor` blocks
   the `refactor/` ref namespace), it is retried once on `refactor-run/<run_id>`
   (`refactor-run-<run_id>` when a `refactor-run` branch exists); if that fails
