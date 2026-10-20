@@ -75,26 +75,41 @@ saturation figures are reported on the dashboard as a spend indicator only.
   comments, whitespace and docstrings are no evidence), and the change has
   per-token evidence (`utils/hunks.changeHunks`: line diff, then token diff
   per hunk, comments ignored):
-  - **Inserted tokens — relevance rule.** A *site* is one inserted/changed
-    token a mutation operator applies to (literal, comparison, equality,
-    `&&`/`||`, `+`/`-`, boolean, `return`, `if`/`while` condition, empty
-    string; `bug-injector.editMutants`, parse-valid on the smallest
-    statement around it that parses alone, Python in one `python3` batch,
-    up to 3 per site). Every site needs its own failing mutant run (a
-    confirmed kill, below), and a kill counts only for the
-    site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers `0`, never
-    `1000`. A hunk with inserted tokens but no site has no evidence; more
-    than 12 sites in one hunk is not judged (`mutation_budget`).
+  - **Inserted tokens — relevance rule.** Tokens come from
+    `utils/hunks.lexView`: a template literal or f-string is its text parts
+    and the tokens of its `${}` / `{}` interpolations; a JS regex literal is
+    its body atoms and flags. A *site* is one inserted/changed token a
+    mutation operator applies to (any numeric spelling, decimal/hex/octal/
+    binary/exponent/`_`/BigInt/complex → value + 1; comparison, equality,
+    `&&`/`||`, `+`/`-`, boolean, `return`, `if`/`while` condition; a string,
+    or a template / f-string text part → `x` added; a regex flag dropped, a
+    quantifier bound + 1, any other regex atom dropped; `bug-injector.editMutants`,
+    parse-valid on the smallest statement around it that parses alone,
+    Python in one `python3` batch, up to 3 per site). Every site needs its
+    own failing mutant run (a confirmed kill, below), and a kill counts only
+    for the site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers
+    `0`, never `1000`. **Fail closed per token:** every inserted name
+    (`Infinity`, `undefined`, `NaN`, `arguments` included), number, string,
+    template / f-string part and regex atom or flag must be covered by a
+    mutant of its own site or lie inside the expression a use-site mutant
+    perturbs; a name with no read of its own (a binding, key, keyword
+    argument) by a covered read of the same name. An inserted token nothing
+    covers is no evidence (`tests_insensitive`, `mutation.uncovered_token`),
+    whatever kills its siblings. More than 12 sites in one hunk is not judged
+    (`mutation_budget`).
   - **Use sites.** Every inserted identifier or member the edit reads (not a
     keyword, declaration, parameter, assignment target, key, label, import
     name or type annotation) is a site of the hunk too, whatever binds it
     (local, destructured, tuple, conditional, imported, `this.`/`self.`
     attribute, nested default): one mutant perturbs the value where the
-    edit uses it (the identifier with its member/call chain: number + 1,
+    edit uses it (the identifier with its member chain: number + 1,
     string + `~`, boolean negated, list/dict minus its last entry,
-    null/`None` → 0, function result perturbed; a call is skipped — its
-    receiver, else its first argument, takes its place; a call or read in
-    statement position is dropped). So `slice(0, MAX)` needs a kill of
+    null/`None` → 0, function result perturbed). A called name is that call,
+    and the call is skipped: a value receiver takes its place, else (a plain
+    function, `this`/`self`, a module, imported or capitalised namespace) its
+    first non-literal argument, else the call's value is perturbed; a
+    namespace or callee is never the replacement. A call or read in
+    statement position is dropped. So `slice(0, MAX)` needs a kill of
     `MAX` at this use, and a kill through another consumer of `MAX` never
     stands in. A name that replaced another in its stretch (and is not
     deleted elsewhere in the hunk) also needs a kill of the old name put
@@ -102,6 +117,11 @@ saturation figures are reported on the dashboard as a spend indicator only.
     names; inside changed code (`includes` → `indexOf(x) !== -1`) it is no
     evidence. A read with no parse-valid use-site mutant is no evidence
     (`tests_insensitive`, `mutation.unmutated_ref`).
+  - **Sham control.** For a mutant that adds text, the kill's third run
+    (the control) is its sham: the edit with as many spaces added right
+    after the mutated code (after the literal, for a site inside one). A test
+    that fails on the sham reads the source, not the value, and is no kill
+    for that site (`mutation.sham_failed`); a sham that passes is the control.
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
@@ -124,8 +144,11 @@ saturation figures are reported on the dashboard as a spend indicator only.
   that passed in the unmutated control run fails in both mutant runs, each
   of which ran the same set of tests as the control. A run where a module
   failed to load (a test file process crashed, a failure raised from a
-  module body — `Module._compile` / `in <module>` — or a pytest collection
-  error, whatever the exit code), a run without per-test results (other
+  module body — `Module._compile` / `in <module>`, or logged by the load
+  hooks every run installs: a preloaded `Module._compile` wrapper, a pytest
+  plugin wrapping `__import__` (not `ImportError`); test files and
+  `conftest.py` excluded — or a pytest collection error, whatever the exit
+  code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
   have their own 60 s budget: each gets at most 2× the plain suite time + 1 s

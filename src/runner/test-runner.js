@@ -448,6 +448,36 @@ function junitResults(xml) {
 const reporterConflicts = new Set();
 const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]*--test-reporter|--test-reporter[\s\S]*ERR_INVALID_ARG_VALUE/.test(r.stderr);
 
+// Load hooks: a module body that throws is logged (to REFACTOR_LOAD_LOG),
+// however deep the throw or however the test reports it. JS: a preloaded
+// wrapper of Module._compile; pytest: a plugin wrapping __import__ (an
+// ImportError is a missing optional module, not a load failure).
+const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile;
+M.prototype._compile = function (...a) {
+  try { return c.apply(this, a); } catch (e) { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, this.filename + '\\n'); } catch {} throw e; }
+};
+`;
+const PY_LOAD_HOOK = `import builtins, os
+_imp = builtins.__import__
+def _hook(name, *a, **k):
+    try:
+        return _imp(name, *a, **k)
+    except ImportError:
+        raise
+    except Exception:
+        with open(os.environ['REFACTOR_LOAD_LOG'], 'a') as f:
+            f.write(name.replace('.', '/') + '.py\\n')
+        raise
+builtins.__import__ = _hook
+`;
+// Logged load failures of modules other than tests and conftest.
+function loadFailed(log, repoRoot) {
+  let text;
+  try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
+  const { isTestFile } = require('../utils/file-discovery');
+  return text.split('\n').some(f => f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f));
+}
+
 function ownsReporters(repoRoot, env) {
   if (reporterConflicts.has(repoRoot)) return true;
   if (/--test-reporter/.test(env.NODE_OPTIONS || '')) return true;
@@ -499,13 +529,22 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   const pytest = detected.framework === 'pytest';
   const report = path.join(pycDir, pytest ? 'junit.xml' : 'tests.tap');
   const reportArgs = pytest ? [`--junitxml=${report}`, '--tb=short'] : [];
+  env.REFACTOR_LOAD_LOG = path.join(pycDir, 'load.log');
+  if (pytest) {
+    fs.writeFileSync(path.join(pycDir, 'refactor_load_hook.py'), PY_LOAD_HOOK);
+    env.PYTHONPATH = [env.PYTHONPATH, pycDir].filter(Boolean).join(path.delimiter);
+    reportArgs.push('-p', 'refactor_load_hook');
+  } else {
+    fs.writeFileSync(path.join(pycDir, 'load-hook.js'), JS_LOAD_HOOK);
+    env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} "--require=${path.join(pycDir, 'load-hook.js')}"`.trim();
+  }
   const baseOptions = env.NODE_OPTIONS;
   const reporters = !pytest && !ownsReporters(repoRoot, env);
   if (reporters) {
     env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --test-reporter=tap --test-reporter-destination=stdout --test-reporter=tap "--test-reporter-destination=${report}"`.trim();
   }
 
-  let result, perTest = null, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
+  let result, perTest = null, loaded = true, coverage = edit ? { available: false, reason: 'no_coverage_tool' } : undefined;
   const deadline = Date.now() + timeoutMs;
   let tCov = null;
   try {
@@ -520,6 +559,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
       const text = fs.readFileSync(report, 'utf8');
       perTest = pytest ? junitResults(text) : tapResults(text);
     } catch { /* no per-test report */ }
+    loaded = !loadFailed(env.REFACTOR_LOAD_LOG, repoRoot);
     if (tool && !result.timedOut && !result.spawnError) {
       tCov = Date.now();
       checkDeadline(deadline);
@@ -553,7 +593,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   const counts = parseCounts(result.stdout + '\n' + result.stderr, detected.framework);
   // pytest exits 1 when tests failed; 2-5 when collection or an import broke,
   // it was interrupted, misused, or collected nothing: no test judged the code.
-  const collectionError = status === 'failed' && ((pytest && result.exitCode >= 2 && result.exitCode <= 5) || !!(perTest && perTest.load));
+  const collectionError = status === 'failed' && ((pytest && result.exitCode >= 2 && result.exitCode <= 5) || !!(perTest && perTest.load) || !loaded);
   const out = {
     status,
     framework: detected.framework,

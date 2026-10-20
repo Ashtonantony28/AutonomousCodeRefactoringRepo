@@ -257,9 +257,22 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   without them), get no kill and end `tests_insensitive`.
 - **Use-site perturbations are small value changes.** A read is perturbed
   by number + 1, string + `~`, last list/dict entry dropped, or a skipped
-  call. Values with no such change (class instances, `Map`s, sets) never
-  differ, so an edit that inserts a read of one ends `tests_insensitive`;
-  a perturbation that throws is killed by any test that runs it.
+  call (a namespace call passes its first non-literal argument through).
+  Values with no such change (class instances, `Map`s, sets, `Infinity`)
+  never differ, so an edit that inserts a read of one ends
+  `tests_insensitive`; a perturbation that throws (a skip that leaves the
+  wrong type) is killed by any test that runs it.
+- **Fail closed per token.** Every inserted name, number, string,
+  template / f-string part and regex atom or flag needs a kill that covers
+  it. Shapes with no mutant are rejected, not carried: a renamed or moved
+  object key or keyword argument with no inserted read of the same name, a
+  regex class bracket, names in type annotations. A string, or a template /
+  f-string text part, is one site (`x` added): a change inside it (`r'\t'` →
+  `r'\t+'`) stands on any test that checks the string's output.
+- **Sham control covers size only.** The sham of a mutant that adds text
+  adds as many spaces: it stops tests that read source length or layout.
+  A test that greps the source for a name, or a mutant that removes text,
+  has no sham.
 - **Slow suites.** Every mutant kill takes three suite runs (mutant, mutant
   again, unmutated control) inside one 60 s mutant budget, so suites slower
   than about a third of that budget end `reverted` with `mutation_budget`.

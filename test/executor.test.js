@@ -965,3 +965,38 @@ test('Python: a class attribute read through self. needs its own kill at the use
   assert.strictEqual(res.mutation.surviving_ref, 'self');
   assertReverted(res, repo, 'app/m.py', before, kept);
 });
+
+// ---------- SG30: sham controls, uncovered tokens ----------
+
+const STYLE_TEST = "const fs = require('fs');\nconst path = require('path');\n" +
+  "test('style: no source line over 120 characters', () => { const d = path.join(__dirname, '..', 'src'); " +
+  "for (const f of fs.readdirSync(d)) fs.readFileSync(path.join(d, f), 'utf8').split('\\n').forEach((l) => assert.ok(l.length <= 120, f)); });";
+
+test('a test that fails on the same-size sham reads the source: no kill; a behavioural test still kills (AUDIT-20 H2)', async (t) => {
+  const cur = 'function body(s) {\n  return String(s).slice(SKIP);\n}';
+  const prop = 'function body(s) {\n  return String(s).slice(SKIP, SKIP + MAX_LEN);\n}';
+  const rest = 'const SKIP = 1;\nconst MAX_LEN = 4096;\nmodule.exports = { body };';
+  const head = `const m = require('../src/body');\n${STYLE_TEST}\n`;
+  const weak = await execOn(t, 'src/body.js', cur, prop, rest, `${head}test('body', () => { assert.strictEqual(m.body('xabc'), 'abc'); });`, null);
+  assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
+  assert.strictEqual(weak.res.reason, 'tests_insensitive');
+  assert.strictEqual(weak.res.mutation.surviving_ref, 'SKIP');
+  assert(weak.res.mutation.sham_failed >= 1, JSON.stringify(weak.res.mutation));
+  assert.strictEqual(weak.res.mutation.run, 3, 'the sham is the third run of the kill: no extra run');
+  assertReverted(weak.res, weak.repo, 'src/body.js', weak.before, weak.kept);
+  const strong = await execOn(t, 'src/body.js', cur, prop, rest,
+    `${head}test('body', () => { assert.strictEqual(m.body('xabc'), 'abc'); assert.strictEqual(m.body('x'.repeat(5000)).length, 4096); });`, null);
+  assert.strictEqual(strong.res.status, 'passed', JSON.stringify(strong.res.mutation));
+  assert.strictEqual(strong.res.mutation.killed_test, 'body');
+});
+
+test('an inserted token no mutant covers is no evidence, whatever kills its siblings (SG30)', async (t) => {
+  const { res, repo, before, kept } = await execOn(t, 'src/parts.js', 'function parts(s) {\n  return String(s).split(/,/);\n}',
+    'function parts(s) {\n  return String(s).split(/[,;]/);\n}', 'module.exports = { parts };',
+    "const m = require('../src/parts');\ntest('parts', () => { assert.deepStrictEqual(m.parts('a,b;c'), ['a', 'b', 'c']); });", null);
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.uncovered_token, ']');
+  assert.strictEqual(res.mutation.run, 0);
+  assertReverted(res, repo, 'src/parts.js', before, kept);
+});

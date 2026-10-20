@@ -26,7 +26,7 @@ const polyglot = require('../validation/polyglot-ast');
 const { appendSamples, editId } = require('./collector');
 const { runChecks } = require('../validation/ast-checker');
 const diffTesting = require('../validation/diff-testing');
-const { changeHunks } = require('../utils/hunks');
+const { changeHunks, lexView } = require('../utils/hunks');
 
 const MUTATIONS = [
   {
@@ -159,12 +159,24 @@ function syntheticNegatives(proposal, targetRepo = null, opts = {}) {
 // "killed" by any suite that loads it, which proves nothing.
 
 const swapper = (map) => (m) => map[m];
+// A numeric literal of any spelling plus one (decimal; a Python float stays a float).
+function bump(n, py) {
+  const t = n.replace(/_/g, '');
+  if (/[jJ]$/.test(t)) return `(${n} + 1)`;
+  if (/^0[xob]|^\d+n?$/i.test(t)) {
+    try { return String(BigInt(t.replace(/n$/, '')) + 1n) + (/n$/.test(t) ? 'n' : ''); } catch { return `(${n} + 1)`; }
+  }
+  const v = Number(t);
+  if (!Number.isFinite(v)) return `(${n} + 1)`;
+  const w = v + 1 === v ? v * 2 : v + 1;
+  return String(w) + (py && Number.isInteger(w) && !/e/.test(String(w)) ? '.0' : '');
+}
 const EDIT_OPS = {
   javascript: [
     { name: 'negate_condition', re: /\b(?:if|while)\s*\(/g, wrap: ['!(', ')'] },
     { name: 'negate_equality', re: /===|!==|==|!=/g, to: swapper({ '===': '!==', '!==': '===', '==': '!=', '!=': '==' }) },
     { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
-    { name: 'numeric_off_by_one', re: /(?<![\w.$])\d+(?:\.\d+)?(?![\w.$])/g, to: (n) => String(Number(n) + 1) },
+    { name: 'numeric_off_by_one', re: /(?<![\w.$])(?:0[xXoObB][\da-fA-F_]+n?|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?n?)(?![\w$])/g, to: (n) => bump(n, false) },
     { name: 'swap_logical', re: /&&|\|\|/g, to: swapper({ '&&': '||', '||': '&&' }) },
     { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
     { name: 'flip_boolean', re: /\b(?:true|false)\b/g, to: swapper({ true: 'false', false: 'true' }) },
@@ -175,7 +187,7 @@ const EDIT_OPS = {
     { name: 'negate_condition', re: /^[ \t]*(?:if|elif|while)[ \t]+/gm, pyCond: true },
     { name: 'negate_equality', re: /==|!=/g, to: swapper({ '==': '!=', '!=': '==' }) },
     { name: 'flip_comparison', re: /(?<![<>=!-])(?:<=|>=|<|>)(?![<>=])/g, to: swapper({ '<': '<=', '<=': '<', '>': '>=', '>=': '>' }) },
-    { name: 'numeric_off_by_one', re: /(?<![\w.])\d+(?:\.\d+)?(?![\w.])/g, to: (n) => String(Number(n) + 1) },
+    { name: 'numeric_off_by_one', re: /(?<![\w.])(?:0[xXoObB][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?[jJ]?)(?![\w])/g, to: (n) => bump(n, true) },
     { name: 'swap_logical', re: /\b(?:and|or)\b/g, to: swapper({ and: 'or', or: 'and' }) },
     { name: 'swap_arith', re: /(?<=\s)[+-](?=\s)/g, to: swapper({ '+': '-', '-': '+' }) },
     { name: 'flip_boolean', re: /\b(?:True|False)\b/g, to: swapper({ True: 'False', False: 'True' }) },
@@ -218,7 +230,7 @@ function mutateAt(src, code, op, m, lang) {
     if (IMPORT_BEFORE.test(code.slice(Math.max(0, at - 24), at))) return null;
     const end = at + m[0].length;
     if (lang === 'python' && (code[at - 1] === m[1] || code[end] === m[1])) return null; // triple quote
-    return { edits: [[end - 1, 0, 'x']], lo: end - 1, hi: end - 1 };
+    return { edits: [[end - 1, 0, 'x']], lo: end - 1, hi: end - 1, pad: end };
   }
   return { edits: [[at, m[0].length, op.to(m[0])]], lo: at, hi: at + m[0].length };
 }
@@ -355,8 +367,7 @@ function parsesPython(src, muts, lineOf, starts, timeoutMs = 10_000) {
 
 const KEYWORDS = {
   javascript: new Set(('break case catch class const continue debugger default delete do else export extends finally for function if import in ' +
-    'instanceof let new return super switch this throw try typeof var void while with yield await async of static get set true false null ' +
-    'undefined NaN Infinity arguments').split(' ')),
+    'instanceof let new return super switch this throw try typeof var void while with yield await async of static get set true false null').split(' ')),
   python: new Set(('False None True and as assert async await break class continue def del elif else except finally for from global if ' +
     'import in is lambda nonlocal not or pass raise return try while with yield match case').split(' '))
 };
@@ -391,17 +402,28 @@ const CALL = /^(?:Optional)?CallExpression$|^NewExpression$/;
 
 // JS (babel): `toks` ([s, e) of inserted identifiers) -> Map(s -> { use: [s, e],
 // text }) for those the edit reads, or null when the file does not parse.
+// The value of a read is the identifier with its member chain, up to a call:
+// a called name (`f(x)`, `o.f(x)`, a namespace receiver `util.f(x)`) is
+// that call, which is skipped: a value receiver takes its place, else (a
+// plain function, `this`, a module or capitalised namespace) its first
+// non-literal argument, else the call's value is perturbed. A namespace is
+// never the replacement.
+const LITERAL = /^(?:String|Numeric|Boolean|Null|BigInt|RegExp)Literal$/;
 function jsUses(src, file, toks) {
   const { ast } = require('../validation/ast-checker').parseJs(src, file);
   if (!ast) return null;
   const want = new Map(toks.map(([s, e]) => [s, e]));
   const up = new Map();
   const found = [];
+  const mods = new Set();
+  const required = (x) => !!x && ((CALL.test(x.type) && x.callee.type === 'Identifier' && x.callee.name === 'require') || (MEMBER.test(x.type) && required(x.object)));
   const stack = [[ast.program, null, null, false]];
   while (stack.length) {
     const [n, p, k, bind] = stack.pop();
     up.set(n, [p, k]);
     if (n.type === 'Identifier' && !bind && want.get(n.start) === n.end) found.push(n);
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && required(n.init)) mods.add(n.id.name);
+    if (/^Import(?:Default|Namespace)Specifier$/.test(n.type)) mods.add(n.local.name);
     if (/^(?:Import|Export)\w*Specifier$|^TS|^JSX|TypeAnnotation$/.test(n.type)) continue;
     for (const key of Object.keys(n)) {
       if (AST_SKIP.has(key) || TYPE_KEYS.has(key)) continue;
@@ -411,34 +433,42 @@ function jsUses(src, file, toks) {
       for (const c of [].concat(n[key])) if (c && typeof c.type === 'string') stack.push([c, n, key, b]);
     }
   }
+  const text = (x) => src.slice(x.start, x.end);
+  const callee = (x) => { const [p, k] = up.get(x); return CALL.test(p.type) && k === 'callee'; };
+  const ns = (x) => {
+    while (MEMBER.test(x.type)) x = x.object;
+    return /^(?:ThisExpression|Super)$/.test(x.type) || (x.type === 'Identifier' && (mods.has(x.name) || /^[A-Z]/.test(x.name)));
+  };
   const out = new Map();
   for (const n of found) {
     let u = n;
     let [p, k] = up.get(u);
     if (p.type === 'PrivateName') { u = p; [p, k] = up.get(u); }
     if (MEMBER.test(p.type) && k === 'property' && !p.computed) { u = p; [p, k] = up.get(u); }
-    while (p && ((MEMBER.test(p.type) && k === 'object') || (CALL.test(p.type) && k === 'callee') || (p.type === 'TaggedTemplateExpression' && k === 'tag'))) {
-      u = p;
-      [p, k] = up.get(u);
-    }
-    const text = (x) => src.slice(x.start, x.end);
+    while (MEMBER.test(p.type) && k === 'object' && !callee(p)) { u = p; [p, k] = up.get(u); }
+    let call = null;
+    if (CALL.test(p.type) && k === 'callee') call = p;
+    else if (MEMBER.test(p.type) && k === 'object' && callee(p) && ns(u)) call = up.get(p)[0];
     let rep;
-    if (p.type === 'ObjectProperty' && p.shorthand) rep = `${n.name}: ${JS_PERTURB(n.name)}`;
-    else if (p.type === 'ExpressionStatement') rep = 'void 0';
-    else if (CALL.test(u.type)) {
-      const c = u.callee;
-      const ns = !MEMBER.test(c.type) || /^(?:ThisExpression|Super)$/.test(c.object.type) || (c.object.type === 'Identifier' && /^[A-Z]/.test(c.object.name));
-      const arg = u.arguments[0] && u.arguments[0].type !== 'SpreadElement' ? u.arguments[0] : null;
-      const skip = ns ? arg : c.object;
+    if (call) {
+      u = call;
+      const c = call.callee;
+      const recv = MEMBER.test(c.type) && !ns(c.object) ? c.object : null;
+      const args = [];
+      for (const a of call.arguments) { if (a.type === 'SpreadElement') break; args.push(a); }
+      const skip = recv || args.find(a => !LITERAL.test(a.type) && !(a.type === 'TemplateLiteral' && !a.expressions.length));
       rep = skip ? `(${text(skip)})` : JS_PERTURB(text(u));
-    } else rep = JS_PERTURB(text(u));
+    } else if (p.type === 'ObjectProperty' && p.shorthand) rep = `${n.name}: ${JS_PERTURB(n.name)}`;
+    else if (p.type === 'TaggedTemplateExpression' && k === 'tag') { u = p; rep = JS_PERTURB(text(u)); } else rep = JS_PERTURB(text(u));
+    if (up.get(u)[0].type === 'ExpressionStatement') rep = 'void 0';
     out.set(n.start, { use: [u.start, u.end], text: rep });
   }
   return out;
 }
 
 // Python (ast, one python3 run): as jsUses, with offsets converted from
-// UTF-8 columns. An `await` is part of the use it awaits.
+// UTF-8 columns. An `await` is part of the use it awaits; `self`, `cls`,
+// imported and capitalised names are namespaces.
 const PY_USES = `import ast, json, sys
 req = json.load(sys.stdin)
 src = req['src']
@@ -459,12 +489,23 @@ except Exception:
     sys.exit()
 up = {}
 ann = set()
+mods = set()
 for n in ast.walk(tree):
     for c in ast.iter_child_nodes(n):
         up[c] = n
     for a in (getattr(n, 'annotation', None), getattr(n, 'returns', None)):
         if isinstance(a, ast.expr):
             ann.update(ast.walk(a))
+    if isinstance(n, (ast.Import, ast.ImportFrom)):
+        for a in n.names:
+            mods.add(a.asname or a.name.split('.')[0])
+def callee(e):
+    p = up.get(e)
+    return isinstance(p, ast.Call) and p.func is e
+def ns(e):
+    while isinstance(e, ast.Attribute):
+        e = e.value
+    return isinstance(e, ast.Name) and (e.id in mods or e.id in ('self', 'cls') or e.id[:1].isupper())
 want = {tuple(t) for t in req['toks']}
 out = []
 for n in ast.walk(tree):
@@ -482,17 +523,27 @@ for n in ast.walk(tree):
     u = n
     while True:
         p = up.get(u)
-        if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is u and isinstance(p.ctx, ast.Load) or isinstance(p, ast.Call) and p.func is u or isinstance(p, ast.Await):
+        if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is u and isinstance(p.ctx, ast.Load) and not callee(p):
             u = p
         else:
             break
+    p = up.get(u)
+    call = p if callee(u) else up.get(p) if isinstance(p, ast.Attribute) and p.value is u and callee(p) and ns(u) else None
     skip = None
-    if isinstance(u, ast.Call):
-        f = u.func
-        if isinstance(f, ast.Attribute) and not (isinstance(f.value, ast.Name) and (f.value.id in ('self', 'cls') or f.value.id[:1].isupper())):
+    if call is not None:
+        u = call
+        f = call.func
+        if isinstance(f, ast.Attribute) and not ns(f.value):
             skip = span(f.value)
-        elif u.args and not isinstance(u.args[0], ast.Starred):
-            skip = span(u.args[0])
+        else:
+            for a in call.args:
+                if isinstance(a, ast.Starred):
+                    break
+                if not isinstance(a, ast.Constant):
+                    skip = span(a)
+                    break
+    if isinstance(up.get(u), ast.Await):
+        u = up[u]
     out.append([at[0], span(u), isinstance(up.get(u), ast.Expr), skip])
 print(json.dumps(out))
 `;
@@ -510,23 +561,63 @@ function pyUses(src, toks, timeoutMs = 10_000) {
 // stretch that deleted identifiers): the k-th deleted identifier of the
 // stretch when every stretch of the hunk only swaps names one for one,
 // else '' (a replacement in changed code: nothing reverts it alone).
-function insertedNames(src, before, h, lang) {
+// Tokens inside literals (`lit` / `blit`: starts in src / before) are no names.
+function insertedNames(src, before, h, lang, lit, blit) {
   const isName = (t) => IDENT.test(t) && !KEYWORDS[lang].has(t);
-  const text = (from) => ([s, e]) => from.slice(s, e);
-  const gaps = (h.gaps || []).map(g => ({ ins: g.ins, del: g.del.map(text(before)) }));
+  const text = (from, skip) => ([s, e]) => (skip.has(s) ? '' : from.slice(s, e));
+  const gaps = (h.gaps || []).map(g => ({ ins: g.ins, del: g.del.map(text(before, blit)) }));
   const moved = new Set(gaps.flatMap(g => g.del));
-  const swaps = gaps.every(g => g.ins.length === g.del.length && g.del.every(isName) && g.ins.map(text(src)).every(isName));
+  const swaps = gaps.every(g => g.ins.length === g.del.length && g.del.every(isName) && g.ins.map(text(src, lit)).every(isName));
   const out = [];
   for (const g of gaps) {
     const del = g.del.filter(isName);
     g.ins.forEach(([s, e], k) => {
-      const name = src.slice(s, e);
+      const name = text(src, lit)([s, e]);
       if (!isName(name)) return;
       const was = del.length && !moved.has(name) ? (swaps ? g.del[k] : '') : null;
       out.push({ at: s, end: e, name, was });
     });
   }
   return out;
+}
+
+// Literal sub-tokens of a lexView: Map(start -> { lit, kind: 'part' | 'atom' |
+// 'flag' | 'delim', at: [s, e, textStart, textEnd] }).
+function literalTokens(lits) {
+  const out = new Map();
+  for (const l of lits) {
+    if (l.kind === 'regex') {
+      out.set(l.s, { lit: l, kind: 'delim' });
+      out.set(l.body[1], { lit: l, kind: 'delim' });
+      for (const a of l.atoms) out.set(a[0], { lit: l, kind: 'atom', at: a });
+      for (const a of l.flags) out.set(a[0], { lit: l, kind: 'flag', at: a });
+    } else if (l.parts) for (const a of l.parts) out.set(a[0], { lit: l, kind: 'part', at: a });
+  }
+  return out;
+}
+
+// Mutant of a literal sub-token: 'x' appended to a template / f-string text
+// part; a regex flag dropped, a quantifier's bound plus one, any other atom
+// dropped (replaced by `(?!)` when that leaves no valid regex).
+// -> { edits, lo, hi, pad } or null.
+function literalMutant(src, t) {
+  const [s, e, , te] = t.at;
+  if (t.kind === 'part') return { mutation: 'string_literal', edits: [[te, 0, 'x']], lo: te, hi: te, pad: t.lit.e };
+  const { body, flags } = t.lit;
+  const flagText = src.slice(flags.length ? flags[0][0] : body[1] + 1, t.lit.e);
+  const valid = (b, f) => { if (!b) return false; try { new RegExp(b, f); return true; } catch { return false; } };
+  const rel = (x) => x - body[0];
+  const bodyText = src.slice(body[0], body[1]);
+  if (t.kind === 'flag') {
+    const f = flagText.replace(src[s], '');
+    return valid(bodyText, f) ? { mutation: 'regex_literal', edits: [[s, 1, '']], lo: s, hi: e } : null;
+  }
+  const quant = src.slice(s, e).match(/^\{(\d+)(,?)(\d*)\}(\??)$/);
+  const bumped = quant && (quant[3] ? `{${quant[1]},${Number(quant[3]) + 1}}` : `{${Number(quant[1]) + 1}${quant[2]}}`) + quant[4];
+  for (const ins of bumped ? [bumped] : ['', '(?!)']) {
+    if (valid(bodyText.slice(0, rel(s)) + ins + bodyText.slice(rel(e)), flagText)) return { mutation: 'regex_literal', edits: [[s, e - s, ins]], lo: s, hi: e, pad: t.lit.e };
+  }
+  return null;
 }
 
 const EDIT_MAX_HUNKS = 16;
@@ -542,6 +633,16 @@ const EDIT_MAX_SITES = 12;
 // per site. Every inserted identifier or member the edit reads is a site
 // too (one use-site mutant, `ref`: see jsUses), and one that replaced
 // another identifier in its stretch another (`revert`: the old name back).
+// Template / f-string text parts and regex atoms and flags are sites of
+// their own (literalMutant).
+// Fail closed per token (with `before`): every inserted name, number,
+// string, template / f-string text part and regex atom or flag must be
+// covered: by a mutant of its own site, or inside the expression a use-site
+// mutant perturbs (`cover`); a name with no read of its own (a binding, key
+// or keyword argument) by a covered read of the same name. Since every site
+// needs a kill and every mutant of a site covers the same tokens, a kill of
+// each site covers each token. An inserted token nothing covers gives no
+// mutants, marked `uncovered` ({ text, line, hunk }).
 // An edit over EDIT_MAX_HUNKS hunks, EDIT_MAX_CHARS changed characters or
 // EDIT_MAX_SITES sites in one hunk (or one too large to diff) gets no
 // mutants and the result is marked `capped`; a Python parse or use check
@@ -549,14 +650,21 @@ const EDIT_MAX_SITES = 12;
 // marked `unchecked`. Each mutant is parse-checked on the smallest statement
 // around it (jsParseCheck / parsesPython), not the file. A reference with
 // no parse-valid use-site mutant gives none, marked `unmutated_ref`.
-// -> [{ mutation, src, line, hunk, site, ref?, revert? }] (site: the token's offset in src)
+// A mutant that adds text carries `sham`: src with as many spaces added
+// after the mutated code (after the literal, for one inside a literal), a
+// behaviour-preserving control of the same size change.
+// -> [{ mutation, src, sham?, line, hunk, site, cover?, ref?, revert? }] (site: the token's offset in src)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
-  const hunks = typeof before === 'string' ? changeHunks(before, src, file) : [{ ranges: [[start, end]] }];
+  const diffed = typeof before === 'string';
+  const hunks = diffed ? changeHunks(before, src, file) : [{ ranges: [[start, end]] }];
   const changed = hunks.reduce((n, h) => n + h.ranges.reduce((m, [a, b]) => m + b - a, 0), 0);
   if (hunks.length > EDIT_MAX_HUNKS || changed > EDIT_MAX_CHARS || hunks.some(h => h.capped)) return Object.assign([], { capped: true });
-  const code = polyglot.stripCode(src, lang);
+  const view = lexView(src, lang);
+  const code = view.code;
+  const litToks = literalTokens(view.lits);
+  const fQuotes = new Set(view.lits.filter(l => l.kind === 'fstring').map(l => l.q));
   const starts = [0];
   for (let k = src.indexOf('\n'); k >= 0; k = src.indexOf('\n', k + 1)) starts.push(k + 1);
   const lineOf = (i) => {
@@ -564,7 +672,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= i) lo = mid; else hi = mid - 1; }
     return lo + 1;
   };
-  const names = hunks.map(h => insertedNames(src, before || '', h, lang));
+  const blit = diffed ? new Set(literalTokens(lexView(before, lang).lits).keys()) : new Set();
+  const names = hunks.map(h => insertedNames(src, before || '', h, lang, litToks, blit));
   const toks = names.flat().map(t => [t.at, t.end]);
   const uses = !toks.length ? new Map() : lang === 'python' ? pyUses(src, toks, timeoutMs) : jsUses(src, file, toks);
   if (!uses) return Object.assign([], { unchecked: true });
@@ -590,12 +699,20 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
         if (r >= h.ranges.length) break;
         if (!(a < h.ranges[r][1] && b > h.ranges[r][0])) continue;
         if (op.to && op.to(m[0]) === m[0]) continue;
+        if (op.string && fQuotes.has(a)) continue;
         const site = h.ranges[r][0];
         if (!sites.has(site)) sites.set(site, EDIT_OPS[lang].map(() => []));
         const l = sites.get(site)[oi];
         if (l.length < max) l.push({ op, m, hunk: hi, site });
       }
     });
+    // Literal sub-token sites: one mutant each.
+    const lits = [];
+    for (const [a] of h.ranges) {
+      const t = litToks.get(a);
+      const mut = t && t.kind !== 'delim' && literalMutant(src, t);
+      if (mut) lits.push({ ...mut, hunk: hi, site: a, line: lineOf(a) });
+    }
     // Use sites: one per distinct use, plus one per replaced name.
     const refs = [];
     const seen = new Set();
@@ -606,13 +723,13 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       if (t.was === '') return Object.assign([], { unmutated_ref: { name: t.name, line: base.line, hunk: hi } });
       if (!seen.has(u.use.join(':'))) {
         seen.add(u.use.join(':'));
-        refs.push({ ...base, mutation: 'use_site', edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
+        refs.push({ ...base, mutation: 'use_site', cover: u.use, edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
       }
       if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, edits: [[t.at, t.end - t.at, t.was]], lo: t.at, hi: t.end });
     }
-    if (sites.size + refs.length > EDIT_MAX_SITES) return Object.assign([], { capped: true });
+    if (sites.size + lits.length + refs.length > EDIT_MAX_SITES) return Object.assign([], { capped: true });
     needed.push(...refs);
-    candidates.push(...refs.map(built => ({ built })));
+    candidates.push(...refs.map(built => ({ built })), ...lits.map(built => ({ built })));
     for (const perOp of sites.values()) {
       const order = [];
       for (let i = 0; perOp.some(l => l.length > i); i++) for (const l of perOp) if (l[i]) order.push(l[i]);
@@ -627,7 +744,11 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
   const kept = new Map();
   const out = [];
-  const take = ({ edits, lo, hi, ...c }) => { kept.set(key(c), (kept.get(key(c)) || 0) + 1); out.push({ ...c, src: applyEdits(src, edits) }); };
+  const take = ({ edits, lo, hi, pad = hi, ...c }) => {
+    kept.set(key(c), (kept.get(key(c)) || 0) + 1);
+    const grow = edits.reduce((n, [, del, ins]) => n + ins.length - del, 0);
+    out.push({ ...c, src: applyEdits(src, edits), ...(grow > 0 ? { sham: applyEdits(src, [[pad, 0, ' '.repeat(grow)]]) } : {}) });
+  };
   if (lang === 'python') {
     // One batch: every candidate, the first `max` that parse per site.
     const built = candidates.map(build).filter(Boolean);
@@ -643,7 +764,31 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
+  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, lang);
+  if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
+}
+
+// The first inserted token (name, number, string, literal part, regex atom
+// or flag) no mutant covers -> { text, at, hunk }, or null.
+function uncoveredToken(src, hunks, out, names, litToks, lang) {
+  const nameAt = new Set(names.flat().map(t => t.at));
+  const covers = (a, b) => out.some(m => (m.site === a && !m.ref) || (m.revert && m.site === a) || (m.cover && m.cover[0] <= a && b <= m.cover[1]));
+  const loose = [];
+  const read = new Set();
+  for (let hi = 0; hi < hunks.length; hi++) {
+    for (const [a, b] of hunks[hi].ranges) {
+      const text = src.slice(a, b);
+      const t = litToks.get(a);
+      const name = !t && nameAt.has(a);
+      const must = t ? t.kind !== 'delim' : name || /^(?:\d|\.\d)/.test(text) || /^[rRbBuUfF]{0,2}['"`]/.test(text);
+      if (!must) continue;
+      if (covers(a, b)) { if (name) read.add(text); continue; }
+      if (name) loose.push({ text, at: a, hunk: hi });
+      else return { text, at: a, hunk: hi };
+    }
+  }
+  return loose.find(t => !read.has(t.text)) || null;
 }
 
 module.exports = { injectInto, syntheticNegatives, rescoreMutant, originalFileSrc, editMutants, changeHunks, MUTATIONS, MAX_MUTANTS, EDIT_MAX_HUNKS, EDIT_MAX_CHARS, EDIT_MAX_SITES };

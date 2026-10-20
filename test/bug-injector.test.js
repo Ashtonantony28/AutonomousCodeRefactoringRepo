@@ -122,8 +122,8 @@ test('changeHunks: line hunks with token-level changes; comments ignored; deleti
 test('editMutants with the pre-edit file: only changed tokens are mutated, tagged by hunk (AUDIT-8 C1/C2)', () => {
   const before = "function toRow(u) {\n  const n = 3;\n  return { id: u.id, name: u.name, kind: 'user', n: n };\n}\n";
   const keyOrder = "function toRow(u) {\n  const n = 3;\n  return { name: u.name, id: u.id, kind: 'user', n: n };\n}\n";
-  assert.deepStrictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }).map(m => m.mutation), ['use_site'],
-    "'user' and 3 are unchanged: only the moved read of u.id is mutated");
+  assert.strictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }).uncovered.text, 'name',
+    "'user' and 3 are unchanged; the moved key has no covered read of its name: no evidence (SG30)");
   const twoHunks = "function toRow(u) {\n  const n = 4;\n  return { id: u.id, name: u.name, kind: 'admin', n: n };\n}\n";
   const ms = bugInjector.editMutants(twoHunks, { file: 'r.js', before });
   assert.deepStrictEqual([...new Set(ms.map(m => m.hunk))], [0], 'adjacent changed lines form one hunk');
@@ -265,6 +265,88 @@ test('editMutants (Python): a parse check that does not finish gives no mutants,
   const muts = bugInjector.editMutants('def f(a):\n    return a + 1\n', { file: 'm.py', before: 'def f(a):\n    return a\n', timeoutMs: 1 });
   assert.strictEqual(muts.length, 0);
   assert.strictEqual(muts.unchecked, true);
+});
+
+// ---------- SG30: fail closed per inserted token, sham controls ----------
+
+const sg30 = (lang, b, a) => {
+  const wrap = (body) => (lang === 'js' ? `'use strict';\nfunction f(s, t, n, xs) {\n${body}\n}\n` : `import textwrap, unicodedata\n\n\ndef f(s, t, n, xs):\n${body}\n`);
+  const after = wrap(a);
+  const ms = bugInjector.editMutants(after, { file: lang === 'js' ? 'src/x.js' : 'app/x.py', before: wrap(b) });
+  const at = (m) => after.slice(m.site).match(/^(?:[\w.$]+|\S+)/)[0];
+  return { ms, after, sites: ms.map(m => `${m.mutation}:${m.ref || at(m)}`) };
+};
+
+test('editMutants: reads and literals inside template / f-string interpolations get their own sites (AUDIT-20 C1)', () => {
+  const js = sg30('js', "  return `${t}` + ' (' + n + ')';", '  return `${String(t).slice(0, 4096)}` + " (" + n + ")";');
+  for (const s of ['use_site:String', 'use_site:slice', 'numeric_off_by_one:0', 'numeric_off_by_one:4096']) assert(js.sites.includes(s), js.sites.join(' '));
+  const py = sg30('py', '    return f"{t} ({n})"', '    return f"{str(t)[:4096]} ({n})"');
+  assert.deepStrictEqual(py.sites.sort(), ['numeric_off_by_one:4096', 'use_site:str']);
+  // A changed text part of a template / f-string is a string site: 'x' added to its text.
+  const part = sg30('js', '  return `${t}:`;', '  return `${t};`;').ms;
+  assert.deepStrictEqual(part.map(m => m.mutation), ['string_literal']);
+  assert(part[0].src.includes('`${t};x`'), part[0].src);
+  const fpart = sg30('py', '    return f"{t}:"', '    return f"{t};"').ms;
+  assert(fpart.length === 1 && fpart[0].src.includes('f"{t};x"'), JSON.stringify(fpart));
+});
+
+test('editMutants: Infinity, undefined, NaN and arguments are reads with use sites (AUDIT-20 C2)', () => {
+  for (const name of ['Infinity', 'undefined', 'NaN']) {
+    const { sites } = sg30('js', '  return xs.flat(1);', `  return xs.flat(${name});`);
+    assert.deepStrictEqual(sites, [`use_site:${name}`]);
+  }
+  assert(sg30('js', '  return t;', '  return t + arguments.length;').sites.includes('use_site:arguments'));
+});
+
+test('editMutants: every numeric spelling and regex atoms and flags are sites (AUDIT-20 H1)', () => {
+  for (const [lit, to] of [['0x1000', '4097'], ['4e3', '4001'], ['4_096', '4097'], ['0b11', '4'], ['.5', '1.5'], ['10n', '11n']]) {
+    const { ms } = sg30('js', '  return s.slice(1);', `  return s.slice(1, ${lit});`);
+    assert(ms.length === 1 && ms[0].mutation === 'numeric_off_by_one' && ms[0].src.includes(`slice(1, ${to})`), `${lit}: ${JSON.stringify(ms.map(m => m.src))}`);
+  }
+  for (const [lit, to] of [['0x1000', '4097'], ['4_096', '4097'], ['4e3', '4001.0'], ['2j', '(2j + 1)']]) {
+    const { ms } = sg30('py', '    return s[1:]', `    return s[1:${lit}]`);
+    assert(ms.length === 1 && ms[0].src.includes(`s[1:${to}]`), `${lit}: ${JSON.stringify(ms.map(m => m.src))}`);
+  }
+  const flag = sg30('js', "  return s.replace(/\\t/, ' ');", "  return s.replace(/\\t/g, ' ');").ms;
+  assert(flag.length === 1 && flag[0].mutation === 'regex_literal' && flag[0].src.includes("replace(/\\t/, ' ')"), JSON.stringify(flag));
+  const atom = sg30('js', '  return s.split(/,/);', '  return s.split(/,|;/);').ms;
+  assert.deepStrictEqual(atom.map(m => m.src.match(/split\((.*)\)/)[1]).sort(), ['/,;/', '/,|/']);
+  const quant = sg30('js', '  return /^\\d{1,4}$/.test(s);', '  return /^\\d{1,5}$/.test(s);').ms;
+  assert(quant.length === 1 && quant[0].src.includes('/^\\d{1,6}$/'), 'a quantifier bound is bumped, not dropped');
+});
+
+test('editMutants: an inserted token no mutant covers gives none, marked uncovered (SG30)', () => {
+  // A regex class bracket has no valid mutant; a keyword argument's name, a key
+  // or a binding with no covered read of the same name is no evidence.
+  for (const [lang, b, a, text] of [['js', '  return s.split(/,/);', '  return s.split(/[,;]/);', ']'],
+    ['py', "    return s.split(',')", "    return s.split(',', maxsplit=n)", 'maxsplit'],
+    ['js', '  return { a: t };', '  return { b: t };', 'b']]) {
+    const { ms } = sg30(lang, b, a);
+    assert.strictEqual(ms.length, 0, a);
+    assert.strictEqual(ms.uncovered && ms.uncovered.text, text, a);
+  }
+  // A renamed binding stands on the kill of its covered read.
+  assert(!sg30('js', '  const k = t;\n  return k;', '  const key = t;\n  return key;').ms.uncovered);
+});
+
+test('editMutants: a called name is skipped at its own call; a namespace call passes its first non-literal argument (AUDIT-20 H3)', () => {
+  const uses = (ms) => ms.filter(m => m.mutation === 'use_site').map(m => m.src.split('\n').find(l => /return/.test(l)).trim());
+  assert.deepStrictEqual(uses(sg30('py', '    return str(s).strip()', '    return textwrap.dedent(str(s)).strip()').ms), ['return (str(s)).strip()']);
+  assert.deepStrictEqual(uses(sg30('py', '    return str(s)', "    return unicodedata.normalize('NFKC', str(s))").ms), ['return (str(s))']);
+  const js = (pre, a) => uses(bugInjector.editMutants(`'use strict';\n${pre}\nfunction f(s) {\n${a}\n}\n`, { file: 'f.js', before: `'use strict';\n${pre}\nfunction f(s) {\n  return String(s).trim();\n}\n` }));
+  assert.deepStrictEqual(js("const util = require('util');", '  return util.stripVTControlCharacters(String(s)).trim();'), ['return (String(s)).trim();'], 'the module is never the replacement');
+  assert.deepStrictEqual(js('', "  return String(s).normalize('NFKC').trim();"), ['return (String(s)).trim();'], 'only the call of the inserted name is skipped');
+  assert.match(js('', '  return String(s).trim() + Date.now();')[0], /^return String\(s\)\.trim\(\) \+ \(\(v\) => .*\)\(Date\.now\(\)\);$/, 'no argument: the call value is perturbed');
+});
+
+test('editMutants: a mutant that adds text carries a sham of the same size: spaces after the site (SG30)', () => {
+  const { ms, after } = sg30('js', '  return String(s).slice(1);', '  return String(s).slice(1, n);');
+  const u = ms.find(m => m.ref === 'n');
+  assert.strictEqual(u.sham.length, u.src.length);
+  assert.strictEqual(u.sham, after.replace('slice(1, n)', `slice(1, n${' '.repeat(u.src.length - after.length)})`), 'only spaces, after the site');
+  const str = sg30('js', "  return 'a' + t;", "  return 'b' + t;").ms[0];
+  assert(str.src.includes("'bx' + t") && str.sham.includes("'b'  + t"), 'a string site pads after the literal');
+  assert(!sg30('js', '  return t + 1;', '  return t + 2;').ms[0].sham, 'no sham for a same-size mutant');
 });
 
 // ---------- SG29: use-site shapes (AUDIT-19 H2, M6) ----------

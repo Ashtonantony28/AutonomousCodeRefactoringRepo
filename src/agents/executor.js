@@ -40,7 +40,11 @@ function failedTests(r, control) {
 // without per-test results, or with a test missing, crashed or added is no
 // kill. A failure counts only when it reproduces: the same mutant fails
 // again and the unmutated suite then passes (an unmutated failure means the
-// suite is flaky and nothing counts).
+// suite is flaky and nothing counts). For a mutant that adds text, that
+// third run is its sham (the edit with as many spaces added at the site):
+// a test that fails on the sham reads the source, not the value, and is no
+// kill (`sham_failed` when none is left). An inserted token no mutant covers
+// (`uncovered_token`, editMutants) is no evidence.
 // Deleted tokens (of every hunk) have nothing to mutate: they stand when the
 // diff test is `equivalent` and executed each of them, or, for a stretch
 // that replaces them with at least as many inserted tokens holding a site,
@@ -66,6 +70,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   if (mutants.capped) { out.budget_exhausted = true; out.edit_too_large = true; return done(); }
   if (mutants.unchecked) { out.budget_exhausted = true; out.parse_check_failed = true; return done(); }
   if (mutants.unmutated_ref) { out.unmutated_ref = mutants.unmutated_ref.name; out.unmutated_hunk_line = mutants.unmutated_ref.line; return done(); }
+  if (mutants.uncovered) { out.uncovered_token = mutants.uncovered.text; out.unmutated_hunk_line = mutants.uncovered.line; return done(); }
   const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));
   if (!hunks.length || bare >= 0) {
     if (bare >= 0) out.unmutated_hunk_line = hunks[bare].line;
@@ -112,12 +117,12 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
         const again = await runSuite(m.src);
         if (!again) { out.budget_exhausted = true; return done(); }
         if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }
-        const control = await runSuite(edited);
+        const control = await runSuite(m.sham || edited);
         if (!control) { out.budget_exhausted = true; return done(); }
-        if (control.status !== 'passed') { out.flaky = true; return done(); }
+        if (control.status !== 'passed' && !m.sham) { out.flaky = true; return done(); }
         const a = failedTests(r, control), b = failedTests(again, control);
         const tests = a && b ? a.filter(id => b.includes(id)) : [];
-        if (!tests.length) { count(a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
+        if (!tests.length) { count(control.status !== 'passed' ? 'sham_failed' : a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
         Object.assign(out, { killed: m.mutation, killed_line: m.line, killed_test: tests[0] });
         killed = true;
         break;

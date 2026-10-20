@@ -590,3 +590,46 @@ test('runTests: a delegated script with its own --test-reporter runs green witho
     assert.strictEqual(r.tests, undefined);
   }
 });
+
+// ---------- SG30: load failures however deep or however reported ----------
+
+test('runTests: a module body that throws deep in its stack or under a test that wraps the require is a collection error; a test fixture throwing is not (AUDIT-20 M5)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg30-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test test/a.test.js' } }));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test/fixtures'), { recursive: true });
+  const nodeTest = (body) => `'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n${body}\n`;
+  const deep = "'use strict';\nfunction nest(n, f) { return n ? nest(n - 1, f) : f(); }\nconst CFG = nest(12, () => JSON.parse('{\"max\": 4'));\nmodule.exports = { f: (s) => s.slice(0, CFG.max) };\n";
+  fs.writeFileSync(path.join(dir, 'src/a.js'), deep);
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("test('lazy', () => { assert.strictEqual(require('../src/a').f('abc'), 'abc'); });"));
+  assert.strictEqual((await runTests({ repoRoot: dir })).collection_error, true, '12 calls deep');
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("test('wrapped', () => { let m; try { m = require('../src/a'); } catch (e) { assert.fail(`cannot load: ${e.message}`); } assert.strictEqual(m.f('abc'), 'abc'); });"));
+  assert.strictEqual((await runTests({ repoRoot: dir })).collection_error, true, 'require wrapped by the test');
+  fs.writeFileSync(path.join(dir, 'src/a.js'), "'use strict';\nmodule.exports = { f: (s) => s.slice(1) };\n");
+  fs.writeFileSync(path.join(dir, 'test/fixtures/bad.js'), "throw new Error('bad fixture');\n");
+  fs.writeFileSync(path.join(dir, 'test/a.test.js'), nodeTest("test('fixture', () => assert.throws(() => require('./fixtures/bad')));\ntest('f', () => assert.strictEqual(require('../src/a').f('abc'), 'abc'));"));
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed');
+  assert.strictEqual(red.collection_error, undefined, 'a test fixture that throws is no load failure of the code');
+  assert.deepStrictEqual(red.tests, { fixture: 'pass', f: 'fail' });
+});
+
+test('runTests: pytest: an import inside a test that reports pytest.fail(pytrace=False) is a collection error; a missing optional module is not (AUDIT-20 M5)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg30py-');
+  fs.mkdirSync(path.join(dir, 'app'));
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'import json\nCFG = json.loads(\'{"max": 4\')\n\n\ndef f(s):\n    return s[:CFG["max"]]\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_m.py'), 'import pytest\n\n\ndef test_f():\n    try:\n        import app.m as m\n    except Exception as e:\n        pytest.fail(f"cannot load: {e}", pytrace=False)\n    assert m.f("abc") == "abc"\n');
+  const broken = await runTests({ repoRoot: dir });
+  assert.strictEqual(broken.status, 'failed');
+  assert.strictEqual(broken.collection_error, true, broken.stdout);
+  fs.writeFileSync(path.join(dir, 'app/m.py'), 'try:\n    import no_such_module_sg30\nexcept ImportError:\n    pass\n\n\ndef f(s):\n    return s[1:]\n');
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed');
+  assert.strictEqual(red.collection_error, undefined, red.stdout);
+});
