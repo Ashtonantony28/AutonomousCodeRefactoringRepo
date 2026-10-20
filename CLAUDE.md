@@ -75,27 +75,38 @@ saturation figures are reported on the dashboard as a spend indicator only.
   comments, whitespace and docstrings are no evidence), and the change has
   per-token evidence (`utils/hunks.changeHunks`: line diff, then token diff
   per hunk, comments ignored):
-  - **Inserted tokens — relevance rule.** Tokens come from
-    `utils/hunks.lexView`: a template literal or f-string is its text parts
-    and the tokens of its `${}` / `{}` interpolations; a JS regex literal is
-    its body atoms and flags. A *site* is one inserted/changed token a
-    mutation operator applies to (any numeric spelling, decimal/hex/octal/
-    binary/exponent/`_`/BigInt/complex → value + 1; comparison, equality,
-    `&&`/`||`, `+`/`-`, boolean, `return`, `if`/`while` condition; a string,
-    or a template / f-string text part → `x` added; a regex flag dropped, a
-    quantifier bound + 1, any other regex atom dropped; `bug-injector.editMutants`,
+  - **Inserted tokens — relevance rule.** Tokens come from a whole-file
+    `utils/hunks.lexView` mapped to the changed lines, so a line inside or
+    closing a multi-line template / triple-quoted string gets the literal's
+    tokens: a template literal or f-string is its text parts and the tokens
+    of its `${}` / `{}` interpolations; a JS regex literal is its body atoms
+    and flags. A pure insertion or deletion slides to its leftmost
+    bracket-balanced place (`.f(x)` inserted, not `f(x).`). A *site* is one
+    inserted/changed token a mutation operator applies to (any numeric
+    spelling, decimal/hex/octal/binary/exponent/`_`/BigInt/complex → value
+    + 1; comparison, equality, `&&`/`||`/`??`/`and`/`or` swapped; an
+    arithmetic, bitwise, shift, power or floor-division operator (or its
+    compound assignment, `++`/`--`, unary `-`/`+`) → another of the same
+    arity; `!`/`~`/`not`/`await` dropped; `in`/`instanceof` (JS) and a
+    ternary test negated; `in` ↔ `not in`, `is` ↔ `is not`; `null`/`None` →
+    `0`; boolean, `return`, `if`/`while` condition; a string, or a template /
+    f-string text part → `x` added; a regex flag dropped, a quantifier bound
+    + 1, any other regex atom dropped; `bug-injector.editMutants`,
     parse-valid on the smallest statement around it that parses alone,
     Python in one `python3` batch, up to 3 per site). Every site needs its
     own failing mutant run (a confirmed kill, below), and a kill counts only
     for the site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers
-    `0`, never `1000`. **Fail closed per token:** every inserted name
-    (`Infinity`, `undefined`, `NaN`, `arguments` included), number, string,
-    template / f-string part and regex atom or flag must be covered by a
-    mutant of its own site or lie inside the expression a use-site mutant
-    perturbs; a name with no read of its own (a binding, key, keyword
-    argument) by a covered read of the same name. An inserted token nothing
-    covers is no evidence (`tests_insensitive`, `mutation.uncovered_token`),
-    whatever kills its siblings. More than 12 sites in one hunk is not judged
+    `0`, never `1000`. **Fail closed per token:** every inserted or changed
+    token except brackets, commas, semicolons, colons, regex delimiters and
+    whitespace must lie inside the span every mutant of one site changes
+    (the operator match, the literal token, the expression a use-site
+    mutant perturbs); a name with no read of its own (a binding, key,
+    keyword argument) needs a covered read of the same name, and `=` /
+    `const` / `let` / `var` a covered token right after them. An inserted
+    token nothing covers (an operator or keyword with no mutant: `typeof`,
+    `=>`, `@`, a Python ternary, a new `def`) is no evidence
+    (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
+    siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
   - **Use sites.** Every inserted identifier or member the edit reads (not a
     keyword, declaration, parameter, assignment target, key, label, import
@@ -118,10 +129,15 @@ saturation figures are reported on the dashboard as a spend indicator only.
     evidence. A read with no parse-valid use-site mutant is no evidence
     (`tests_insensitive`, `mutation.unmutated_ref`).
   - **Sham control.** For a mutant that adds text, the kill's third run
-    (the control) is its sham: the edit with as many spaces added right
-    after the mutated code (after the literal, for a site inside one). A test
-    that fails on the sham reads the source, not the value, and is no kill
-    for that site (`mutation.sham_failed`); a sham that passes is the control.
+    (the control) is its sham, both pads in one behaviour-preserving edit:
+    as many spaces right after the mutated code (after the literal, for a
+    site inside one), and the site's expression wrapped in at least as many
+    non-space characters (redundant parentheses; past 16 characters a
+    number in a comma expression, `(10…0,x)` / Python `(10…0,x)[1]`). A
+    mutant whose sham does not parse is not used. A test that fails on the
+    sham reads the source, not the value (a size, minified-size or layout
+    check), and is no kill for that site (`mutation.sham_failed`); a sham
+    that passes is the control.
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
@@ -151,7 +167,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
-  have their own 60 s budget: each gets at most 2× the plain suite time + 1 s
+  have their own 60 s budget, charged with each run's whole wall time
+  (report parsing included): each gets at most 2× the plain suite time + 1 s
   (the main run's time until a surviving mutant run measures it), none after
   the first starts with less than that time + 0.5 s left. Only a failing run
   kills a mutant; a timed-out run is re-run once and counts only if that run
@@ -254,7 +271,11 @@ says `preserves_semantics: true` AND `jury.p_preserves >= 0.5`
 (`MIN_CRITIC_P`), so AST + diff-test terms can never outvote the critic; the
 approval is unanimous; every persona has `p_preserves >= 0.2`
 (`MIN_PERSONA_P`); and no persona lists an `edge_cases` entry (the prompt
-defines them as inputs on which the edit behaves differently). Without an
+defines them as inputs on which the edit behaves differently). The diff
+test always also tries boundary values: integers past 2 ** 30, 2 ** 31,
+2 ** 32 and 2 ** 53, prototype keys (`constructor`, `toString`), a tab, a
+5,000-character string whose head differs from its tail and (Python) a
+150-element list. Without an
 `equivalent` diff test the gate fails closed: an `inconclusive` diff test
 that ran inputs (`runs > 0`) is rejected, so is a JS or Python edit the diff
 test ran no input on (Python runs in an isolated `python3 -I` harness,

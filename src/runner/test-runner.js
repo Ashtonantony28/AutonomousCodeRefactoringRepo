@@ -390,10 +390,19 @@ function pyExercised(jsonPath, repoRoot, absFile, src, span, { noData = false } 
 // crashed, a failure raised from a module body, a pytest collection error).
 // Only 'fail' is an assertion or exception inside a test.
 const LOAD_FRAME = /\bModule\._compile\b|\bModuleJob\.run\b/;
+// tests[id] = state; a repeated id gets the next free `#n` (per-id counter).
+function adder(tests) {
+  const next = new Map();
+  return (id, state) => {
+    let k = id, n = next.get(id) || 2;
+    while (k in tests) k = `${id}#${n++}`;
+    next.set(id, n);
+    tests[k] = state;
+  };
+}
 function tapResults(text) {
-  const tests = {}, names = [];
+  const tests = {}, names = [], add = adder(tests);
   let load = false, cur = null, yaml = null;
-  const add = (id, state) => { let k = id; for (let n = 2; k in tests; n++) k = `${id}#${n}`; tests[k] = state; };
   for (const line of text.split('\n')) {
     const indent = line.length - line.trimStart().length;
     if (yaml !== null) {
@@ -422,7 +431,7 @@ function tapResults(text) {
 const unxml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
   .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&amp;/g, '&');
 function junitResults(xml) {
-  const tests = {};
+  const tests = {}, add = adder(tests);
   let load = false;
   const attr = (a, k) => { const m = a.match(new RegExp(`\\b${k}="([^"]*)"`)); return m ? unxml(m[1]) : ''; };
   for (const m of xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
@@ -432,10 +441,7 @@ function junitResults(xml) {
       state = /<failure\b/.test(body) ? 'fail' : 'error';
       if (/<error\b[^>]*message="collection failure/.test(body) || /:\d+: in <module>$/m.test(unxml(body))) load = true;
     } else if (/<skipped\b/.test(body)) state = 'skip';
-    const id = `${attr(m[1], 'classname')}::${attr(m[1], 'name')}`;
-    let k = id;
-    for (let n = 2; k in tests; n++) k = `${id}#${n}`;
-    tests[k] = state;
+    add(`${attr(m[1], 'classname')}::${attr(m[1], 'name')}`, state);
   }
   return Object.keys(tests).length ? { tests, load } : null;
 }

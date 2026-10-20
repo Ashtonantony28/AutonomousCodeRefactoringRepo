@@ -80,7 +80,9 @@ function lexView(src, lang) {
 
   function jsLex(i, hole) {
     let depth = 0, value = false;
-    while (i < n) {
+    for (let last = -1; i < n;) {
+      if (i <= last) { i = last + 1; continue; }
+      last = i;
       const c = src[i];
       if (c === '/' && src[i + 1] === '/') { i = comment(i, eol(i)); continue; }
       if (c === '/' && src[i + 1] === '*') { const j = src.indexOf('*/', i + 2); i = comment(i, j < 0 ? n : j + 2); continue; }
@@ -149,11 +151,14 @@ function lexView(src, lang) {
 
   function pyLex(i, hole) {
     let depth = 0;
-    while (i < n) {
+    for (let last = -1; i < n;) {
+      if (i <= last) { i = last + 1; continue; }
+      last = i;
       const c = src[i];
       if (c === '#') { i = comment(i, eol(i)); continue; }
       if (isWord(c) || c === '"' || c === "'") {
-        const m = (i === 0 || !isWord(src[i - 1])) && /^([rRbBuUfF]{0,2})('''|"""|'|")/.exec(src.slice(i, i + 5));
+        // A quote right after a word (`return"x"`) opens a string too.
+        const m = (i === 0 || !isWord(src[i - 1]) || !isWord(c)) && /^([rRbBuUfF]{0,2})('''|"""|'|")/.exec(src.slice(i, i + 5));
         if (m) { i = /f/i.test(m[1]) ? fString(i, m[1].length, m[2]) : pyString(i, m[1].length, m[2]); continue; }
         while (i < n && isWord(src[i])) i++;
         continue;
@@ -199,14 +204,20 @@ function linesOf(code, lo, hi, lang) {
 }
 
 // Tokens of v.kept[lo, hi) (v: a lexView with `at`, its template, f-string
-// and regex literals by start); Python lines get a leading indentation token.
-// Regex atoms and flags are marked apart from code tokens of the same text.
+// and regex literals by start); Python lines that start outside a literal
+// get a leading indentation token. Regex atoms and flags are marked apart
+// from code tokens of the same text.
 function tokensOf(v, lo, hi, lang) {
   const code = v.kept;
   const re = new RegExp((lang === 'python' ? PY_TOKEN : JS_TOKEN).source, 'g');
   const out = [];
   if (lang === 'python') {
-    for (const m of code.slice(lo, hi).matchAll(/^([ \t]*)(?=\S)/gm)) out.push({ v: `\u0001${m[1].length}`, s: lo + m.index, e: lo + m.index + m[1].length });
+    let k = 0, reach = 0;
+    for (const m of code.slice(lo, hi).matchAll(/^([ \t]*)(?=\S)/gm)) {
+      const at = lo + m.index;
+      for (; k < v.lits.length && v.lits[k].s < at; k++) reach = Math.max(reach, v.lits[k].e);
+      if (at >= reach) out.push({ v: `\u0001${m[1].length}`, s: at, e: at + m[1].length });
+    }
   }
   const push = (s, e, mark = '') => { if (s >= lo && s < hi) out.push({ v: mark + code.slice(s, Math.min(e, hi)), s, e: Math.min(e, hi) }); };
   re.lastIndex = lo;
@@ -237,25 +248,71 @@ function viewOf(src, lang) {
   return v;
 }
 
+// A run of tokens only one side has (side 1: after, 0: before) between two
+// matched tokens moves to the leftmost equivalent place where it is
+// bracket-balanced (else the rightmost): `.f(x)` inserted, not `f(x).`.
+// pairs: matched index pairs, updated in place.
+function slide(pairs, toks, side) {
+  const balanced = (u, v) => {
+    let d = 0;
+    for (let k = u; k < v; k++) { const c = toks[k].v; d += '([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0; if (d < 0) return false; }
+    return !d;
+  };
+  for (let k = 0; k + 1 < pairs.length; k++) {
+    let u = pairs[k][side] + 1, v = pairs[k + 1][side];
+    if (v <= u || pairs[k + 1][1 - side] !== pairs[k][1 - side] + 1) continue;
+    // Right as far as it goes, then back left.
+    while (k + 2 < pairs.length && toks[u].v === toks[v].v && pairs[k + 2][side] === v + 1 && pairs[k + 2][1 - side] === pairs[k + 1][1 - side] + 1) {
+      pairs[k + 1][side] = u;
+      u++; v++; k++;
+    }
+    let best = 0;
+    for (let d = 1; k - d + 1 >= 0; d++) {
+      const pk = pairs[k - d + 1];
+      if (pk[side] !== u - d || (d > 1 && pairs[k - d + 2][1 - side] !== pk[1 - side] + 1) || toks[u - d].v !== toks[v - d].v) break;
+      if (balanced(u - d, v - d)) best = d;
+    }
+    for (let d = 1; d <= best; d++) pairs[k - d + 1][side] = v - d;
+  }
+}
+
+// Tokens of the whole file (once per view) that overlap the lines: a line
+// inside or closing a literal gets the literal's own tokens.
+function lineTokens(v, lines, lang) {
+  if (!lines.length) return [];
+  const t = v.toks || (v.toks = tokensOf(v, 0, v.kept.length, lang));
+  const lo = lines[0].s, hi = lines[lines.length - 1].e;
+  let a = 0, b = t.length;
+  while (a < b) { const mid = (a + b) >> 1; if (t[mid].e > lo || t[mid].s >= lo) b = mid; else a = mid + 1; }
+  let z = a;
+  while (z < t.length && t[z].s < hi) z++;
+  return t.slice(a, z);
+}
+
 // Common leading/trailing tokens are matched first (they are part of some
 // LCS), so a small change in a long line costs a diff of the change only.
 function tokenHunk(bv, av, b, a, lang) {
-  const bt = b.length ? tokensOf(bv, b[0].s, b[b.length - 1].e, lang) : [];
-  const at = a.length ? tokensOf(av, a[0].s, a[a.length - 1].e, lang) : [];
+  const bt = lineTokens(bv, b, lang);
+  const at = lineTokens(av, a, lang);
   let p = 0, q = 0;
   while (p < bt.length && p < at.length && bt[p].v === at[p].v) p++;
   while (q < bt.length - p && q < at.length - p && bt[bt.length - 1 - q].v === at[at.length - 1 - q].v) q++;
   const bm = bt.slice(p, bt.length - q), am = at.slice(p, at.length - q);
   const mid = lcs(bm.map(t => t.v), am.map(t => t.v));
-  const pairs = mid || [];
+  const pairs = [];
+  for (let k = 0; k < p; k++) pairs.push([k, k]);
+  for (const [x, y] of mid || []) pairs.push([x + p, y + p]);
+  for (let k = q; k > 0; k--) pairs.push([bt.length - k, at.length - k]);
+  slide(pairs, at, 1);
+  slide(pairs, bt, 0);
   const mb = new Set(pairs.map(x => x[0])), ma = new Set(pairs.map(x => x[1]));
-  const ranges = am.filter((t, j) => !ma.has(j)).map(t => [t.s, t.e]);
-  const deleted = bm.filter((t, i) => !mb.has(i)).map(t => [t.s, t.e]);
+  const ranges = at.filter((t, j) => !ma.has(j)).map(t => [t.s, t.e]);
+  const deleted = bt.filter((t, i) => !mb.has(i)).map(t => [t.s, t.e]);
   if (!ranges.length && !deleted.length) return null;
   const gaps = [];
   let i = 0, j = 0;
-  for (const [pi, pj] of [...pairs, [bm.length, am.length]]) {
-    if (pi > i || pj > j) gaps.push({ ins: am.slice(j, pj).map(t => [t.s, t.e]), del: bm.slice(i, pi).map(t => [t.s, t.e]) });
+  for (const [pi, pj] of [...pairs, [bt.length, at.length]]) {
+    if (pi > i || pj > j) gaps.push({ ins: at.slice(j, pj).map(t => [t.s, t.e]), del: bt.slice(i, pi).map(t => [t.s, t.e]) });
     i = pi + 1; j = pj + 1;
   }
   const point = a.length ? a[0].s : null;

@@ -88,8 +88,9 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   const runOnce = async () => {
     const left = budgetMs - spent;
     if (out.run && left < suiteMs + 500) return null;
+    const t = Date.now();
     const r = await runTests({ repoRoot, timeoutMs: Math.min(left, 2 * suiteMs + 1000) });
-    spent += r.execution_time_ms;
+    spent += Math.max(Date.now() - t, r.execution_time_ms);
     out.run++;
     return r;
   };
@@ -121,7 +122,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
         if (!control) { out.budget_exhausted = true; return done(); }
         if (control.status !== 'passed' && !m.sham) { out.flaky = true; return done(); }
         const a = failedTests(r, control), b = failedTests(again, control);
-        const tests = a && b ? a.filter(id => b.includes(id)) : [];
+        const tests = a && b ? a.filter(function (id) { return this.has(id); }, new Set(b)) : [];
         if (!tests.length) { count(control.status !== 'passed' ? 'sham_failed' : a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
         Object.assign(out, { killed: m.mutation, killed_line: m.line, killed_test: tests[0] });
         killed = true;

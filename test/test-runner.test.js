@@ -633,3 +633,19 @@ test('runTests: pytest: an import inside a test that reports pytest.fail(pytrace
   assert.strictEqual(red.status, 'failed');
   assert.strictEqual(red.collection_error, undefined, red.stdout);
 });
+
+test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered #2, #3 … (AUDIT-22 C1)', () => {
+  const { tapResults, junitResults } = require('../src/runner/test-runner');
+  const n = 20_000;
+  let tap = 'TAP version 13\n';
+  for (let i = 1; i <= n; i++) tap += `# Subtest: works\nok ${i} - works\n  ---\n  duration_ms: 1\n  ...\n`;
+  const xml = `<testsuite>${'<testcase classname="t" name="works"/>'.repeat(n)}</testsuite>`;
+  const t0 = Date.now();
+  const a = tapResults(tap), b = junitResults(xml);
+  assert(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
+  assert.strictEqual(Object.keys(a.tests).length, n);
+  assert.strictEqual(a.tests[`works#${n}`], 'pass');
+  assert.strictEqual(b.tests[`t::works#${n}`], 'pass');
+  const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
+  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x#3']);
+});

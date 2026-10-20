@@ -43,6 +43,7 @@ const PH = 'src/validation/py_diff_harness.py';
 const WT = 'src/runner/worktree.js';
 const RV = 'src/runner/reverter.js';
 const BI = 'src/rl/bug-injector.js';
+const HK = 'src/utils/hunks.js';
 
 const SAME_LINE_SB = '    if (value >= need && valued.length >= distinct && !differs && !ood && n >= calls.length) continue;';
 const PY_PASS = '        if value >= MIN_VALUE_RUNS and len(valued) >= need_distinct and not (differs or ood or nondet) and n == len(sched):';
@@ -290,7 +291,7 @@ const MUTANTS = [
   M('BI-bind', 'safety', 'src/rl/bug-injector.js', 'SG26: JS reads through a member (this.MAX, cfg.max, s.slice) are not uses',
     "    if (n.type === 'Identifier' && !bind && want.get(n.start) === n.end) found.push(n);", "    if (n.type === 'Identifier' && !bind && want.get(n.start) === n.end && !/Member/.test(p && p.type)) found.push(n);"),
   M('EX-pertest', 'safety', EX, 'SG26: a failing mutant run kills whichever tests failed (no per-test comparison with the control)',
-    '        const tests = a && b ? a.filter(id => b.includes(id)) : [];', "        const tests = ['run'];"),
+    '        const tests = a && b ? a.filter(function (id) { return this.has(id); }, new Set(b)) : [];', "        const tests = ['run'];"),
   M('EX-testset', 'safety', EX, 'SG26: a mutant run with a test missing, crashed or added is compared as if the set were the same',
     '  if (ids.length !== Object.keys(control.tests).length || ids.some(id => !(id in control.tests))) return null;', ''),
   M('EX-nofail', 'redundant', EX, 'SG26: early skip of a failed mutant run with no failing test removed (backed by the per-test comparison after the control run)',
@@ -318,7 +319,7 @@ const MUTANTS = [
       { file: EX, from: "        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }", to: "        if (again.status !== 'failed') { count('unconfirmed'); continue; }" }
     ] },
   M('EX-repro', 'safety', EX, 'SG24/SG26: a test failing only in the first mutant run counts (no reproduction in the second run)',
-    '        const tests = a && b ? a.filter(id => b.includes(id)) : [];', '        const tests = a && b ? a : [];'),
+    '        const tests = a && b ? a.filter(function (id) { return this.has(id); }, new Set(b)) : [];', '        const tests = a && b ? a : [];'),
   M('EX-again', 'redundant', EX, 'SG24: second mutant run not required to fail (backed by the per-test intersection)',
     "        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }", "        if (again.collection_error) { count('unconfirmed'); continue; }"),
   M('EX-flaky', 'safety', EX, 'SG24: a failing unmutated control run (flaky suite) no longer ends the evidence',
@@ -343,7 +344,7 @@ const MUTANTS = [
   M('TR-pyexit', 'redundant', TR, 'SG25: pytest exit 2-5 (collection/usage error) no longer flagged unless junit has a load marker (backed: such runs have no per-test failure or a changed test set)',
     '(pytest && result.exitCode >= 2 && result.exitCode <= 5) || ', ''),
   M('TR-dup', 'safety', TR, 'SG26: duplicate TAP test names overwrite each other (a failing duplicate can be hidden, a set change unseen)',
-    'const add = (id, state) => { let k = id; for (let n = 2; k in tests; n++) k = `${id}#${n}`; tests[k] = state; };', 'const add = (id, state) => { tests[id] = state; };'),
+    'const tests = {}, names = [], add = adder(tests);', 'const tests = {}, names = [], add = (id, state) => { tests[id] = state; };'),
   M('TR-tapnest', 'safety', TR, 'SG26: TAP subtest ids not prefixed by their parents (same-named subtests in two suites collide)',
     "      cur = { id: [...names, m[2]].join(' > '),", '      cur = { id: m[2],'),
   M('BI-revkey', 'safety', 'src/rl/bug-injector.js', 'SG26: revert_reference and use_site share a key (a lost revert mutant is not reported)',
@@ -369,7 +370,7 @@ const MUTANTS = [
   M('X-shared', 'perf', EX, 'AUDIT-9 C2: mutant runs share the test budget with the main run (a slow suite never gets a confirmed kill)',
     'budgetMs: testTimeoutMs || TIMEOUT_MS, usedMs', 'budgetMs: (testTimeoutMs || TIMEOUT_MS) - testResult.execution_time_ms, usedMs'),
   M('TR-judup', 'safety', TR, 'SG26: duplicate JUnit test ids overwrite each other (a failing duplicate can be hidden, a set change unseen)',
-    '    let k = id;\n    for (let n = 2; k in tests; n++) k = `${id}#${n}`;\n    tests[k] = state;', '    tests[id] = state;'),
+    "    add(`${attr(m[1], 'classname')}::${attr(m[1], 'name')}`, state);", "    tests[`${attr(m[1], 'classname')}::${attr(m[1], 'name')}`] = state;"),
   M('BI-private', 'safety', BI, 'SG26: a #private member read is perturbed as its bare name (no parse-valid use-site mutant)',
     "    if (p.type === 'PrivateName') { u = p; [p, k] = up.get(u); }", '    if (false) { u = p; [p, k] = up.get(u); }'),
   M('BI-shorthand', 'safety', BI, 'SG26: a shorthand property { MAX } is perturbed as a bare value (no parse-valid use-site mutant)',
@@ -386,6 +387,30 @@ const MUTANTS = [
     "text: stmt ? 'None' :", "text: false ? 'None' :"),
   M('BI-pyrecv', 'safety', BI, 'SG26: a Python method call is perturbed in its result instead of skipped to its receiver',
     '            skip = span(f.value)', '            skip = None'),
+  M('HK-litline', 'safety', HK, 'SG31: a hunk is tokenised from its first line, not from the literal holding it (code between quotes becomes one string token)',
+    '  const t = v.toks || (v.toks = tokensOf(v, 0, v.kept.length, lang));', '  const t = tokensOf(v, lines[0].s, lines[lines.length - 1].e, lang);'),
+  M('HK-pyquote', 'safety', HK, 'SG31: a Python quote right after a word (`return"x"`) opens no string (the lexer stalled on it before SG31)',
+    ' || !isWord(src[i - 1]) || !isWord(c)) &&', ' || !isWord(src[i - 1])) &&'),
+  M('HK-slide', 'safety', HK, 'SG31: an inserted run is not slid to its balanced place (`f(x).` instead of `.f(x)`: the dot falls outside the use)',
+    '  slide(pairs, at, 1);', ''),
+  M('BI-unary', 'safety', BI, 'SG31: an inserted `!` / `~` has no site (it stands on a sibling\'s kill)',
+    "    { name: 'drop_unary', re: /!(?!=)|~/g, to: () => '' },", ''),
+  M('BI-pyin', 'safety', BI, 'SG31: an inserted Python `in` / `not` / `is` has no site',
+    "    { name: 'negate_in', re: /\\bnot\\s+in\\b|", "    { name: 'negate_in', re: /\\bnever\\s+in\\b|"),
+  M('BI-punct', 'safety', BI, 'SG31: every operator token is exempt from the fail-closed rule like punctuation',
+    'const PUNCT = /^[()[\\]{},;:]$/;', 'const PUNCT = /^[^\\w\'"`]+$/;'),
+  M('BI-bound', 'safety', BI, 'SG31: an inserted `=` stands on any later covered token, not the one right after it',
+    '!src.slice(t.end, nx.at).trim()) t.ok = nx.ok;', 'true) t.ok = nx.ok;'),
+  M('BI-sham2', 'safety', BI, 'SG31: the sham pads with spaces only (a size test that ignores whitespace kills)',
+    "    return [...parens, [pad, 0, ' '.repeat(grow)]].sort((x, y) => x[0] - y[0]);", "    return [[pad, 0, ' '.repeat(grow)]];"),
+  M('DT-bound', 'safety', DT, 'SG31: integer-width boundaries are not always tried in the JS diff test (x | 0 for Math.trunc is equivalent)',
+    "    for (const n of BOUNDARY_NUMS) forces.push({ n, as: 'num' });", ''),
+  M('PH-bound', 'safety', PH, 'SG31: boundary values are not always tried in the Python diff test (a // 2 for int(a / 2) is equivalent)',
+    '                    add({**others, n: v}, cap)', '                    pass'),
+  M('EX-wall', 'perf', EX, 'SG32: only the test process time is charged to the mutant budget, not report parsing',
+    '    spent += Math.max(Date.now() - t, r.execution_time_ms);', '    spent += r.execution_time_ms;'),
+  M('TR-dupnext', 'perf', TR, 'SG32: duplicate test ids are numbered by probing from #2 each time (quadratic in repeats)',
+    '    let k = id, n = next.get(id) || 2;', '    let k = id, n = 2;'),
   { id: 'BI-pyuses', kind: 'safety', why: 'SG26: a Python use check that did not finish leaves the references unmutated instead of unchecked (another site\'s kill stands in)',
     edits: [
       { file: BI, from: '  const uses = !toks.length ?', to: '  const uses = (!toks.length ?' },
