@@ -59,4 +59,37 @@ function fakeProposals(n = 25) {
   return out;
 }
 
-module.exports = { makeTempRepo, makeProposal, fakeProposals };
+// An editMutants mutant as plain text: its switch replaced by the mutated
+// branch (a Python `return` switch: single-line branches only).
+function plainMutant(m) {
+  const { lexView } = require('../../src/utils/hunks');
+  const name = Object.keys(m.env)[0];
+  const js = `globalThis.process.env.${name} === '1'`, py = `__import__('os').environ.get('${name}') == '1'`;
+  const s = m.src, isPy = s.includes(py), on = isPy ? py : js, c = s.indexOf(on);
+  const code = lexView(s, isPy ? 'python' : 'javascript').code;
+  const close = (i) => { for (let d = 0; ; i++) { if ('([{'.includes(code[i])) d++; else if (')]}'.includes(code[i]) && !--d) return i; } };
+  const after = c + on.length;
+  if (isPy && s.startsWith(':\n', after)) {
+    const [, ind, mut] = /^:\n([ \t]*) {4}(.*)\n/.exec(s.slice(after));
+    const o = s.indexOf(`\n${ind}else:\n`, after) + ind.length + 8;
+    return s.slice(0, c - 3) + mut + s.slice(s.indexOf('\n', o + ind.length + 4));
+  }
+  if (isPy) {
+    const me = c - 5;
+    let mo = me - 1;
+    while (code[mo] !== '(' || close(mo) !== me) mo--;
+    return s.slice(0, mo - 1) + s.slice(mo + 1, me) + s.slice(close(after + 6) + 2);
+  }
+  if (s.slice(c - 4, c) !== 'if (') {
+    const me = close(after + 3);
+    return s.slice(0, c - 1) + s.slice(after + 4, me) + s.slice(close(me + 4) + 2);
+  }
+  if (s[after + 2] === '{') {
+    const me = close(after + 2);
+    return s.slice(0, c - 4) + s.slice(after + 4, me - 1) + s.slice(close(me + 7) + 1);
+  }
+  const me = close(after + 2);
+  return s.slice(0, c - 4) + s.slice(after + 3, me) + s.slice(close(me + 8) + 1);
+}
+
+module.exports = { makeTempRepo, makeProposal, fakeProposals, plainMutant };
