@@ -454,13 +454,13 @@ test('editMutants: a mutant is a switch: the same text runs the original unless 
     assert.strictEqual(runJs(m, "f('abcdef', 0, 2)", false), 'bc', `switch off: the edit (${m.mutation})`);
     assert.notStrictEqual(runJs(m, "f('abcdef', 0, 2)", true), 'bc', `switch on: the mutant (${m.mutation})`);
   }
-  assert(ms.every(m => m.src.includes('slice(1, (globalThis.process.env.') || m.src.includes('slice(1, n + (globalThis')), 'the smallest expression holding the change');
+  assert(ms.every(m => m.src.includes('slice(1, (_refactor_mutant ? ') || m.src.includes('slice(1, n + (_refactor_mutant ? ')), 'the smallest expression holding the change');
   // A dropped return switches its statement; a call in statement position its expression statement.
   const ret = sg30('js', '  return t;', '  if (n) return s;\n  return t;').ms.find(m => m.mutation === 'drop_return');
   assert.strictEqual(runJs(ret, 'f(1, 2, 3)', false), 1);
   assert.strictEqual(runJs(ret, 'f(1, 2, 3)', true), 2);
   const stmt = sg30('js', '  return xs;', '  xs.push(n);\n  return xs;').ms.find(m => m.ref === 'push');
-  assert.match(stmt.src, /\n {2}if \(globalThis\.process\.env\.\w+ === '1'\) \(void 0\); else \(xs\.push\(n\)\);\n/, 'no line can start with the switch');
+  assert.match(stmt.src, /\n {2}if \(_refactor_mutant\) \(void 0\); else \(xs\.push\(n\)\);\n/, 'no line can start with the switch');
   assert.deepStrictEqual(runJs(stmt, 'f(0, 0, 5, [])', false), [5]);
   assert.deepStrictEqual(runJs(stmt, 'f(0, 0, 5, [])', true), []);
   // A member callee keeps its receiver: the call is switched, not `s.trim`.
@@ -468,7 +468,67 @@ test('editMutants: a mutant is a switch: the same text runs the original unless 
   assert(call.src.includes(': (s.trim()))'), call.src);
   // Python: the same switch through os.environ.
   const py = sg30('py', '    return str(s)[1:]', '    return str(s)[1:n]').ms.find(m => m.ref === 'n');
-  assert.match(py.src, /\[1:\(\(.*\) if __import__\('os'\)\.environ\.get\('REFACTOR_MUTANT'\) == '1' else \(n\)\)\]/);
+  assert.match(py.src, /\[1:\(\(.*\) if _refactor_mutant else \(n\)\)\]/);
+});
+
+// ---------- SG35: switch read once per module, bounded JS parse check ----------
+
+test('editMutants: the switch variable is read once per module load, into a binding after any prologue (AUDIT-25 H1)', () => {
+  const b = "#!/usr/bin/env node\n'use strict';\nfunction f(x) {\n  return x + 1;\n}\nmodule.exports = { f };\n";
+  const a = b.replace('x + 1', 'x + 2 - 1');
+  const ms = bugInjector.editMutants(a, { file: 'src/m.js', before: b });
+  assert(ms.length >= 2);
+  for (const m of ms) {
+    const [name] = Object.keys(m.env);
+    assert.strictEqual(m.src.split(name).length, 2, 'one read of the variable');
+    assert(m.src.startsWith(`#!/usr/bin/env node\n'use strict';\nvar _refactor_mutant = globalThis.process.env.${name} === '1'; function f(x) {\n`), m.src);
+    assert.strictEqual(m.src.split('\n').length, a.split('\n').length, 'no line added');
+    const load = () => { const mod = { exports: {} }; new Function('module', m.src.replace(/^#!.*/, ''))(mod); return mod.exports.f; };
+    process.env[name] = '1';
+    let f;
+    try { f = load(); } finally { delete process.env[name]; }
+    assert.notStrictEqual(f(1), 2, `${m.mutation}: switched on at load stays on`);
+    assert.strictEqual(load()(1), 2, 'switched off at load: the edit');
+  }
+  // A binding name the source already uses is never reused.
+  const taken = 'const _refactor_mutant = 1;\nfunction f(x) {\n  return x + _refactor_mutant;\n}\n';
+  const t = bugInjector.editMutants(taken.replace('x + _', 'x - _'), { file: 'm.js', before: taken });
+  assert(t.length && t.every(m => Object.keys(m.env)[0] === 'REFACTOR_MUTANT_1' && m.src.startsWith('var _refactor_mutant_1 = ')), t.map(m => m.src).join('\n'));
+});
+
+test('editMutants (Python): the switch binding goes after the docstring and __future__ imports, read once (AUDIT-25 H1)', () => {
+  const { spawnSync } = require('child_process');
+  const read = "_refactor_mutant = __import__('os').environ.get('REFACTOR_MUTANT') == '1'";
+  const cases = [
+    ['"""Doc."""\nfrom __future__ import annotations  # c\nimport os\n\n\ndef f(x):\n    return x + 1\n', `annotations; ${read}  # c\n`],
+    ['import os\n\n\ndef f(x):\n    return x + 1\n', `${read}; import os\n`],
+    ['@staticmethod\ndef f(x):\n    return x + 1\n', `${read}\n@staticmethod\n`]
+  ];
+  const code = "import os, sys\nns = {}\nexec(compile(sys.stdin.read(), 'm.py', 'exec'), ns)\nos.environ.pop('REFACTOR_MUTANT', None)\n" +
+    "f = ns['f'].__func__ if isinstance(ns['f'], staticmethod) else ns['f']\nprint(f(1), ns.get('__doc__'))";
+  for (const [b, head] of cases) {
+    const ms = bugInjector.editMutants(b.replace('x + 1', 'x + 2'), { file: 'app/m.py', before: b });
+    assert(ms.length, b);
+    const doc = b.startsWith('"""') ? 'Doc.' : 'None';
+    for (const m of ms) {
+      assert(m.src.includes(head), m.src);
+      assert.strictEqual(m.src.split('REFACTOR_MUTANT').length, 2, 'one read of the variable');
+      const run = (env) => spawnSync('python3', ['-I', '-c', code], { input: m.src, encoding: 'utf8', env: { ...process.env, ...env } }).stdout.trim();
+      assert.strictEqual(run({}), `3 ${doc}`, 'switched off at load: the edit');
+      const on = run({ REFACTOR_MUTANT: '1' });
+      assert(on !== `3 ${doc}` && on.endsWith(` ${doc}`), `${m.mutation}: switched on at load stays on; the docstring stays (${on})`);
+    }
+  }
+});
+
+test('editMutants: a JS parse check that does not finish within timeoutMs gives no mutants, marked unchecked (AUDIT-25 M1)', () => {
+  const rows = Array.from({ length: 4000 }, (_, i) => `  [${i}, 'k${i}', ${i * 3}],`).join('\n');
+  const b = `const T = [\n${rows}\n  [1, 'a', 2],\n];\nmodule.exports = T;\n`;
+  const a = b.replace("[1, 'a', 2]", "[2, 'b' + 'c', 3 * 4 - 1]");
+  assert(bugInjector.editMutants(a, { file: 'm.js', before: b }).length, 'mutants within the default limit');
+  const ms = bugInjector.editMutants(a, { file: 'm.js', before: b, timeoutMs: 1 });
+  assert.strictEqual(ms.length, 0);
+  assert.strictEqual(ms.unchecked, true);
 });
 
 test('editMutants: a change with no switch target has no mutant (AUDIT-23 H2)', () => {

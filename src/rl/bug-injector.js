@@ -519,7 +519,9 @@ function jsNodes(src, file, code) {
 // with a value ([s, e, 'block']). No target: binding positions, plain keys and
 // member names, a member callee or tag (its `this`), a link of an optional
 // chain, a `typeof` / `delete` operand, a shorthand value, a template's quasi
-// and import sources. nodes: [s, e] of every node.
+// and import sources. nodes: [s, e] of every node. hoist: where the
+// switch's module-level binding goes ([offset, form]: 'stmt' before the
+// first statement after any directive prologue / shebang), or null.
 const SWITCH_EXPR = /Expression$|(?<!Directive)Literal$|^Identifier$/;
 const fixed = (n, p, k) => /^(?:JSX|TS)/.test(n.type) || (k === 'key' && !p.computed) || (k === 'property' && MEMBER.test(p.type) && !p.computed) ||
   (MEMBER.test(n.type) && (k === 'callee' || k === 'tag')) || k === 'quasi' || (/^Optional/.test(p.type) && (k === 'object' || k === 'callee')) ||
@@ -543,7 +545,8 @@ function jsShape(src, file, regions) {
       for (const c of [].concat(n[key])) if (c && typeof c.type === 'string') stack.push([c, n, key, b, stmt]);
     }
   }
-  return { targets, nodes };
+  const first = ast.program.body[0];
+  return { targets, nodes, hoist: first ? [first.start, 'stmt'] : null };
 }
 
 // Python (ast, one python3 run): as jsUses, with offsets converted from
@@ -648,11 +651,21 @@ for n in ast.walk(tree):
         tail = lines[n.end_lineno - 1].encode('utf-8', 'surrogatepass')[n.end_col_offset:].decode('utf-8', 'replace').strip()
         if not head.strip() and tail[:1] in ('', '#'):
             targets.append(s + ['block', head])
-print(json.dumps({'uses': out, 'targets': targets, 'nodes': nodes}))
+body = tree.body
+i = 1 if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str) else 0
+while i < len(body) and isinstance(body[i], ast.ImportFrom) and body[i].module == '__future__':
+    i += 1
+if i:
+    hoist = [off(body[i - 1].end_lineno, body[i - 1].end_col_offset), 'after']
+elif body:
+    hoist = [starts[min([body[0].lineno] + [d.lineno for d in getattr(body[0], 'decorator_list', [])]) - 1], 'line' if hasattr(body[0], 'body') else 'stmt']
+else:
+    hoist = None
+print(json.dumps({'uses': out, 'targets': targets, 'nodes': nodes, 'hoist': hoist}))
 `;
 // -> { uses: Map (as jsUses), targets, nodes (as jsShape; a target is an
 // expression outside an f-string or match pattern, or a `return` alone on
-// its line: [s, e, 'block', indentation]) } or null when the check did not
+// its line: [s, e, 'block', indentation]), hoist (as jsShape) } or null when the check did not
 // complete or the file does not parse.
 function pyShape(src, toks, regions, timeoutMs = 10_000) {
   const r = spawnSync('python3', ['-I', '-c', PY_USES], { input: JSON.stringify({ src, toks, regions }), encoding: 'utf8', timeout: Math.max(1, timeoutMs), maxBuffer: 64 * 1024 * 1024 });
@@ -661,7 +674,7 @@ function pyShape(src, toks, regions, timeoutMs = 10_000) {
   if (!res || !Array.isArray(res.uses)) return null;
   const text = ([s, e]) => src.slice(s, e);
   const uses = new Map(res.uses.map(([at, use, stmt, skip]) => [at, { use, text: stmt ? 'None' : skip ? `(${text(skip)})` : PY_PERTURB(text(use)) }]));
-  return { uses, targets: res.targets, nodes: res.nodes };
+  return { uses, targets: res.targets, nodes: res.nodes, hoist: res.hoist };
 }
 
 // Inserted identifier tokens of a hunk the edit may read: [{ at, end, name, was }].
@@ -748,13 +761,15 @@ const EDIT_MAX_SITES = 12;
 // An edit over EDIT_MAX_HUNKS hunks, EDIT_MAX_CHARS changed characters or
 // EDIT_MAX_SITES sites in one hunk (or one too large to diff) gets no
 // mutants and the result is marked `capped`; a Python parse or use check
-// that did not finish within `timeoutMs` (default 10 s) gives none either,
-// marked `unchecked`, and so does a JS file that does not parse.
+// or the JS parse checks that did not finish within `timeoutMs` (default
+// 10 s) give none either, marked `unchecked`, and so does a JS file that
+// does not parse.
 // Each mutant is a switch: the smallest expression holding its change (for
 // a dropped `return`, the statement; jsShape / pyShape) becomes
-// `(<env> ? mutated : original)`, so `src` runs the mutant only while `env`
-// (one variable, named after nothing in src, set to '1') is set, and the
-// same text with it unset is the mutant's control. A change with no switch
+// `(<on> ? mutated : original)`, where `<on>` is a module-level binding
+// that reads `env` (one variable, named after nothing in src, set to '1')
+// once per module load, so `src` runs the mutant only while `env` is set,
+// and the same text with it unset is the mutant's control. A change with no switch
 // target has no mutant. Each switch is parse-checked on the smallest
 // statement around it (jsParseCheck / parsesPython), not the file. A
 // reference with no parse-valid use-site mutant gives none, marked
@@ -858,16 +873,21 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
     return { edits: mut.edits, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
-  let name = 'REFACTOR_MUTANT';
-  for (let k = 1; src.includes(name); k++) name = `REFACTOR_MUTANT_${k}`;
-  const on = lang === 'python' ? `__import__('os').environ.get('${name}') == '1'` : `globalThis.process.env.${name} === '1'`;
+  let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
+  for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
+  // The variable is read once per module load, into a module-level binding
+  // the switches test (before any statement but a docstring, `__future__`
+  // import or directive; no target before it).
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '1'` : `var ${on} = globalThis.process.env.${name} === '1';`;
+  const [at, form] = shape.hoist || [src.length, 'stmt'];
+  const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
   // A mutant's edits as a switch on the smallest target holding them ->
   // { edits, lo, hi } or null.
   const switchOf = ({ edits }) => {
     const lo = edits[0][0], hi = Math.max(...edits.map(([at, del]) => at + del));
     let t = null;
     for (const x of shape.targets) if (x[0] <= lo && hi <= x[1] && (lo < hi || (x[0] < lo && lo < x[1])) && (!t || x[1] - x[0] < t[1] - t[0])) t = x;
-    if (!t) return null;
+    if (!t || t[0] < at) return null;
     const [s, e, form, ind] = t, o = src.slice(s, e), m = applyEdits(o, edits, s);
     const text = lang === 'python' ? (form === 'block' ? `if ${on}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${on} else (${o}))`)
       : form === 'block' ? `if (${on}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${on}) (${m}); else (${o})` : `(${on} ? (${m}) : (${o}))`;
@@ -878,7 +898,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   const out = [];
   const take = ({ edits, lo, hi, ...c }, sw) => {
     kept.set(key(c), (kept.get(key(c)) || 0) + 1);
-    out.push({ ...c, src: applyEdits(src, sw.edits), env: { [name]: '1' } });
+    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: '1' } });
   };
   if (lang === 'python') {
     // One batch: every candidate's switch, the first `max` per site that parse.
@@ -887,8 +907,10 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     if (!ok) return Object.assign([], { unchecked: true });
     built.forEach(([b, sw], i) => { if (ok[i] && (kept.get(key(b)) || 0) < max) take(b, sw); });
   } else {
+    const until = performance.now() + (timeoutMs ?? 10_000);
     const parses = jsParseCheck(src, file);
     for (const c of candidates) {
+      if (performance.now() > until) return Object.assign([], { unchecked: true });
       const b = build(c);
       const sw = b && (kept.get(key(b)) || 0) < max && switchOf(b);
       if (sw && parses(sw)) take(b, sw);
