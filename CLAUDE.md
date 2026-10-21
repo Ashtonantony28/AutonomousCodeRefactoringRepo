@@ -142,10 +142,14 @@ saturation figures are reported on the dashboard as a spend indicator only.
   - **Same-text switch.** Each mutant is written into the file as a
     runtime switch on an environment variable around the smallest
     expression (or a `return` statement) holding the site:
-    `(globalThis.process.env.K === '1' ? (mutant) : (original))`, Python
-    `((mutant) if __import__('os').environ.get('K') == '1' else
-    (original))`; a site with no such place (a key, a pattern, a
-    class-member name) has no mutant. Mutant runs set `K=1`; the kill's
+    `(_k ? (mutant) : (original))`, Python `((mutant) if _k else
+    (original))`, where `_k` (a name the file does not use) is bound once
+    per module load: JS `var _k = globalThis.process.env.K === '1';` before
+    the first statement (after a shebang / directive prologue, no line
+    added), Python `_k = __import__('os').environ.get('K') == '1'` after
+    the docstring and `__future__` imports; a site with no such place (a
+    key, a pattern, a class-member name, code before the binding) has no
+    mutant. Mutant runs set `K=1`; the kill's
     third run (the control) is the same text with `K` unset, so a test that
     reads the source (size, word count, layout, a grep) fails or passes
     alike in both and is no kill (`mutation.control_failed` when no test is
@@ -199,7 +203,7 @@ saturation figures are reported on the dashboard as a spend indicator only.
   mutant covers, `uncovered_token`; a read with no use-site mutant,
   `unmutated_ref`; or a deleted token is neither observed nor replaced) or `mutation_budget` (the mutant runs did not fit their budget,
   the edit is over 16 change hunks / 32,000 changed characters, or the
-  mutants' parse check did not finish). These five reasons are untested
+  mutants' parse check did not finish in 10 s, JS or Python). These five reasons are untested
   outcomes: no sample, calibration point, reward or Reflexion repair.
 - If `git worktree add` fails (e.g. a user branch named `refactor` blocks
   the `refactor/` ref namespace), it is retried once on `refactor-run/<run_id>`

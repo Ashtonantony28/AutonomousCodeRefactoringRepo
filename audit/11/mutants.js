@@ -433,6 +433,10 @@ const MUTANTS = [
     '    spent += Math.max(Date.now() - t, r.execution_time_ms);', '    spent += r.execution_time_ms;'),
   M('TR-dupnext', 'perf', TR, 'SG32: duplicate test ids are numbered by probing from #2 each time (quadratic in repeats)',
     '    let k = id, n = next.get(id) || 2;', '    let k = id, n = 2;'),
+  M('BI-hoist', 'perf', BI, 'SG35: the switch re-reads its variable on every evaluation instead of a binding read once per module load',
+    "    const text = lang === 'python' ? (form", "    on = lang === 'python' ? `__import__('os').environ.get('${name}') == '1'` : `globalThis.process.env.${name} === '1'`;\n    const text = lang === 'python' ? (form"),
+  M('BI-jsdeadline', 'perf', BI, 'SG35: the JS parse check has no time limit (a large literal statement blocks the mutant phase)',
+    '      if (performance.now() > until) return', '      if (false) return'),
   M('BI-pyuses', 'label', BI, 'SG26/SG34: a use or shape check that did not finish gives no mutants unmarked (tests_insensitive, not mutation_budget)',
     '  if (!uses) return Object.assign([], { unchecked: true });', '  if (!uses) return [];')
 ];
