@@ -14,7 +14,16 @@ const MUTANT_CAP = 3;
 // perturbation of the same reference.
 const siteKey = (m) => (m.revert ? `r${m.site}` : m.site);
 
-// Tests that passed in the unmutated `control` run and failed in `r`, or
+// fn() with process.env set to `vars` (undefined: unset) while it runs
+// synchronously: runTests copies process.env before its first await.
+function withEnv(vars, fn) {
+  const saved = Object.keys(vars).map(k => [k, process.env[k]]);
+  const set = ([k, v]) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+  Object.entries(vars).forEach(set);
+  try { return fn(); } finally { saved.forEach(set); }
+}
+
+// Tests that passed in the `control` run and failed in `r`, or
 // null when the runs are not comparable: no per-test results, a load
 // failure, or a different set of tests (one missing, crashed or added).
 function failedTests(r, control) {
@@ -33,19 +42,18 @@ function failedTests(r, control) {
 // inserted identifier or member the edit reads is a site too, perturbed
 // where the edit uses it (a replaced name also reverted), and one with no
 // parse-valid use-site mutant (`unmutated_ref`) is no evidence. A mutant
-// run that times out is re-run once and counts only if that run fails. A
-// kill is per test: a test that passed in the unmutated control run fails
-// in both mutant runs, each of which ran the same tests as the control
+// run that times out is re-run once and counts only if that run fails.
+// Each mutant is a switch in the source (editMutants): its runs set the
+// mutant's env variable, and its control run is the same text with the
+// variable unset, so a test that reads the source sees the same text in all
+// three. A kill is per test: a test that passed in the control run fails in
+// both mutant runs, each of which ran the same tests as the control
 // (`failedTests`); a run where a module failed to load (`collection_error`),
 // without per-test results, or with a test missing, crashed or added is no
-// kill. A failure counts only when it reproduces: the same mutant fails
-// again and the unmutated suite then passes (an unmutated failure means the
-// suite is flaky and nothing counts). For a mutant that adds text, that
-// third run is its sham (the edit with the site wrapped in redundant
-// parentheses and as many spaces added after it, editMutants):
-// a test that fails on the sham reads the source, not the value, and is no
-// kill (`sham_failed` when none is left). An inserted token no mutant covers
-// (`uncovered_token`, editMutants) is no evidence.
+// kill, and a test that failed in the control (flaky, or failing on the
+// switch's text) is none either (`control_failed` when no test is left). An
+// inserted token no mutant covers (`uncovered_token`, editMutants) is no
+// evidence.
 // Deleted tokens (of every hunk) have nothing to mutate: they stand when the
 // diff test is `equivalent` and executed each of them, or, for a stretch
 // that replaces them with at least as many inserted tokens holding a site,
@@ -86,22 +94,22 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
   }
   const sites = [...new Set(mutants.map(siteKey))];
   out.sites = sites.length;
-  const runOnce = async () => {
+  const runOnce = async (env) => {
     const left = budgetMs - spent;
     if (out.run && left < suiteMs + 500) return null;
     const t = Date.now();
-    const r = await runTests({ repoRoot, timeoutMs: Math.min(left, 2 * suiteMs + 1000) });
+    const r = await withEnv(env, () => runTests({ repoRoot, timeoutMs: Math.min(left, 2 * suiteMs + 1000) }));
     spent += Math.max(Date.now() - t, r.execution_time_ms);
     out.run++;
     return r;
   };
   // A timed-out run is re-run once. -> the run, or null when out of budget.
-  const runSuite = async (content) => {
+  const runSuite = async (content, env) => {
     fs.writeFileSync(abs, content);
-    let r = await runOnce();
+    let r = await runOnce(env);
     if (r && r.status === 'timeout') {
       out.timeouts = (out.timeouts || 0) + 1;
-      r = await runOnce();
+      r = await runOnce(env);
     }
     if (r && r.status === 'passed') suiteMs = Math.max(1, r.execution_time_ms);
     return r;
@@ -111,20 +119,19 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
     for (const site of sites) {
       let killed = false;
       for (const m of mutants.filter(x => siteKey(x) === site)) {
-        const r = await runSuite(m.src);
+        const r = await runSuite(m.src, m.env);
         if (!r) { out.budget_exhausted = true; return done(); }
         if (r.collection_error) { count('collection_errors'); continue; }
         if (r.status !== 'failed') continue;
         if (!r.tests || !Object.values(r.tests).includes('fail')) { count('no_failed_test'); continue; }
-        const again = await runSuite(m.src);
+        const again = await runSuite(m.src, m.env);
         if (!again) { out.budget_exhausted = true; return done(); }
         if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }
-        const control = await runSuite(m.sham || edited);
+        const control = await runSuite(m.src, Object.fromEntries(Object.keys(m.env).map(k => [k, undefined])));
         if (!control) { out.budget_exhausted = true; return done(); }
-        if (control.status !== 'passed' && !m.sham) { out.flaky = true; return done(); }
         const a = failedTests(r, control), b = failedTests(again, control);
         const tests = a && b ? a.filter(function (id) { return this.has(id); }, new Set(b)) : [];
-        if (!tests.length) { count(control.status !== 'passed' ? 'sham_failed' : a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
+        if (!tests.length) { count(control.status !== 'passed' ? 'control_failed' : a && b ? 'unconfirmed' : 'test_set_changed'); continue; }
         Object.assign(out, { killed: m.mutation, killed_line: m.line, killed_test: tests[0] });
         killed = true;
         break;

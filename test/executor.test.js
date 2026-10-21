@@ -15,6 +15,7 @@ const { inflightPath } = require('../src/utils/checkpoint');
 const { assertTestOutcome } = require('../src/contracts');
 const { installStub, resetClient } = require('./helpers/stub-client');
 const factories = require('./helpers/factories');
+const { plainMutant: plain } = factories;
 // Proposals reach the executor only through the gate, which needs an
 // `equivalent` diff test; this one also ran every deleted token.
 const GATE_DIFF_TEST = { applicable: true, verdict: 'equivalent', runs: 12, deletions_observed: true, duration_ms: 1 };
@@ -505,8 +506,7 @@ test('a suite that also fails unmutated gives no kill: every run after the main 
   assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
   assert.strictEqual(res.reason, 'tests_insensitive');
   assert.strictEqual(res.mutation.killed, null);
-  assert.strictEqual(res.mutation.flaky, true);
-  assert.strictEqual(res.mutation.run, 3, 'mutant, mutant again, unmutated');
+  assert(res.mutation.control_failed >= 1, JSON.stringify(res.mutation));
   assertReverted(res, repo, 'src/inc.js', before, kept);
 });
 
@@ -605,12 +605,12 @@ test('editMutants: parse-valid mutants of the changed characters only', () => {
   const at = (needle) => ({ start: src.indexOf(needle), end: src.indexOf(needle) + needle.length, file: 'g.js' });
   const changed = editMutants(src, at('255'));
   assert.deepStrictEqual(changed.map(m => m.mutation), ['numeric_off_by_one']);
-  assert(changed[0].src.includes('s.length > 256'));
+  assert(plain(changed[0]).includes('s.length > 256'));
   assert.deepStrictEqual(editMutants(src, at('throw')), [], 'unchanged tokens on the edited line are not mutated (AUDIT-8 C1/C2)');
   assert.deepStrictEqual(editMutants(src, at("require('./y')")), [], 'module specifiers are not mutated');
   const py = 'def f(x):\n    if x > 3:\n        return x + 1\n    return 0\n';
   const pm = editMutants(py, { start: py.indexOf('    if'), end: py.indexOf('    return 0'), file: 'f.py' });
-  assert(pm.length >= 1 && pm.every(m => !m.src.includes('===')), JSON.stringify(pm));
+  assert(pm.length >= 1 && pm.every(m => !plain(m).includes('===')), JSON.stringify(pm));
   assert.deepStrictEqual(editMutants('a = 1\n', { start: 0, end: 5, file: 'a.go' }), []);
 });
 
@@ -807,26 +807,26 @@ test('editMutants: every inserted read gets a use-site mutant, however and where
     ["const { MAX } = require('./limits');", 'MAX'], ['', 'f.MAX']]) {
     const m = useOf(js(pre, ref), ref.split('.')[0]);
     assert(m, `${pre} ${ref}`);
-    assert.match(m.src, new RegExp(`slice\\(0, \\(\\(v\\) => .*\\)\\(${ref.replace('.', '\\.')}\\)\\)`), 'the value is perturbed where the edit reads it');
+    assert.match(plain(m), new RegExp(`slice\\(0, \\(\\(v\\) => .*\\)\\(${ref.replace('.', '\\.')}\\)\\)`), 'the value is perturbed where the edit reads it');
   }
   assert(useOf(editMutants("'use strict';\nfunction f(s) {\n  const max = 4096;\n  return String(s).slice(0, max);\n}\n",
     { file: 'f.js', before: "'use strict';\nfunction f(s) {\n  const max = 4096;\n  return String(s);\n}\n" }), 'max'), 'a local');
-  assert(js('class K {\n  static MAX = 4;\n  static g(s) { return s; }\n}', 'this.MAX').some(m => m.ref === 'MAX' && m.src.includes('(this.MAX))')), 'a this. member');
+  assert(js('class K {\n  static MAX = 4;\n  static g(s) { return s; }\n}', 'this.MAX').some(m => m.ref === 'MAX' && plain(m).includes('(this.MAX))')), 'a this. member');
   for (const [pre, ref, head] of [['MIN, MAX = 1, 4096', 'MAX'], ['try:\n    MAX = 4096\nexcept ImportError:\n    MAX = 1024', 'MAX'],
     ['from app.limits import MAX', 'MAX'], ['', 'cfg["max"]', '    cfg = {"max": 4096}\n'], ['', 'self.MAX']]) {
     const m = useOf(py(pre, ref, head), ref.split(/[.[]/)[0]);
     assert(m, `${pre} ${ref}`);
-    assert(m.src.includes(`, ${ref})]`), m.src);
+    assert(plain(m).includes(`, ${ref})]`), plain(m));
   }
   // A call is skipped: its receiver (else its first argument) takes its place.
   const nested = editMutants('def f(s):\n    def cut(x, n=4):\n        return x[0:n]\n    return cut(str(s)) + ""\n',
     { file: 'f.py', before: 'def f(s):\n    def cut(x, n=4):\n        return x[0:n]\n    return str(s)\n' });
-  assert(useOf(nested, 'cut').src.includes('return (str(s)) + ""'));
-  assert(useOf(js('', '4'), 'slice').src.includes('return (String(s));'));
+  assert(plain(useOf(nested, 'cut')).includes('return (str(s)) + ""'));
+  assert(plain(useOf(js('', '4'), 'slice')).includes('return (String(s));'));
   // Bindings, keys and labels are no use; a replaced name also reverts on its own site, unless the code around it changed.
   assert(!js('', '4', '{ k: s }').some(m => m.ref === 'k'));
   const swap = editMutants("'use strict';\nfunction t(s) {\n  return s.trimStart() + 1;\n}\n", { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.trim() + 1;\n}\n" });
-  assert(swap.some(m => m.revert && m.mutation === 'revert_reference' && m.src.includes('s.trim() + 1')));
+  assert(swap.some(m => m.revert && m.mutation === 'revert_reference' && plain(m).includes('s.trim() + 1')));
   assert.deepStrictEqual(editMutants("'use strict';\nfunction t(s) {\n  return s.indexOf(1) !== -1;\n}\n",
     { file: 't.js', before: "'use strict';\nfunction t(s) {\n  return s.includes(1);\n}\n" }).unmutated_ref, { name: 'indexOf', line: 3, hunk: 0 });
   // A read with no parse-valid perturbation (a match-case value pattern) is no evidence.
@@ -982,13 +982,13 @@ test('Python: a class attribute read through self. needs its own kill at the use
   assertReverted(res, repo, 'app/m.py', before, kept);
 });
 
-// ---------- SG30: sham controls, uncovered tokens ----------
+// ---------- SG30/SG34: same-text controls, uncovered tokens ----------
 
 const STYLE_TEST = "const fs = require('fs');\nconst path = require('path');\n" +
   "test('style: no source line over 120 characters', () => { const d = path.join(__dirname, '..', 'src'); " +
   "for (const f of fs.readdirSync(d)) fs.readFileSync(path.join(d, f), 'utf8').split('\\n').forEach((l) => assert.ok(l.length <= 120, f)); });";
 
-test('a test that fails on the same-size sham reads the source: no kill; a behavioural test still kills (AUDIT-20 H2)', async (t) => {
+test('a test that fails on the switched text with the switch off reads the source: no kill; a behavioural test still kills (AUDIT-20 H2, AUDIT-23 C1)', async (t) => {
   const cur = 'function body(s) {\n  return String(s).slice(SKIP);\n}';
   const prop = 'function body(s) {\n  return String(s).slice(SKIP, SKIP + MAX_LEN);\n}';
   const rest = 'const SKIP = 1;\nconst MAX_LEN = 4096;\nmodule.exports = { body };';
@@ -997,8 +997,8 @@ test('a test that fails on the same-size sham reads the source: no kill; a behav
   assert.strictEqual(weak.res.status, 'reverted', JSON.stringify(weak.res.mutation));
   assert.strictEqual(weak.res.reason, 'tests_insensitive');
   assert.strictEqual(weak.res.mutation.surviving_ref, 'SKIP');
-  assert(weak.res.mutation.sham_failed >= 1, JSON.stringify(weak.res.mutation));
-  assert.strictEqual(weak.res.mutation.run, 3, 'the sham is the third run of the kill: no extra run');
+  assert(weak.res.mutation.control_failed >= 1, JSON.stringify(weak.res.mutation));
+  assert.strictEqual(weak.res.mutation.run, 3, 'the control is the third run of the kill: no extra run');
   assertReverted(weak.res, weak.repo, 'src/body.js', weak.before, weak.kept);
   const strong = await execOn(t, 'src/body.js', cur, prop, rest,
     `${head}test('body', () => { assert.strictEqual(m.body('xabc'), 'abc'); assert.strictEqual(m.body('x'.repeat(5000)).length, 4096); });`, null);
@@ -1017,7 +1017,7 @@ test('an inserted token no mutant covers is no evidence, whatever kills its sibl
   assertReverted(res, repo, 'src/parts.js', before, kept);
 });
 
-test('a size test that ignores whitespace fails the sham too: no kill (AUDIT-21 H2)', async (t) => {
+test('a size test that ignores whitespace fails the switch-off control too: no kill (AUDIT-21 H2)', async (t) => {
   const cur = 'function body(s) {\n  return String(s).slice(SKIP);\n}';
   const prop = 'function body(s) {\n  return String(s).slice(SKIP, SKIP + MAX_LEN);\n}';
   const rest = 'const SKIP = 1;\nconst MAX_LEN = 4096;\nmodule.exports = { body };';
@@ -1029,6 +1029,6 @@ test('a size test that ignores whitespace fails the sham too: no kill (AUDIT-21 
   assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
   assert.strictEqual(res.reason, 'tests_insensitive');
   assert.strictEqual(res.mutation.surviving_ref, 'SKIP');
-  assert(res.mutation.sham_failed >= 1, JSON.stringify(res.mutation));
+  assert(res.mutation.control_failed >= 1, JSON.stringify(res.mutation));
   assertReverted(res, repo, 'src/body.js', before, kept);
 });

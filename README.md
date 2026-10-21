@@ -265,23 +265,30 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   `tests_insensitive`; a perturbation that throws (a skip that leaves the
   wrong type) is killed by any test that runs it.
 - **Fail closed per token.** Every inserted token but punctuation and
-  whitespace needs a kill that covers it, operators and keywords included.
-  Shapes with no mutant are rejected, not carried: a renamed or moved
-  object key or keyword argument with no inserted read of the same name, a
-  regex class bracket, names in type annotations, `typeof`, `=>`, `@`,
-  `*args`, a Python ternary or comprehension, a new function definition.
-  An operator mutant is a strong change (`>>` → `<<`, `-` → `+`): a test
-  on small inputs kills it, so a range change (`x | 0` for `Math.trunc`)
-  stands on the executor bar only if the diff test misses it. A string, or a template /
-  f-string text part, is one site (`x` added): a change inside it (`r'\t'` →
-  `r'\t+'`) stands on any test that checks the string's output.
-- **Sham control covers size only.** The sham of a mutant that adds text
-  adds as many spaces and wraps the site in at least as many non-space
-  characters (parentheses, or a number in a comma expression): it stops
-  tests that read source length, length without whitespace, or layout. A
-  test that greps the source for a name or a character (`=>`, `lambda`), or
-  a mutant that removes text, has no sham. A site whose wrapped sham does
-  not parse (a numeric object key) has no mutant and is rejected.
+  whitespace needs a kill that covers it, operators and keywords included;
+  a token with no mutant of its own is covered only by a use site inside
+  its own operand, never by one wrapping it. A bracket or indentation that
+  changes structure (not one that only frames inserted code) needs a kill
+  inside that bracket pair or line. Shapes with no mutant are rejected, not
+  carried: a renamed or moved object key or keyword argument with no
+  inserted read of the same name, a regex class bracket, names in type
+  annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or
+  comprehension, a new function definition, a block re-indented or
+  re-bracketed around unchanged code. An operator mutant is a strong change
+  (`>>` → `<<`, `-` → `+`): a test on small inputs kills it, so a range
+  change (`x | 0` for `Math.trunc`) stands on the executor bar only if the
+  diff test misses it. A string (one lexer literal, backslash continuations
+  included), or a template / f-string text part, is one site (`x` added): a
+  change inside it (`r'\t'` → `r'\t+'`) stands on any test that checks the
+  string's output.
+- **Switch control stops source readers, not value-blind tests.** Every
+  mutant is an environment-variable switch in the file, and its control
+  run is the same text with the switch off, so tests that read the source
+  (length, token or word counts, layout, a grep) give no kill. A site with
+  no expression to switch (an object or class key, a match pattern) has no
+  mutant and is rejected. A test that only notices a change of a value's
+  type or size, not its content, still kills a perturbation it would not
+  catch on a real bug.
 - **Slow suites.** Every mutant kill takes three suite runs (mutant, mutant
-  again, unmutated control) inside one 60 s mutant budget, so suites slower
+  again, switch-off control) inside one 60 s mutant budget, so suites slower
   than about a third of that budget end `reverted` with `mutation_budget`.

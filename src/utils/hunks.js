@@ -6,15 +6,17 @@
 // `deleted` the removed tokens in `before`; `gaps` the same tokens grouped by
 // the stretch between two matched tokens they fall in ({ ins, del }). A hunk
 // with no inserted token is a deletion: there is nothing in `after` to mutate.
-// A template literal or f-string is its text parts (each with its delimiters)
-// and the tokens of its interpolations; a JS regex literal is its delimiters,
-// body atoms and flags (`lexView`).
+// Every literal comes from `lexView`: a string is one token, a template
+// literal or f-string is its text parts (each with its delimiters) and the
+// tokens of its interpolations, a JS regex literal is its delimiters, body
+// atoms and flags. Strings and numbers compare by value when only their
+// spelling differs ('a' / "a", 120 / 0x78): a respelled literal is no change.
 
 const MAX_CELLS = 4e6;
 const NUM = String.raw`(?:\d|\.\d)(?:[\w.]|(?<=\d[eE])[+-])*`;
-const JS_TOKEN = new RegExp(String.raw`[A-Za-z_$][\w$]*|${NUM}|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|` + '`(?:[^`\\\\]|\\\\.)*`' +
+const JS_TOKEN = new RegExp(String.raw`[A-Za-z_$][\w$]*|${NUM}` +
   String.raw`|===|!==|\*\*=?|>>>=?|<<=?|>>=?|&&=?|\|\|=?|\?\?=?|\?\.|=>|\.\.\.|\+\+|--|[-+*/%&|^!<>=]=?|\S`, 'g');
-const PY_TOKEN = new RegExp(String.raw`[rRbBuUfF]{0,2}(?:'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")|[A-Za-z_]\w*|${NUM}` +
+const PY_TOKEN = new RegExp(String.raw`[A-Za-z_]\w*|${NUM}` +
   String.raw`|\*\*=?|\/\/=?|<<=?|>>=?|->|[-+*/%&|^!<>=:]=?|\S`, 'g');
 const REGEX_ATOM = /\\(?:u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|x[\da-fA-F]{2}|c[A-Za-z]|[pPk]\{[^}]*\}|k<[^>]*>|[\s\S])|\(\?(?:[:=!]|<[=!]|<[\w$]+>)|\{\d+(?:,\d*)?\}\??|[*+?]\?|[\s\S]/g;
 const BEFORE_REGEX = new Set('return typeof instanceof in of new delete void throw case do else yield await'.split(' '));
@@ -203,10 +205,25 @@ function linesOf(code, lo, hi, lang) {
   return out;
 }
 
-// Tokens of v.kept[lo, hi) (v: a lexView with `at`, its template, f-string
-// and regex literals by start); Python lines that start outside a literal
-// get a leading indentation token. Regex atoms and flags are marked apart
-// from code tokens of the same text.
+// Comparison key of a token: a number's value, a string's value when it has
+// no escapes (and, in Python, no `f` prefix), else its text.
+function valueKey(t, lang) {
+  if (/^\.?\d/.test(t)) {
+    const n = t.replace(/_/g, '');
+    try {
+      if (lang !== 'python') return /n$/.test(n) ? `\u0005${BigInt(n.slice(0, -1))}n` : /^0\d/.test(n) ? t : `\u0005${Number(n)}`;
+      if (/^(?:0[xob][\da-f]+|\d+)$/i.test(n)) return `\u0005${BigInt(n)}`;
+      if (!/j$/i.test(n)) return `\u0005${Number(n)}.0`;
+    } catch { /* not a number */ }
+    return t;
+  }
+  const m = /^([rRbBuU]{0,2})('''|"""|'|")([^\\]*)\2$/.exec(t);
+  return m && (lang === 'python' || (!m[1] && m[2].length === 1)) ? `\u0004${/b/i.test(m[1]) ? 'b' : ''}${m[3]}` : t;
+}
+
+// Tokens of v.kept[lo, hi) (v: a lexView with `at`, its literals by start);
+// Python lines that start outside a literal get a leading indentation token.
+// Regex atoms and flags are marked apart from code tokens of the same text.
 function tokensOf(v, lo, hi, lang) {
   const code = v.kept;
   const re = new RegExp((lang === 'python' ? PY_TOKEN : JS_TOKEN).source, 'g');
@@ -220,12 +237,14 @@ function tokensOf(v, lo, hi, lang) {
     }
   }
   const push = (s, e, mark = '') => { if (s >= lo && s < hi) out.push({ v: mark + code.slice(s, Math.min(e, hi)), s, e: Math.min(e, hi) }); };
+  const value = (s, e) => { if (s >= lo && s < hi) out.push({ v: e > hi ? code.slice(s, hi) : valueKey(code.slice(s, e), lang), s, e: Math.min(e, hi) }); };
   re.lastIndex = lo;
   let m;
   while ((m = re.exec(code)) && m.index < hi) {
     const lit = v.at.get(m.index);
-    if (!lit) { push(m.index, m.index + m[0].length); continue; }
-    if (lit.kind === 'regex') {
+    if (!lit) { value(m.index, m.index + m[0].length); continue; }
+    if (lit.kind === 'string') value(lit.s, lit.e);
+    else if (lit.kind === 'regex') {
       push(lit.s, lit.s + 1);
       for (const [a, b] of lit.atoms) push(a, b, '\u0002');
       push(lit.body[1], lit.body[1] + 1);
@@ -241,18 +260,20 @@ function tokensOf(v, lo, hi, lang) {
   return out.sort((x, y) => x.s - y.s);
 }
 
-// lexView of src plus `at`: its template, f-string and regex literals by start.
+// lexView of src plus `at`: its literals by start.
 function viewOf(src, lang) {
   const v = lexView(src, lang);
-  v.at = new Map(v.lits.filter(l => l.kind !== 'string').map(l => [l.s, l]));
+  v.at = new Map(v.lits.map(l => [l.s, l]));
   return v;
 }
 
 // A run of tokens only one side has (side 1: after, 0: before) between two
 // matched tokens moves to the leftmost equivalent place where it is
-// bracket-balanced (else the rightmost): `.f(x)` inserted, not `f(x).`.
-// pairs: matched index pairs, updated in place.
+// bracket-balanced and starts with an operator or separator, else the
+// leftmost balanced one (else the rightmost): `.f(x)` inserted, not
+// `f(x).`; `, g(y)`, not `g(y),`. pairs: matched index pairs, updated in place.
 function slide(pairs, toks, side) {
+  const joins = (k) => !/^[\w$'"`([{\u0001-\u0005]/.test(toks[k].v);
   const balanced = (u, v) => {
     let d = 0;
     for (let k = u; k < v; k++) { const c = toks[k].v; d += '([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0; if (d < 0) return false; }
@@ -266,12 +287,13 @@ function slide(pairs, toks, side) {
       pairs[k + 1][side] = u;
       u++; v++; k++;
     }
-    let best = 0;
+    let best = 0, join = balanced(u, v) && joins(u) ? 0 : -1;
     for (let d = 1; k - d + 1 >= 0; d++) {
       const pk = pairs[k - d + 1];
       if (pk[side] !== u - d || (d > 1 && pairs[k - d + 2][1 - side] !== pk[1 - side] + 1) || toks[u - d].v !== toks[v - d].v) break;
-      if (balanced(u - d, v - d)) best = d;
+      if (balanced(u - d, v - d)) { best = d; if (joins(u - d)) join = d; }
     }
+    if (join >= 0) best = join;
     for (let d = 1; d <= best; d++) pairs[k - d + 1][side] = v - d;
   }
 }
