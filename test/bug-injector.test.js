@@ -557,6 +557,16 @@ test('changeHunks: a respelled string or number is no change (AUDIT-23 H1)', () 
   assert.deepStrictEqual(ins("x = 'a'\n", "x = b'a'\n", 'a.py'), ["b'a'"]);
 });
 
+test('changeHunks: BigInt and legacy-octal literals compare by value (AUDIT-26 H3)', () => {
+  const { changeHunks } = require('../src/utils/hunks');
+  const ins = (b, a) => changeHunks(b, a, 'a.js').flatMap(h => h.ranges).map(([s, e]) => a.slice(s, e));
+  assert.deepStrictEqual(ins('x = f(1000n);\n', 'x = f(2000n);\n'), ['2000n']);
+  assert.deepStrictEqual(ins('x = f(1000n);\n', 'x = f(0x3e8n);\n'), [], 'same BigInt, respelled');
+  assert.deepStrictEqual(ins('x = f(10n);\n', 'x = f(10);\n'), ['10'], 'a BigInt is no Number');
+  assert.deepStrictEqual(ins('x = f(10);\n', 'x = f(010);\n'), ['010'], '010 is 8, not 10');
+  assert.deepStrictEqual(ins('x = f(10);\n', 'x = f(10.0);\n'), []);
+});
+
 test('editMutants: a bracket or indentation that frames kept code needs a site inside the structure (AUDIT-23 H1)', () => {
   const braces = sg30('js', '  if (n > 1) t = t.slice(0, 9);\n  t = t.trim();\n  return t;', '  if (n > 1) { t = t.slice(0, 9);\n  t = t.trim(); }\n  return t;');
   assert.strictEqual(braces.ms.uncovered && braces.ms.uncovered.text, '{', 'a statement moved into a block');
@@ -573,6 +583,16 @@ test('editMutants: a bracket or indentation that frames kept code needs a site i
   assert(!sg30('js', '  return t;', '  return Math.max(0, t);').ms.uncovered);
   assert(!sg30('js', '  return t;', '  return String(t);').ms.uncovered);
   assert(!sg30('py', '    return f(s,\n        t)', '    return f(s,\n             t)').ms.uncovered, 'a continuation line is no statement');
+});
+
+test('editMutants: a moved argument-list bracket stands only on its own call or a prefix operator right before it (AUDIT-26 H1, H2)', () => {
+  // `g(a) + b` -> `h(g(a + b))` / `~g(a + b)`: g's `)` moves past `+ b`.
+  const wrapped = sg30('js', '  return g(s) + t;', '  return h(g(s + t));').ms;
+  assert.strictEqual(wrapped.uncovered && wrapped.uncovered.text, ')', 'a wrapper\'s use site does not cover g\'s parentheses');
+  const prefixed = sg30('js', '  return g(s) + t;', '  return ~g(s + t);').ms;
+  assert.strictEqual(prefixed.uncovered && prefixed.uncovered.text, ')', 'a prefix applied to g(...) does not cover g\'s parentheses');
+  assert(!sg30('js', '  return s + t;', '  return ~(s + t);').ms.uncovered, 'a prefix right before the pair covers it');
+  assert(!sg30('js', '  return s + t;', '  return h(s + t);').ms.uncovered, 'a new call covers its own parentheses');
 });
 
 test('editMutants: a token with no mutant is covered by its own operands\' use sites, never a wrapper\'s (AUDIT-23 H3)', () => {
