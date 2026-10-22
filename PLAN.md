@@ -95,7 +95,8 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG38 | Per-test caught-load attribution in JS, Python BOM | SG35 | thread worker | done |
 | SG39 | Linear caught-load lookup, bounded Python comma scan | SG38 | thread worker | done |
 | SG40 | Pin SG37/SG38 rules, isolate the tmpdir test | SG39 | thread worker | done |
-| SG41 | Suite and escaped-name caught-load attribution, Python grouping commas | SG40 | thread worker | in progress |
+| SG41 | Suite and escaped-name caught-load attribution, structural separators (incl. A31-C1, C2, H3) | SG40 | thread worker | in progress |
+| SG42 | Env-blind mutant switch, loop/chain keyword swaps | SG40 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -292,11 +293,19 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
 
-### SG41 — Suite and escaped-name caught-load attribution, Python grouping commas (A32-H1–H3, A32-M1, A32-L1)
+### SG42 — Env-blind mutant switch, loop/chain keyword swaps (A31-H1, A31-H2, A31-L1)
+
+Problem: a test that reads the environment kills every switch mutant, because the switch variable is set in mutant runs and absent in the control (E01–E03 commit). `while`→`if` and `elif`→`if` are covered by the new keyword's own `negate_condition` site, so the kill shows the condition matters, not the loop or the chain (K01–K03 commit). README's switch-control limit omits environment readers.
+
+Acceptance: `node audit/31/run.js --only E01,E02,E03,E04,K01,K02,K03` 0 committed (E04 control stops as before); `node audit/31/h1-env-switch.js` and `h2-keyword-swap.js` ok; audit/28 switch-leak ok; audit/27 0/41, audit/23 ≤ 5; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code; README/CLAUDE.md updated.
+
+### SG41 — Suite and escaped-name caught-load attribution, structural separators (A32-H1–H3, A32-M1, A32-L1, A31-C1, A31-C2, A31-H3)
 
 Problem: a caught module-load throw inside a passing `describe()` callback still blocks every kill (`tapResults` drops suites; a row with a test name never falls back to the file's exit-0 key). Names containing `#`, `\` or a newline never match because the hook logs `t.fullName` while TAP ids are escaped; `tests` ids and `mutation.killed_test` carry the escapes. A Python trailing comma in `elif (c,):` / `while (c,):` is exempt (the keyword list misses them) and commits. Adding an element to a multi-line Python tuple display always ends `uncovered_token ','`; the `;` rule is wider than documented (`;` before `++`/`--`, soft keyword `match` as a name).
 
-Acceptance: `node audit/32/caught-load-names.js` a–d ok; `node audit/32/structural-elif.js` a–d ok; `node audit/32/structural-scope.js` ok (or the remaining over-rejection documented in CLAUDE.md/README); audit/28 caught-load-same-file, switch-leak, audit/24 caught-load-failure ok; audit/30 unpinned and dupprefix ok; audit/27 subset 0 committed; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
+Also (AUDIT-31): `for await (...);` is not a structural `;` (C1); a Python `;` on the continuation line of a multi-line header is not structural (C2); JS `with (o);`, a same-line `; + (...)` and a comma splitting an operand (`6000 - 1` → `6000, - 1`) commit on a sibling site (H3).
+
+Acceptance: `node audit/31/run.js --only S01,S02,S03,S04,S05,S06,S07` 0 committed; `node audit/32/caught-load-names.js` a–d ok; `node audit/32/structural-elif.js` a–d ok; `node audit/32/structural-scope.js` ok (or the remaining over-rejection documented in CLAUDE.md/README); audit/28 caught-load-same-file, switch-leak, audit/24 caught-load-failure ok; audit/30 unpinned and dupprefix ok; audit/27 subset 0 committed; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
 
 ### SG40 — Pin SG37/SG38 rules, isolate the tmpdir test (A30-H1–H4, A30-M1, A30-L2)
 
@@ -491,3 +500,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-22 | SG40 | green | No rule change in `src/` (the code already matched CLAUDE.md for BI-insideind: a re-indented line is never covered by a sibling). New test pins every structural `;`/`,` arm (`while` head, ASI before `[` / template / `+` / `-` / `/`, Python `;` on for / while / with / def / class lines, `x, = ...`, a paren after in / not / and / or / is / if / else) and a site on the re-indented line itself; the AUDIT-28 runTests test adds a duplicate-name rethrow and a `describe('s')` throw beside a passing `set`. The tmpdir test runs with a private TMPDIR and asserts the coverage dir was created there and removed (H4). `hunks.valueKey`: the always-true Python `j` test removed, the JS malformed-BigInt catch pinned (`1e3n` → `1.5n` is a change). audit/11 TR-dupname / TR-noname / TR-dupprefix re-anchored to SG39's `byName`, HK-nanpy / HK-pyfloat to the new line; audit/30 TR-dupname / dupprefix re-anchored, dupprefix.js now runs test-runner.test.js on the mutated copy. unpinned.js 7/7 ok; dupprefix ok; tmpdir-race --reps=5 ok (0/5, 0/5); `--check` 223/223; BI-while BI-asichar BI-pykw BI-pyeq BI-pykwapp BI-insideind TR-dupname TR-dupprefix (+ TR-noname, HK-nanpy, HK-pyfloat) killed. npm test 507/507 ×3; bench ok (difftest p95 440 ms, validator p95 423 ms); coverage validation 95.28 / runner 93.86 / rl 98.97 / orchestrator 94.25, hunks.js 98.81. |
 | 2026-10-22 | audits r10 | PR #2 | SG33–SG40 and AUDIT-23..30 merged into the default branch (c06fb7f); work branch restarted. |
 | 2026-10-22 | audits r11 | AUDIT-32 | 0C/3H/1M/1L: caught load throw in a passing describe still blocks kills; escaped TAP names never match the logged fullName; Python `elif (c,):` / `while (c,):` comma exempt and commits → SG41 (with tuple-display over-rejection, wide `;` rule). No switch leak; untested outcomes still produce no samples. |
+| 2026-10-22 | audits r11 | AUDIT-31 | 2C/3H/3M/1L: `for await (...);` and a Python `;` on a multi-line header continuation are not structural (C1, C2); JS `with (o);`, same-line `; +(…)`, operand-splitting comma commit on a sibling (H3) → SG41; env-reading tests kill every switch mutant (H1), `while`/`elif`→`if` covered by its own condition site (H2) → SG42. audit/27 0/41, audit/23 5 (accepted). |
