@@ -970,10 +970,11 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
     }
     return true;
   };
-  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [];
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map();
   for (let i = 0; i < code.length; i++) {
     const c = code[i];
-    if (c === '(' || c === '[' || c === '{') open.push(i);
+    if (c === ',') encl.set(i, open.length ? open[open.length - 1] : -1);
+    else if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
   // A `;` or `,` that changes statement or value structure: JS `;` as the
@@ -993,15 +994,11 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
     if (text === ';') return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\b/.test(code.slice(code.lastIndexOf('\n', a - 1) + 1, a));
     if (text !== ',') return false;
     const n = nextCode(a + 1), q = code[n];
-    let o = -1;
-    for (let i = a - 1, d = 0; i >= 0; i--) {
-      if (')]}'.includes(code[i])) d++;
-      else if ('([{'.includes(code[i])) { if (!d) { o = i; break; } d--; }
-    }
+    const o = encl.get(a) ?? -1;
     if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
     if (!')]}'.includes(q || '')) return false;
     // Applied to a value (a call or subscript), not a display or grouping.
-    const head = code.slice(0, prevCode(o) + 1);
+    const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
     const applied = /[\w)\]'"]$/.test(head) && !/\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head);
     return code[o] === '(' ? !applied : code[o] === '[' && applied;
   };

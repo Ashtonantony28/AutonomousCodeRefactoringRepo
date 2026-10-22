@@ -534,13 +534,25 @@ function loadFailed(log, repoRoot, tests) {
   let text;
   try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
   const { isTestFile } = require('../utils/file-discovery');
-  const rows = text.split('\n').map(l => l.split('\t'));
+  const rows = [...new Set(text.split('\n'))].map(l => l.split('\t'));
   const passed = new Set(rows.filter(r => r[0] === 'P').map(r => r[1]));
+  // name -> every id `name` or `name#<n>` passed, indexed once per call.
+  let byName = null;
+  const memo = new Map();
   const testPassed = (json) => {
-    let name;
-    try { name = JSON.parse(json); } catch { return false; }
-    const ids = Object.keys(tests || {}).filter(id => id === name || (id.startsWith(name + '#') && /^#\d+$/.test(id.slice(name.length))));
-    return ids.length > 0 && ids.every(id => tests[id] === 'pass');
+    if (!byName) {
+      byName = new Map();
+      for (const [id, state] of Object.entries(tests || {})) {
+        const m = /^(.*)#\d+$/s.exec(id);
+        for (const k of m ? [id, m[1]] : [id]) byName.set(k, byName.get(k) !== false && state === 'pass');
+      }
+    }
+    if (!memo.has(json)) {
+      let name;
+      try { name = JSON.parse(json); } catch { name = null; }
+      memo.set(json, typeof name === 'string' && byName.get(name) === true);
+    }
+    return memo.get(json);
   };
   return rows.some(([k, key, f, name]) => k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
     !(name ? testPassed(name) : passed.has(key)));
@@ -689,4 +701,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, TIMEOUT_MS };
+module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, loadFailed, TIMEOUT_MS };
