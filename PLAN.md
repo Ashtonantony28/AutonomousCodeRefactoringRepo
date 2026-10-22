@@ -92,6 +92,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG35 | Switch read once per module, bounded literal parse check | SG34 | thread worker | done |
 | SG36 | Pin SG31–SG34 safety rules, deterministic signal kill | SG35 | thread worker | in progress |
 | SG37 | Fail closed on unparsed numbers, structural extent, statement separators | SG36 | thread worker (with SG36) | in progress |
+| SG38 | Per-test caught-load attribution in JS, Python BOM | SG35 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -288,6 +289,12 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
 
+### SG38 — Per-test caught-load attribution in JS, Python BOM (A28-H1, A28-M1, A28-M2)
+
+Problem: a JS test that catches a module-load throw on purpose still blocks every kill when it shares a process with the killing test (same file, or `--experimental-test-isolation=none`), because the SG33 pass key is the whole process. A Python file with a BOM ends `mutation_budget`/`parse_check_failed` though the check took 36 ms. `mutation.killed_test`/`killed_line` survive beside `killed: null`.
+
+Acceptance: `node audit/28/caught-load-same-file.js` a–d ok; `node audit/28/contract-shapes.js` ok; `node audit/24/caught-load-failure.js`, `node audit/20/load-detect.js`, `node audit/16/collection-error.js` ok; README documents the rule; AUDIT-24 repro drift (L2) fixed; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
+
 ### SG37 — Fail closed on unparsed numbers, structural extent, statement separators (A27-C1, A27-H1, A27-H2)
 
 Problem: `hunks.valueKey` keys numbers it cannot evaluate (`0x1e+6000`, `6e3.toFixed`) as NaN, so a changed value reads as a same-value respelling. A moved bracket or re-indented line that changes block extent or operand scope is covered by any unrelated site inside it. An inserted `;` (`if (c);`, `else;`, a Python `;` joining a line into a suite) or a Python trailing comma (tuple) is exempt from coverage.
@@ -453,3 +460,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-21 | SG35 | green | Switch condition is a module-level binding read once per load: JS `var _k = globalThis.process.env.K === '1';` before the first statement (after shebang / directives, same line), Python `_k = __import__('os').environ.get('K') == '1'` after the docstring and `__future__` imports (`; ` on that line, or before a simple first statement; own line before a compound one); name collision-checked with `K`; no target before the binding. JS parse checks bounded by `timeoutMs` (10 s) → `unchecked` → `mutation_budget`, as Python. switch-hot js/py all ok (js 5M calls passed, mutant phase x1.1; py 3M x1.5); sites-scale table-16 js `unchecked` at 10 s (was unbounded); mutant-gen ok. audit/23 subset 0/23; audit/21 2 (T02 T07), audit/20 1 (D09), audit/16 3, audit/13 6; audit/5, 8, 12 e2e 0; executor-benign 8/18 rejected. Mutants BI-hoist, BI-jsdeadline killed; `--check` 176/176. 3 new tests fail on the old code. npm test 496/496 ×2; bench ok (difftest p95 318 ms, validator p95 593 ms); coverage validation 94.21 / runner 93.74 / rl 98.96 / orchestrator 94.25. |
 | 2026-10-22 | audits r9 | AUDIT-26 | coverage unchanged (≥ 93.7%); 1C/4H/3M/4L: no-site hunk rule untested (inserted `;` would commit), bracket coverage by wrapper or any prefix, BigInt/octal respelling untested, signal kill pinned only by a race → SG36. |
 | 2026-10-22 | audits r10 | AUDIT-27 | prior repros held (SG34 subset 0); fresh corpus 41, 18 committed, 1C/2H/4M/1L: NaN value keys read as respellings, structural extent covered by any inner site, `;` / trailing comma exempt → SG37 (built with SG36). |
+| 2026-10-22 | audits r10 | AUDIT-28 | no switch/hoist leak (a–h ok), prior contract C/H fixed; 0C/1H/2M/2L: caught module-load throw in the same JS process still blocks kills → SG38 (with BOM parse reason, stale kill fields). |
