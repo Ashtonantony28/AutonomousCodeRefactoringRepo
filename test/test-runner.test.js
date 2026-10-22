@@ -730,3 +730,23 @@ test('tapResults / junitResults: 20,000 tests sharing one name parse in linear t
   const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
   assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x#3']);
 });
+
+test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids once; duplicate names must all pass (AUDIT-29 H1)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-lf-');
+  const log = path.join(dir, 'load.log');
+  const check = (names, tests) => {
+    fs.writeFileSync(log, names.map(n => `T\t1.2\t${dir}/src/bad.js\t${JSON.stringify(n)}`).join('\n') + '\n');
+    return loadFailed(log, dir, tests);
+  };
+  const tests = {}, names = [];
+  for (let i = 0; i < 20_000; i++) tests[i % 2 ? `t ${i}` : `cfg ${i}`] = 'pass';
+  for (let i = 0; i < 20_000; i += 2) names.push(`cfg ${i}`);
+  const t0 = Date.now();
+  assert.strictEqual(check(names, tests), false);
+  assert(Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+  assert.strictEqual(check(['a', 'a#2'], { a: 'pass', 'a#2': 'pass', 'a#2#3': 'pass' }), false);
+  assert.strictEqual(check(['a'], { a: 'pass', 'a#2': 'fail' }), true);
+  assert.strictEqual(check(['a#2'], { a: 'fail', 'a#2': 'pass' }), false);
+  assert.strictEqual(check(['a'], { 'a#x': 'pass' }), true);
+});
