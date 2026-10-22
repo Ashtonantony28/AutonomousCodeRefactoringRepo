@@ -92,7 +92,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG35 | Switch read once per module, bounded literal parse check | SG34 | thread worker | done |
 | SG36 | Pin SG31–SG34 safety rules, deterministic signal kill | SG35 | thread worker | in progress |
 | SG37 | Fail closed on unparsed numbers, structural extent, statement separators | SG36 | thread worker (with SG36) | in progress |
-| SG38 | Per-test caught-load attribution in JS, Python BOM | SG35 | thread worker | in progress |
+| SG38 | Per-test caught-load attribution in JS, Python BOM | SG35 | thread worker | done |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -461,3 +461,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-22 | audits r9 | AUDIT-26 | coverage unchanged (≥ 93.7%); 1C/4H/3M/4L: no-site hunk rule untested (inserted `;` would commit), bracket coverage by wrapper or any prefix, BigInt/octal respelling untested, signal kill pinned only by a race → SG36. |
 | 2026-10-22 | audits r10 | AUDIT-27 | prior repros held (SG34 subset 0); fresh corpus 41, 18 committed, 1C/2H/4M/1L: NaN value keys read as respellings, structural extent covered by any inner site, `;` / trailing comma exempt → SG37 (built with SG36). |
 | 2026-10-22 | audits r10 | AUDIT-28 | no switch/hoist leak (a–h ok), prior contract C/H fixed; 0C/1H/2M/2L: caught module-load throw in the same JS process still blocks kills → SG38 (with BOM parse reason, stale kill fields). |
+| 2026-10-22 | SG38 | green | JS load hook wraps CJS `require('node:test')` (Module._load proxy, AsyncLocalStorage around test/suite callbacks, name and arity kept): a module-body throw inside a test is logged with the test's full name and excused when that test passed (subtests count as their parent); other throws keep the process key (exit 0). Python shape and parse checks accept a leading BOM (offsets kept, hoist after the BOM). A surviving site clears `killed_test` / `killed_line`. audit/28 caught-load-same-file a–d ok; contract-shapes a, M1, M2 ok (L1 contracts part open, contracts.js untouched); audit/24 caught-load-failure, untested-outcomes ok, docs-and-shapes L1/L2 ok (L3 contracts part open); audit/20 load-detect, audit/16 collection-error ok; switch-leak a–h ok. 3 new tests fail on the old code. npm test 499/499 ×2; bench ok (difftest p95 261 ms, validator p95 249 ms); coverage validation 94.21 / runner 93.82 / rl 98.96 / orchestrator 94.25. |

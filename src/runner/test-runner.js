@@ -458,16 +458,32 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // `T <key> <file>`), however deep the throw or however the test reports it,
 // and `P <key>` marks a key that passed: a throw caught on purpose
 // (`assert.throws(() => require(...))`, `pytest.raises` around an import) is
-// no load failure. JS: a preloaded wrapper of Module._compile, key = the
-// process, passed when a node:test file process exits 0. pytest: a plugin
-// wrapping __import__ (an ImportError is a missing optional module, not a
-// load failure), key = the test or collected module, passed when every phase
-// passed; a throw outside both never passes.
-const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile;
+// no load failure. JS: a preloaded wrapper of Module._compile. A throw inside
+// a node:test test or suite callback (CJS `require('node:test')`, wrapped
+// through Module._load; a subtest counts as its parent) is logged with that
+// test's full name (`T <key> <file> <json name>`) and passes when that test
+// passed; any other throw has key = the process, passed when a node:test file
+// process exits 0. pytest: a plugin wrapping __import__ (an ImportError is a
+// missing optional module, not a load failure), key = the test or collected
+// module, passed when every phase passed; a throw outside both never passes.
+const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile, ld = M._load;
 const key = process.pid + '.' + process.hrtime.bigint(), log = (s) => { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, s + '\\n'); } catch {} };
+const cur = new (require('async_hooks').AsyncLocalStorage)(), api = new WeakMap(), API = new Set(['test', 'it', 'describe', 'suite', 'only', 'skip', 'todo']);
+const bind = (fn) => Object.defineProperties(function () { return cur.run(arguments[0], () => fn.apply(this, arguments)); },
+  { name: { value: fn.name }, length: { value: fn.length } });
+const wrap = (f) => {
+  if (!api.has(f)) api.set(f, new Proxy(f, {
+    apply: (f, self, a) => { const i = a.findLastIndex(x => typeof x === 'function'); if (i >= 0) a[i] = bind(a[i]); return Reflect.apply(f, self, a); },
+    get: (f, k) => { const v = Reflect.get(f, k); return API.has(k) && typeof v === 'function' ? wrap(v) : v; }
+  }));
+  return api.get(f);
+};
+M._load = function (req) { const r = ld.apply(this, arguments); return req === 'node:test' && typeof r === 'function' ? wrap(r) : r; };
 let seen = false;
 M.prototype._compile = function (...a) {
   try { return c.apply(this, a); } catch (e) {
+    const t = cur.getStore();
+    if (t && typeof t.fullName === 'string') { log('T\\t' + key + '\\t' + this.filename + '\\t' + JSON.stringify(t.fullName)); throw e; }
     log('T\\t' + key + '\\t' + this.filename);
     if (!seen && process.env.NODE_TEST_CONTEXT) process.on('exit', (code) => { if (code === 0) log('P\\t' + key); });
     seen = true;
@@ -512,14 +528,22 @@ def pytest_runtest_logfinish(nodeid, location):
     _finish(not _bad)
 `;
 // Logged load failures, not caught under a key that passed, of modules other
-// than tests and conftest.
-function loadFailed(log, repoRoot) {
+// than tests and conftest. One logged inside a JS test is caught when that
+// test (every test of that name, in `tests`) passed.
+function loadFailed(log, repoRoot, tests) {
   let text;
   try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
   const { isTestFile } = require('../utils/file-discovery');
   const rows = text.split('\n').map(l => l.split('\t'));
   const passed = new Set(rows.filter(r => r[0] === 'P').map(r => r[1]));
-  return rows.some(([k, key, f]) => k === 'T' && !passed.has(key) && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f));
+  const testPassed = (json) => {
+    let name;
+    try { name = JSON.parse(json); } catch { return false; }
+    const ids = Object.keys(tests || {}).filter(id => id === name || (id.startsWith(name + '#') && /^#\d+$/.test(id.slice(name.length))));
+    return ids.length > 0 && ids.every(id => tests[id] === 'pass');
+  };
+  return rows.some(([k, key, f, name]) => k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
+    !(name ? testPassed(name) : passed.has(key)));
 }
 
 function ownsReporters(repoRoot, env) {
@@ -603,7 +627,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
       const text = fs.readFileSync(report, 'utf8');
       perTest = pytest ? junitResults(text) : tapResults(text);
     } catch { /* no per-test report */ }
-    loaded = !loadFailed(env.REFACTOR_LOAD_LOG, repoRoot);
+    loaded = !loadFailed(env.REFACTOR_LOAD_LOG, repoRoot, perTest && perTest.tests);
     if (tool && !result.timedOut && !result.spawnError) {
       tCov = Date.now();
       checkDeadline(deadline);

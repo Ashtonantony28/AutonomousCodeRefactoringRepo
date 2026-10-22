@@ -257,6 +257,17 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   `make`), and node:test suites that set their own `--test-reporter` (also
   through a delegated script: node refusing the added reporters is re-run
   without them), get no kill and end `tests_insensitive`.
+- **Caught module-load throws are judged per test.** A module body that
+  throws while a node:test test or suite callback runs (CommonJS
+  `require('node:test')`; a subtest counts as its parent) is ignored when
+  that test passed (`assert.throws(() => require(...))`), so other tests in
+  the same file or process (`--experimental-test-isolation=none`) still
+  kill; when that test failed the run is a load failure and kills nothing.
+  A throw outside a test callback (a test file's top-level `require`, a
+  hook, an ESM `import test from 'node:test'` suite) is ignored only when
+  its node:test file process exits 0, so there a caught throw beside the
+  killing test still blocks every kill. pytest keys it by test or collected
+  module.
 - **Use-site perturbations are small value changes.** A read is perturbed
   by number + 1, string + `~`, last list/dict entry dropped, or a skipped
   call (a namespace call passes its first non-literal argument through).

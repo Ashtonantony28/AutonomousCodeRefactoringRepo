@@ -51,9 +51,9 @@ report('L2 editMutants element shape and mutation field names drift from their d
 // L3
 const claude = read('CLAUDE.md');
 const list = (claude.replace(/\s+/g, ' ').match(/`tests_insensitive` \(a site survived[^)]*\)/) || [''])[0];
-const missing = ['uncovered', 'unmutated_ref', 'sham', 'load'].filter(w => !list.includes(w));
+const missing = ['uncovered', 'unmutated_ref', 'control_failed', 'load'].filter(w => !list.includes(w));
 const contracts = read('src/contracts.js');
-const fields = ['uncovered_token', 'sham_failed', 'unmutated_ref', 'collection_errors', 'killed_test'];
+const fields = ['uncovered_token', 'control_failed', 'unmutated_ref', 'collection_errors', 'killed_test'];
 const srcFiles = [];
 (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.js')) srcFiles.push(p); } })(path.join(ROOT, 'src'));
 const readers = fields.filter(f => srcFiles.some(p => !/executor\.js$|bug-injector\.js$/.test(p) && fs.readFileSync(p, 'utf8').includes(f)));

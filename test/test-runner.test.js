@@ -657,6 +657,44 @@ test('runTests: a module body throw that a passing test expects (in a test or at
   }
 });
 
+test('runTests: a caught load throw in a passing node:test test is no collection error in the failing test\'s own file or process; a failing test, hook or top level is (AUDIT-28 H1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg38-');
+  const pkg = (test) => fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test } }));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test'));
+  const head = "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\nconst { describe, it, before } = test;\n";
+  const caught = "assert.throws(() => require('../src/config'), /SG38_KEY/);";
+  const red = "test('f', () => assert.strictEqual(1, 2));\n";
+  fs.writeFileSync(path.join(dir, 'src/config.js'), "'use strict';\nif (!process.env.SG38_KEY) throw new Error('SG38_KEY required');\n");
+  const run = async (body, cmd = 'node --test') => {
+    pkg(cmd);
+    fs.writeFileSync(path.join(dir, 'test/a.test.js'), head + body);
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    return r;
+  };
+  for (const [body, tests] of [
+    [`test('config', () => { ${caught} });\n${red}`, { config: 'pass', f: 'fail' }],
+    [`describe('s', () => { it('config', () => { ${caught} }); });\n${red}`, { 's > config': 'pass', f: 'fail' }],
+    [`test('p', async (t) => { await t.test('c', () => { ${caught} }); });\n${red}`, { 'p > c': 'pass', p: 'pass', f: 'fail' }],
+    [`test('cb', (t, done) => { ${caught} setImmediate(done); });\ntest(function named() { ${caught} });\n${red}`, { cb: 'pass', named: 'pass', f: 'fail' }]
+  ]) {
+    for (const cmd of ['node --test', 'node --test --experimental-test-isolation=none']) {
+      const r = await run(body, cmd);
+      assert.strictEqual(r.collection_error, undefined, `${cmd}: ${body}`);
+      assert.deepStrictEqual(r.tests, tests);
+    }
+  }
+  const uncaught = await run("test('config', () => { require('../src/config'); });\ntest('g', () => {});\n");
+  assert.strictEqual(uncaught.collection_error, true, 'the test that hit the throw failed');
+  for (const body of [`describe('s', () => { before(() => { ${caught} }); it('f', () => assert.strictEqual(1, 2)); });\n`, `${caught}\n${red}`]) {
+    assert.strictEqual((await run(body)).collection_error, true, body);
+  }
+});
+
 test('runTests: pytest: pytest.raises around an import (in a test or at a test module\'s top) is no collection error; a failing assertion elsewhere is a real failure (AUDIT-24 H1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
   const dir = tmp(t, 'refactor-sg33py-');
   fs.mkdirSync(path.join(dir, 'app'));

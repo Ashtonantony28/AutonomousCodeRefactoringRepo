@@ -333,7 +333,7 @@ around = {}
 if '\\r' not in src.replace('\\r\\n', ''):
     spans = []
     try:
-        stack = list(ast.parse(src).body)
+        stack = list(ast.parse(src.removeprefix('\\ufeff')).body)
     except Exception:
         stack = []
     while stack:
@@ -347,7 +347,7 @@ if '\\r' not in src.replace('\\r\\n', ''):
             around.setdefault(need[k], []).append((a, b))
 def parses(text):
     try:
-        ast.parse(text)
+        ast.parse(text.removeprefix('\\ufeff'))
         return True
     except Exception:
         return False
@@ -554,11 +554,12 @@ function jsShape(src, file, regions) {
 // imported and capitalised names are namespaces.
 const PY_USES = `import ast, json, sys
 req = json.load(sys.stdin)
-src = req['src']
+bom = int(req['src'][:1] == '\\ufeff')
+src = req['src'][bom:]
 lines = src.split('\\n')
 def u16(s):
     return len(s.encode('utf-16-le', 'surrogatepass')) // 2
-starts = [0]
+starts = [bom]
 for l in lines:
     starts.append(starts[-1] + u16(l) + 1)
 def off(ln, col):

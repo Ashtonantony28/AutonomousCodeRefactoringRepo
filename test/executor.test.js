@@ -754,6 +754,17 @@ test('a killed mutant counts only for the token it mutates: slice(0, 1000) kille
   assert.strictEqual(strong.res.mutation.run, 9, 'one confirmed kill (three runs) per site');
 });
 
+test('a site that survives after an earlier kill leaves no killed_test / killed_line beside killed: null (AUDIT-28 M1)', async (t) => {
+  const cur = "function label(n) {\n  return 'n=' + n;\n}\n\nfunction tag(n) {\n  return 't=' + n;\n}";
+  const prop = cur.replace("'n=' + n;", "'n=' + n + '!';").replace("'t=' + n;", "'t=' + n + '?';");
+  const { res } = await execOn(t, 'src/m.js', cur, prop, 'module.exports = { label, tag };',
+    "const m = require('../src/m');\ntest('label', () => { assert.strictEqual(m.label(1), 'n=1!'); });\ntest('tag runs', () => { m.tag(1); });");
+  assert.strictEqual(res.reason, 'tests_insensitive', JSON.stringify(res.mutation));
+  assert.strictEqual(res.mutation.surviving_site_line, 7);
+  assert.strictEqual(res.mutation.killed, null);
+  assert(!('killed_test' in res.mutation) && !('killed_line' in res.mutation), JSON.stringify(res.mutation));
+});
+
 // ---------- SG25: evidence relevance, Python mutant runs ----------
 
 test('a change carried by a named constant needs a kill of that constant: slice(0, MAX_BODY) killed via 0 -> 1 keeps nothing (AUDIT-13 H1, T06)', async (t) => {

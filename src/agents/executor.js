@@ -138,6 +138,8 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
       }
       if (!killed) {
         const sm = mutants.find(x => siteKey(x) === site);
+        delete out.killed_line;
+        delete out.killed_test;
         Object.assign(out, { killed: null, surviving_hunk_line: hunks[sm.hunk].line, surviving_site_line: sm.line });
         if (sm.ref) out.surviving_ref = sm.ref;
         return done();
