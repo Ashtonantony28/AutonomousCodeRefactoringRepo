@@ -720,11 +720,11 @@ test('an unrelated token on the edited line is no evidence: a hunk with no mutab
   assertReverted(res, repo, 'src/row.js', before, kept);
 });
 
-test('a hunk with no site at all is reverted: an inserted `;` that ends an ASI-continued statement (AUDIT-26 C1)', async (t) => {
-  const cur = 'function t(a, b) {\n  const v = a\n  (b)\n  return v;\n}';
-  const prop = 'function t(a, b) {\n  const v = a;\n  (b)\n  return v;\n}';
+test('a hunk with no site at all is reverted: only an exempt separator inserted (AUDIT-26 C1)', async (t) => {
+  const cur = 'function t(a, b) {\n  const v = [a, b];\n  return v;\n}';
+  const prop = 'function t(a, b) {\n  const v = [a, b,];\n  return v;\n}';
   const { res, repo, before, kept } = await execOn(t, 'src/t.js', cur, prop, 'module.exports = { t };',
-    "const m = require('../src/t');\ntest('t', () => { assert.strictEqual(m.t(5, 1), 5); });", GATE_DIFF_TEST);
+    "const m = require('../src/t');\ntest('t', () => { assert.deepStrictEqual(m.t(5, 1), [5, 1]); });", GATE_DIFF_TEST);
   assert.strictEqual(res.status, 'reverted', res.stderr_tail);
   assert.strictEqual(res.reason, 'tests_insensitive');
   assert.strictEqual(res.mutation.mutants, 0);

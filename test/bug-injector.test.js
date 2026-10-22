@@ -567,7 +567,19 @@ test('changeHunks: BigInt and legacy-octal literals compare by value (AUDIT-26 H
   assert.deepStrictEqual(ins('x = f(10);\n', 'x = f(10.0);\n'), []);
 });
 
-test('editMutants: a bracket or indentation that frames kept code needs a site inside the structure (AUDIT-23 H1)', () => {
+test('changeHunks: a numeric token with no computable value compares by its text (AUDIT-27 C1)', () => {
+  const { changeHunks } = require('../src/utils/hunks');
+  const ins = (b, a, file) => changeHunks(b, a, file).flatMap(h => h.ranges).map(([s, e]) => a.slice(s, e));
+  assert.deepStrictEqual(ins('x = f(0x1e+6000);\n', 'x = f(0x2e+6000);\n', 'a.js'), ['0x2e+6000']);
+  assert.deepStrictEqual(ins('x = 6e3.toFixed();\n', 'x = 7e3.toFixed();\n', 'a.js'), ['7e3.toFixed']);
+  assert.deepStrictEqual(ins('x = int(6e3.real)\n', 'x = int(7e3.real)\n', 'a.py'), ['7e3.real']);
+  assert.deepStrictEqual(ins('x = 0x1e+6000\n', 'x = 0x3e+6000\n', 'a.py'), ['0x3e+6000']);
+  assert.deepStrictEqual(ins('x = 6e3.toFixed();\n', 'x = 6e3.toFixed();\n', 'a.js'), []);
+  const { ms } = sg30('js', '  return s.slice(0, 0x1e+6000);', '  return s.slice(0, 0x2e+6000);');
+  assert.strictEqual(ms.uncovered && ms.uncovered.text, '0x2e+6000', 'a number with no mutant is uncovered');
+});
+
+test('editMutants: a bracket or indentation that changes what kept code it frames is uncovered (AUDIT-23 H1, AUDIT-27 H1)', () => {
   const braces = sg30('js', '  if (n > 1) t = t.slice(0, 9);\n  t = t.trim();\n  return t;', '  if (n > 1) { t = t.slice(0, 9);\n  t = t.trim(); }\n  return t;');
   assert.strictEqual(braces.ms.uncovered && braces.ms.uncovered.text, '{', 'a statement moved into a block');
   const parens = sg30('js', '  return s + t.trim();', '  return (s + t).trim();');
@@ -575,7 +587,9 @@ test('editMutants: a bracket or indentation that frames kept code needs a site i
   const outside = sg30('js', '  if (n > 1) t = t.slice(0, 9);\n  t = t.trim();\n  return t;', '  if (n > 1) { t = t.slice(0, 9);\n  t = t.trim(); }\n  return t + 1;');
   assert.strictEqual(outside.ms.uncovered && outside.ms.uncovered.text, '{', 'a site outside the block does not cover it');
   const inside = sg30('js', '  if (n > 1) t = t.slice(0, 9);\n  t = t.trim();\n  return t;', '  if (n > 1) { t = t.slice(0, 8);\n  t = t.trim(); }\n  return t;');
-  assert(!inside.ms.uncovered && inside.ms.length, 'a site inside the block covers it');
+  assert.strictEqual(inside.ms.uncovered && inside.ms.uncovered.text, '{', 'a sibling site inside the block does not cover it');
+  const pyInside = sg30('py', '    if n > 1:\n        t = t[:9]\n    t = t.strip()\n    return t', '    if n > 1:\n        t = t[:8]\n        t = t.strip()\n    return t');
+  assert.strictEqual(pyInside.ms.uncovered && pyInside.ms.uncovered.text, '        ', 'nor a sibling inside the block of a re-indented line');
   const indent = sg30('py', '    if n > 1:\n        t = t[:9]\n    t = t.strip()\n    return t', '    if n > 1:\n        t = t[:9]\n        t = t.strip()\n    return t');
   assert.strictEqual(indent.ms.uncovered && indent.ms.uncovered.text, '        ', 'a statement indented into a block');
   // Brackets of new code, a new call around kept code and continuation lines need nothing more.
@@ -583,6 +597,23 @@ test('editMutants: a bracket or indentation that frames kept code needs a site i
   assert(!sg30('js', '  return t;', '  return Math.max(0, t);').ms.uncovered);
   assert(!sg30('js', '  return t;', '  return String(t);').ms.uncovered);
   assert(!sg30('py', '    return f(s,\n        t)', '    return f(s,\n             t)').ms.uncovered, 'a continuation line is no statement');
+});
+
+test('editMutants: a `;` or `,` that changes statement or value structure is uncovered; others need nothing (AUDIT-27 H2)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', "  if (n > 1) t = t.trim();\n  return t;", "  if (n > 1); t = t.trim();\n  return t + '';"), ';', 'empty `if` body');
+  assert.strictEqual(unc('js', "  if (n > 1) t = 1;\n  else t = t.trim();\n  return t;", "  if (n > 1) t = 1;\n  else; t = t.trim();\n  return t + '';"), ';', 'empty `else` body');
+  assert.strictEqual(unc('js', "  for (const x of xs) t += x;\n  return t;", "  for (const x of xs); t += x;\n  return t + '';"), ';', 'empty loop body');
+  assert.strictEqual(unc('js', "  const v = t\n  (s)\n  return v;", "  const v = t;\n  (s)\n  return v + '';"), ';', 'ends a statement ASI continued');
+  assert.strictEqual(unc('py', "    if n > 1: t = t[:9]\n    t = t.strip()\n    return t", "    if n > 1: t = t[:9]; t = t.strip()\n    return t + ''"), ';', 'joins a line into a suite');
+  assert.strictEqual(unc('py', "    t = t[:9]\n    return t", "    t = t[:9],\n    return t + ''"), ',', 'a trailing comma makes a tuple');
+  assert.strictEqual(unc('py', "    return (t)", "    return (t,)"), ',', 'in a grouping paren');
+  assert.strictEqual(unc('py', "    return xs[n]", "    return xs[n,]"), ',', 'in a subscript');
+  assert.strictEqual(unc('js', "  return [s, t];", "  return [s, t,];"), null, 'a trailing comma in an array');
+  assert.strictEqual(unc('js', "  t = t.trim()\n  return t;", "  t = t.trim();\n  return t;"), null, 'a statement-ending `;`');
+  assert.strictEqual(unc('py', "    return f(s, t)", "    return f(s, t,)"), null, 'a trailing comma in a call');
+  assert.strictEqual(unc('py', "    return [s, t]", "    return [s, t,]"), null, 'a trailing comma in a list');
+  assert.strictEqual(unc('py', "    t = t.strip()\n    return t", "    t = t.strip(); t = t[:9]\n    return t"), null, 'joins two simple statements');
 });
 
 test('editMutants: a moved argument-list bracket stands only on its own call or a prefix operator right before it (AUDIT-26 H1, H2)', () => {

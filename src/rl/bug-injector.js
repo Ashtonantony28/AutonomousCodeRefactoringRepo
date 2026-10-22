@@ -918,7 +918,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape.nodes);
+  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape.nodes, lang);
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
@@ -931,16 +931,16 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
 // A name with no read of its own (a binding, key or keyword argument) needs
 // a covered read of the same name, and `=` / `const` / `let` / `var` the
 // covered token right after them. Commas, semicolons, colons, regex
-// delimiters and whitespace need no cover, and neither do brackets and
-// Python indentation that frame only inserted code. A bracket or a
-// statement's indentation that frames kept code (a block's extent, an
-// operand's scope) needs a site inside the structure it changes (the
-// bracket pair, the re-indented line) or, for an argument list, the use
-// site of its call. A quote that starts no lexView string is never covered.
+// delimiters and whitespace need no cover (unless `structural`), and neither
+// do brackets and Python indentation that frame only inserted code. A
+// bracket or a statement's indentation that frames kept code (a block's
+// extent, an operand's scope) is covered only by its own call's use site or
+// a dropped prefix operator right before it, never by a sibling inside it.
+// A quote that starts no lexView string is never covered.
 const BRACKET = /^[()[\]{}]$/;
 const SEP = /^[,;:]$/;
 const BOUND = /^(?:=|const|let|var)$/;
-function uncoveredToken(src, hunks, out, names, litToks, view, nodes) {
+function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
   const nameAt = new Set(names.flat().map(t => t.at));
   const bySite = new Map();
   for (const m of out) {
@@ -958,7 +958,6 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes) {
   };
   const own = (x, a, b) => { if (x.use < 0 || x.use === a) return true; const o = owner(a, b); return !!o && o[0] <= x.use && x.use < o[1]; };
   const covers = (a, b) => spans.some(x => x.s <= a && b <= x.e && own(x, a, b));
-  const inside = (a, b) => spans.some(x => a <= x.s && x.e <= b);
   const ins = hunks.flatMap(h => h.ranges).sort((x, y) => x[0] - y[0]);
   const insAt = new Set(ins.map(r => r[0]));
   // Every non-space character of [a, b) is inserted.
@@ -976,6 +975,35 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes) {
     if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
+  // A `;` or `,` that changes statement or value structure: JS `;` as the
+  // empty body of an `if` / `else` / loop head or before a line ASI would
+  // have joined; Python `;` on a compound statement's line (joins its suite)
+  // or a trailing comma that makes a tuple.
+  const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
+  const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
+  const structural = (a, text) => {
+    if (lang !== 'python') {
+      if (text !== ';') return false;
+      const p = prevCode(a);
+      if (/\b(?:else|do)$/.test(code.slice(0, p + 1))) return true;
+      if (code[p] === ')' && pair.has(p) && /\b(?:if|for|while)\s*$/.test(code.slice(0, pair.get(p)))) return true;
+      return /\n/.test(code.slice(a + 1, nextCode(a + 1))) && /^[([`+\-/]/.test(code[nextCode(a + 1)] || '');
+    }
+    if (text === ';') return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\b/.test(code.slice(code.lastIndexOf('\n', a - 1) + 1, a));
+    if (text !== ',') return false;
+    const n = nextCode(a + 1), q = code[n];
+    let o = -1;
+    for (let i = a - 1, d = 0; i >= 0; i--) {
+      if (')]}'.includes(code[i])) d++;
+      else if ('([{'.includes(code[i])) { if (!d) { o = i; break; } d--; }
+    }
+    if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
+    if (!')]}'.includes(q || '')) return false;
+    // Applied to a value (a call or subscript), not a display or grouping.
+    const head = code.slice(0, prevCode(o) + 1);
+    const applied = /[\w)\]'"]$/.test(head) && !/\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head);
+    return code[o] === '(' ? !applied : code[o] === '[' && applied;
+  };
   const strAt = new Set(view.lits.filter(l => l.kind === 'string').map(l => l.s));
   const toks = [];
   hunks.forEach((h, hunk) => h.ranges.forEach(([a, b]) => {
@@ -994,12 +1022,13 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes) {
       }
       const p = pair.get(q);
       const [o, c] = p === undefined ? [q, q] : q < p ? [q, p] : [p, q];
-      if (p === undefined || !fresh(o, c + 1)) push(p !== undefined && (inside(o, c + 1) || applied(o, c)));
+      if (p === undefined || !fresh(o, c + 1)) push(p !== undefined && applied(o, c));
     } else if (!text.trim()) {
       let le = src.indexOf('\n', a);
       if (le < 0) le = src.length;
-      if (!depth.get(a) && !fresh(a, le)) push(inside(a, le));
+      if (!depth.get(a) && !fresh(a, le)) push(false);
     } else if (!SEP.test(text)) push(covers(a, b), nameAt.has(a));
+    else if (structural(a, text)) push(false);
   }));
   const read = new Set(toks.filter(t => t.name && t.ok).map(t => t.text));
   for (const t of toks) if (t.name && !t.ok) t.ok = read.has(t.text);

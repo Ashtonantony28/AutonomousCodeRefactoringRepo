@@ -268,8 +268,12 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   whitespace needs a kill that covers it, operators and keywords included;
   a token with no mutant of its own is covered only by a use site inside
   its own operand, never by one wrapping it. A bracket or indentation that
-  changes structure (not one that only frames inserted code) needs a kill
-  inside that bracket pair or line. Shapes with no mutant are rejected, not
+  changes structure (not one that only frames inserted code) is covered
+  only by its own call's use site or a dropped prefix operator right before
+  it, never by a sibling kill inside it; a `;` or `,` that changes
+  structure (an empty `if` / `else` / loop body, a line ASI would join, a
+  Python `;` joining a suite, a trailing comma that makes a tuple) is no
+  punctuation and needs the same. Shapes with no mutant are rejected, not
   carried: a renamed or moved object key or keyword argument with no
   inserted read of the same name, a regex class bracket, names in type
   annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or

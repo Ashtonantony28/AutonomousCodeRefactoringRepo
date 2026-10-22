@@ -11,6 +11,8 @@
 // tokens of its interpolations, a JS regex literal is its delimiters, body
 // atoms and flags. Strings and numbers compare by value when only their
 // spelling differs ('a' / "a", 120 / 0x78): a respelled literal is no change.
+// A numeric token with no computable value (`0x1e+6000`, `6e3.toFixed`)
+// compares by its text.
 
 const MAX_CELLS = 4e6;
 const NUM = String.raw`(?:\d|\.\d)(?:[\w.]|(?<=\d[eE])[+-])*`;
@@ -205,14 +207,15 @@ function linesOf(code, lo, hi, lang) {
   return out;
 }
 
-// Comparison key of a token: a number's value, a string's value when it has
-// no escapes (and, in Python, no `f` prefix), else its text.
+// Comparison key of a token: a number's value (its text when that is NaN),
+// a string's value when it has no escapes (and, in Python, no `f` prefix), else its text.
 function valueKey(t, lang) {
   if (/^\.?\d/.test(t)) {
     const n = t.replace(/_/g, '');
     try {
-      if (lang !== 'python') return /n$/.test(n) ? `\u0005${BigInt(n.slice(0, -1))}n` : /^0\d/.test(n) ? t : `\u0005${Number(n)}`;
+      if (lang !== 'python') return /n$/.test(n) ? `\u0005${BigInt(n.slice(0, -1))}n` : /^0\d/.test(n) ? t : Number.isNaN(Number(n)) ? t : `\u0005${Number(n)}`;
       if (/^(?:0[xob][\da-f]+|\d+)$/i.test(n)) return `\u0005${BigInt(n)}`;
+      if (Number.isNaN(Number(n))) return t;
       if (!/j$/i.test(n)) return `\u0005${Number(n)}.0`;
     } catch { /* not a number */ }
     return t;

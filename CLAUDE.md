@@ -80,10 +80,12 @@ saturation figures are reported on the dashboard as a spend indicator only.
     closing a multi-line template / triple-quoted string gets the literal's
     tokens: a template literal or f-string is its text parts and the tokens
     of its `${}` / `{}` interpolations; a JS regex literal is its body atoms
-    and flags; any other string (backslash-continued ones too) is exactly
-    one `lexView` literal, a quote that starts none is no evidence, and a
+    and flags; any other string (backslash-continued ones too; a `\` +
+    CRLF continuation is mis-lexed and fails closed) is exactly one
+    `lexView` literal, a quote that starts none is no evidence, and a
     literal respelled to the same value (`'a'` → `"a"`, `120` → `0x78`) is
-    no change. A pure insertion or deletion slides to its leftmost
+    no change (a number with no computable value, `0x1e+6000`,
+    `6e3.toFixed`, compares by its text). A pure insertion or deletion slides to its leftmost
     bracket-balanced place, preferring one that starts with an operator or
     separator (`.f(x)` inserted, not `f(x).`; `, g(x)` after `g(x)`, not
     `g(x), `). A *site* is one
@@ -103,7 +105,11 @@ saturation figures are reported on the dashboard as a spend indicator only.
     for the site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers
     `0`, never `1000`. **Fail closed per token:** every inserted or changed
     token except brackets, commas, semicolons, colons, regex delimiters and
-    whitespace must lie inside the span every mutant of one site changes
+    whitespace (a `;` or `,` that changes structure is not exempt: JS `;`
+    as the empty body of an `if` / `else` / `for` / `while` / `do` head or
+    before a line ASI would join; Python `;` on a compound statement's line,
+    a trailing comma at statement level, in a grouping paren or a
+    subscript) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
@@ -111,9 +117,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
     no mutant of its own is covered by a use site only when that read is
     inside the token's own expression (its operand), never by a wrapper
     around it. A changed bracket or line indentation (one that does not just
-    frame inserted code) needs a site span inside that bracket pair or line
-    (or the call whose use site ends at it, or a dropped prefix operator
-    right before it). An inserted token nothing covers (an operator or
+    frame inserted code) is covered only by the call whose use site ends at
+    it or a dropped prefix operator right before it; a sibling site inside
+    the bracket pair or line never stands in. An inserted token nothing covers (an operator or
     keyword with no mutant: `typeof`, `=>`, `@`, a Python ternary, a new
     `def`, a moved bracket or indentation) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
