@@ -223,13 +223,15 @@ function mutateAt(src, code, op, m, lang, nodes) {
   const at = m.index;
   if (op.ast) {
     const n = nodes()[op.ast].get(at);
-    return n ? { edits: [[n[0], 0, '!('], [n[1], 0, ')']], lo: n[0], hi: n[1], wrap: n } : null;
+    return n ? { edits: [[n[0], 0, '!('], [n[1], 0, ')']], lo: n[0], hi: n[1] } : null;
   }
   if (op.wrap) {
     const open = at + m[0].length - 1;
-    const close = polyglot.matchBracket(code, open);
-    if (close < 0) return null;
-    return { edits: [[open + 1, 0, op.wrap[0]], [close, 0, op.wrap[1]]], lo: open + 1, hi: close, wrap: [open + 1, close] };
+    let a = open + 1, b = polyglot.matchBracket(code, open);
+    if (b < 0) return null;
+    while (a < b && /\s/.test(code[a])) a++;
+    while (b > a && /\s/.test(code[b - 1])) b--;
+    return { edits: [[a, 0, op.wrap[0]], [b, 0, op.wrap[1]]], lo: a, hi: b };
   }
   if (op.pyCond) {
     const from = at + m[0].length;
@@ -242,13 +244,14 @@ function mutateAt(src, code, op, m, lang, nodes) {
       else if (depth <= 0 && (c === ':' || c === '\n')) break;
     }
     if (code[j] !== ':' || j === from) return null;
-    return { edits: [[from, j - from, 'not (' + src.slice(from, j).trimEnd() + ')']], lo: from, hi: j, wrap: [from, from + src.slice(from, j).trimEnd().length] };
+    const cond = src.slice(from, j).trimEnd();
+    return { edits: [[from, cond.length, `not (${cond})`]], lo: from, hi: from + cond.length };
   }
   if (op.string) {
     if (IMPORT_BEFORE.test(code.slice(Math.max(0, at - 24), at))) return null;
     const end = at + m[0].length;
     if (lang === 'python' && (code[at - 1] === m[1] || code[end] === m[1])) return null; // triple quote
-    return { edits: [[end - 1, 0, 'x']], lo: end - 1, hi: end - 1, pad: end };
+    return { edits: [[end - 1, 0, 'x']], lo: end - 1, hi: end - 1 };
   }
   return { edits: [[at, m[0].length, op.to(m[0])]], lo: at, hi: at + m[0].length };
 }
@@ -330,7 +333,7 @@ around = {}
 if '\\r' not in src.replace('\\r\\n', ''):
     spans = []
     try:
-        stack = list(ast.parse(src).body)
+        stack = list(ast.parse(src.removeprefix('\\ufeff')).body)
     except Exception:
         stack = []
     while stack:
@@ -344,7 +347,7 @@ if '\\r' not in src.replace('\\r\\n', ''):
             around.setdefault(need[k], []).append((a, b))
 def parses(text):
     try:
-        ast.parse(text)
+        ast.parse(text.removeprefix('\\ufeff'))
         return True
     except Exception:
         return False
@@ -390,7 +393,6 @@ const KEYWORDS = {
     'import in is lambda nonlocal not or pass raise return try while with yield match case').split(' '))
 };
 const IDENT = /^[A-Za-z_$][\w$]*$/;
-const VALUES = /^(?:None|True|False|null|true|false)$/;
 
 // ---------- Use sites of inserted references ----------
 // An inserted identifier or member the edit reads is perturbed where the
@@ -419,6 +421,13 @@ const TYPE_KEYS = new Set(['typeAnnotation', 'returnType', 'typeParameters', 'su
 const MEMBER = /^(?:Optional)?MemberExpression$/;
 const CALL = /^(?:Optional)?CallExpression$|^NewExpression$/;
 
+// Whether the children of n under `key` are in a binding (or no-read) position.
+function childBind(n, key, bind) {
+  const noRef = (BINDS[n.type] || []).includes(key) || (n.type === 'UnaryExpression' && /^(?:typeof|delete)$/.test(n.operator)) ||
+    (key === 'key' && !n.computed) || (key === 'local' || key === 'exported' || key === 'imported');
+  return noRef || ((n.type === 'AssignmentPattern' && key === 'right') || (key === 'key' && n.computed) ? false : bind);
+}
+
 // JS (babel): `toks` ([s, e) of inserted identifiers) -> Map(s -> { use: [s, e],
 // text }) for those the edit reads, or null when the file does not parse.
 // The value of a read is the identifier with its member chain, up to a call:
@@ -446,9 +455,7 @@ function jsUses(src, file, toks) {
     if (/^(?:Import|Export)\w*Specifier$|^TS|^JSX|TypeAnnotation$/.test(n.type)) continue;
     for (const key of Object.keys(n)) {
       if (AST_SKIP.has(key) || TYPE_KEYS.has(key)) continue;
-      const noRef = (BINDS[n.type] || []).includes(key) || (n.type === 'UnaryExpression' && /^(?:typeof|delete)$/.test(n.operator)) ||
-        (key === 'key' && !n.computed) || (key === 'local' || key === 'exported' || key === 'imported');
-      const b = noRef || ((n.type === 'AssignmentPattern' && key === 'right') || (key === 'key' && n.computed) ? false : bind);
+      const b = childBind(n, key, bind);
       for (const c of [].concat(n[key])) if (c && typeof c.type === 'string') stack.push([c, n, key, b]);
     }
   }
@@ -480,7 +487,7 @@ function jsUses(src, file, toks) {
     } else if (p.type === 'ObjectProperty' && p.shorthand) rep = `${n.name}: ${JS_PERTURB(n.name)}`;
     else if (p.type === 'TaggedTemplateExpression' && k === 'tag') { u = p; rep = JS_PERTURB(text(u)); } else rep = JS_PERTURB(text(u));
     if (up.get(u)[0].type === 'ExpressionStatement') rep = 'void 0';
-    out.set(n.start, { use: [u.start, u.end], text: rep, ...(p.type === 'ObjectProperty' && p.shorthand ? { short: `${n.name}: ` } : {}) });
+    out.set(n.start, { use: [u.start, u.end], text: rep });
   }
   return out;
 }
@@ -504,16 +511,55 @@ function jsNodes(src, file, code) {
   return out;
 }
 
+// JS switch targets and node spans overlapping `regions` -> { targets, nodes }
+// or null when the file does not parse. A target is an expression another
+// value can stand in for ([s, e, 'expr']; one at the start of an expression
+// statement is that statement's expression, [s, e, 'stmt'], switched as a
+// statement: a leading parenthesis could join the line before) or a `return`
+// with a value ([s, e, 'block']). No target: binding positions, plain keys and
+// member names, a member callee or tag (its `this`), a link of an optional
+// chain, a `typeof` / `delete` operand, a shorthand value, a template's quasi
+// and import sources. nodes: [s, e] of every node. hoist: where the
+// switch's module-level binding goes ([offset, form]: 'stmt' before the
+// first statement after any directive prologue / shebang), or null.
+const SWITCH_EXPR = /Expression$|(?<!Directive)Literal$|^Identifier$/;
+const fixed = (n, p, k) => /^(?:JSX|TS)/.test(n.type) || (k === 'key' && !p.computed) || (k === 'property' && MEMBER.test(p.type) && !p.computed) ||
+  (MEMBER.test(n.type) && (k === 'callee' || k === 'tag')) || k === 'quasi' || (/^Optional/.test(p.type) && (k === 'object' || k === 'callee')) ||
+  (p.type === 'ObjectProperty' && p.shorthand) || (k === 'source' && /Declaration$/.test(p.type));
+function jsShape(src, file, regions) {
+  const { ast } = require('../validation/ast-checker').parseJs(src, file);
+  if (!ast) return null;
+  const targets = [], nodes = [];
+  const stack = [[ast.program, null, null, false, null]];
+  while (stack.length) {
+    const [n, p, k, bind, es] = stack.pop();
+    if (!regions.some(([a, b]) => n.start < b && n.end > a)) continue;
+    nodes.push([n.start, n.end]);
+    if (SWITCH_EXPR.test(n.type) && !bind && !fixed(n, p, k)) targets.push(es && es.start === n.start ? [es.expression.start, es.expression.end, 'stmt'] : [n.start, n.end, 'expr']);
+    else if (n.type === 'ReturnStatement' && n.argument) targets.push([n.start, n.end, 'block']);
+    if (/^(?:Import|Export)\w*Specifier$|^TS|^JSX|TypeAnnotation$/.test(n.type)) continue;
+    const stmt = n.type === 'ExpressionStatement' ? n : es;
+    for (const key of Object.keys(n)) {
+      if (AST_SKIP.has(key) || TYPE_KEYS.has(key)) continue;
+      const b = childBind(n, key, bind);
+      for (const c of [].concat(n[key])) if (c && typeof c.type === 'string') stack.push([c, n, key, b, stmt]);
+    }
+  }
+  const first = ast.program.body[0];
+  return { targets, nodes, hoist: first ? [first.start, 'stmt'] : null };
+}
+
 // Python (ast, one python3 run): as jsUses, with offsets converted from
 // UTF-8 columns. An `await` is part of the use it awaits; `self`, `cls`,
 // imported and capitalised names are namespaces.
 const PY_USES = `import ast, json, sys
 req = json.load(sys.stdin)
-src = req['src']
+bom = int(req['src'][:1] == '\\ufeff')
+src = req['src'][bom:]
 lines = src.split('\\n')
 def u16(s):
     return len(s.encode('utf-16-le', 'surrogatepass')) // 2
-starts = [0]
+starts = [bom]
 for l in lines:
     starts.append(starts[-1] + u16(l) + 1)
 def off(ln, col):
@@ -583,15 +629,53 @@ for n in ast.walk(tree):
     if isinstance(up.get(u), ast.Await):
         u = up[u]
     out.append([at[0], span(u), isinstance(up.get(u), ast.Expr), skip])
-print(json.dumps(out))
+fixed = set()
+for n in ast.walk(tree):
+    if isinstance(n, ast.JoinedStr):
+        fixed.update(c for c in ast.walk(n) if c is not n)
+    elif isinstance(n, getattr(ast, 'match_case', ())):
+        fixed.update(ast.walk(n.pattern))
+targets, nodes = [], []
+for n in ast.walk(tree):
+    if getattr(n, 'end_col_offset', None) is None:
+        continue
+    s = span(n)
+    if not any(s[0] < b and s[1] > a for a, b in req['regions']):
+        continue
+    nodes.append(s)
+    if n in fixed:
+        continue
+    if isinstance(n, ast.expr) and not isinstance(n, (ast.Starred, ast.Slice, ast.FormattedValue)) and not isinstance(getattr(n, 'ctx', None), (ast.Store, ast.Del)):
+        targets.append(s + ['expr', ''])
+    elif isinstance(n, ast.Return) and n.value is not None:
+        head = lines[n.lineno - 1].encode('utf-8', 'surrogatepass')[:n.col_offset].decode('utf-8', 'replace')
+        tail = lines[n.end_lineno - 1].encode('utf-8', 'surrogatepass')[n.end_col_offset:].decode('utf-8', 'replace').strip()
+        if not head.strip() and tail[:1] in ('', '#'):
+            targets.append(s + ['block', head])
+body = tree.body
+i = 1 if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str) else 0
+while i < len(body) and isinstance(body[i], ast.ImportFrom) and body[i].module == '__future__':
+    i += 1
+if i:
+    hoist = [off(body[i - 1].end_lineno, body[i - 1].end_col_offset), 'after']
+elif body:
+    hoist = [starts[min([body[0].lineno] + [d.lineno for d in getattr(body[0], 'decorator_list', [])]) - 1], 'line' if hasattr(body[0], 'body') else 'stmt']
+else:
+    hoist = None
+print(json.dumps({'uses': out, 'targets': targets, 'nodes': nodes, 'hoist': hoist}))
 `;
-function pyUses(src, toks, timeoutMs = 10_000) {
-  const r = spawnSync('python3', ['-I', '-c', PY_USES], { input: JSON.stringify({ src, toks }), encoding: 'utf8', timeout: Math.max(1, timeoutMs), maxBuffer: 16 * 1024 * 1024 });
-  let rows;
-  try { rows = JSON.parse(r.stdout); } catch { return null; }
-  if (!Array.isArray(rows)) return null;
+// -> { uses: Map (as jsUses), targets, nodes (as jsShape; a target is an
+// expression outside an f-string or match pattern, or a `return` alone on
+// its line: [s, e, 'block', indentation]), hoist (as jsShape) } or null when the check did not
+// complete or the file does not parse.
+function pyShape(src, toks, regions, timeoutMs = 10_000) {
+  const r = spawnSync('python3', ['-I', '-c', PY_USES], { input: JSON.stringify({ src, toks, regions }), encoding: 'utf8', timeout: Math.max(1, timeoutMs), maxBuffer: 64 * 1024 * 1024 });
+  let res;
+  try { res = JSON.parse(r.stdout); } catch { return null; }
+  if (!res || !Array.isArray(res.uses)) return null;
   const text = ([s, e]) => src.slice(s, e);
-  return new Map(rows.map(([at, use, stmt, skip]) => [at, { use, text: stmt ? 'None' : skip ? `(${text(skip)})` : PY_PERTURB(text(use)) }]));
+  const uses = new Map(res.uses.map(([at, use, stmt, skip]) => [at, { use, text: stmt ? 'None' : skip ? `(${text(skip)})` : PY_PERTURB(text(use)) }]));
+  return { uses, targets: res.targets, nodes: res.nodes, hoist: res.hoist };
 }
 
 // Inserted identifier tokens of a hunk the edit may read: [{ at, end, name, was }].
@@ -637,10 +721,10 @@ function literalTokens(lits) {
 // Mutant of a literal sub-token: 'x' appended to a template / f-string text
 // part; a regex flag dropped, a quantifier's bound plus one, any other atom
 // dropped (replaced by `(?!)` when that leaves no valid regex).
-// -> { edits, lo, hi, pad } or null.
+// -> { edits, lo, hi } or null.
 function literalMutant(src, t) {
   const [s, e, , te] = t.at;
-  if (t.kind === 'part') return { mutation: 'string_literal', edits: [[te, 0, 'x']], lo: te, hi: te, pad: t.lit.e };
+  if (t.kind === 'part') return { mutation: 'string_literal', edits: [[te, 0, 'x']], lo: te, hi: te };
   const { body, flags } = t.lit;
   const flagText = src.slice(flags.length ? flags[0][0] : body[1] + 1, t.lit.e);
   const valid = (b, f) => { if (!b) return false; try { new RegExp(b, f); return true; } catch { return false; } };
@@ -653,7 +737,7 @@ function literalMutant(src, t) {
   const quant = src.slice(s, e).match(/^\{(\d+)(,?)(\d*)\}(\??)$/);
   const bumped = quant && (quant[3] ? `{${quant[1]},${Number(quant[3]) + 1}}` : `{${Number(quant[1]) + 1}${quant[2]}}`) + quant[4];
   for (const ins of bumped ? [bumped] : ['', '(?!)']) {
-    if (valid(bodyText.slice(0, rel(s)) + ins + bodyText.slice(rel(e)), flagText)) return { mutation: 'regex_literal', edits: [[s, e - s, ins]], lo: s, hi: e, pad: t.lit.e };
+    if (valid(bodyText.slice(0, rel(s)) + ins + bodyText.slice(rel(e)), flagText)) return { mutation: 'regex_literal', edits: [[s, e - s, ins]], lo: s, hi: e };
   }
   return null;
 }
@@ -673,25 +757,25 @@ const EDIT_MAX_SITES = 12;
 // another identifier in its stretch another (`revert`: the old name back).
 // Template / f-string text parts and regex atoms and flags are sites of
 // their own (literalMutant).
-// Fail closed per token (with `before`): every inserted name, number,
-// string, template / f-string text part and regex atom or flag must be
-// covered: by a mutant of its own site, or inside the expression a use-site
-// mutant perturbs (`cover`); a name with no read of its own (a binding, key
-// or keyword argument) by a covered read of the same name. Since every site
-// needs a kill and every mutant of a site covers the same tokens, a kill of
-// each site covers each token. An inserted token nothing covers gives no
-// mutants, marked `uncovered` ({ text, line, hunk }).
+// Fail closed per token (with `before`, uncoveredToken): an inserted token
+// nothing covers gives no mutants, marked `uncovered` ({ text, line, hunk }).
 // An edit over EDIT_MAX_HUNKS hunks, EDIT_MAX_CHARS changed characters or
 // EDIT_MAX_SITES sites in one hunk (or one too large to diff) gets no
 // mutants and the result is marked `capped`; a Python parse or use check
-// that did not finish within `timeoutMs` (default 10 s) gives none either,
-// marked `unchecked`. Each mutant is parse-checked on the smallest statement
-// around it (jsParseCheck / parsesPython), not the file. A reference with
-// no parse-valid use-site mutant gives none, marked `unmutated_ref`.
-// A mutant that adds text carries `sham`: src with as many spaces added
-// after the mutated code (after the literal, for one inside a literal), a
-// behaviour-preserving control of the same size change.
-// -> [{ mutation, src, sham?, line, hunk, site, cover?, ref?, revert? }] (site: the token's offset in src)
+// or the JS parse checks that did not finish within `timeoutMs` (default
+// 10 s) give none either, marked `unchecked`, and so does a JS file that
+// does not parse.
+// Each mutant is a switch: the smallest expression holding its change (for
+// a dropped `return`, the statement; jsShape / pyShape) becomes
+// `(<on> ? mutated : original)`, where `<on>` is a module-level binding
+// that reads `env` (one variable, named after nothing in src, set to '1')
+// once per module load, so `src` runs the mutant only while `env` is set,
+// and the same text with it unset is the mutant's control. A change with no switch
+// target has no mutant. Each switch is parse-checked on the smallest
+// statement around it (jsParseCheck / parsesPython), not the file. A
+// reference with no parse-valid use-site mutant gives none, marked
+// `unmutated_ref`.
+// -> [{ mutation, src, env, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -710,20 +794,26 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= i) lo = mid; else hi = mid - 1; }
     return lo + 1;
   };
+  // Each hunk's lines: [start of its first changed line, end of its last).
+  const bounds = hunks.map((h) => {
+    if (!h.ranges.length) return null;
+    const lo = src.lastIndexOf('\n', Math.max(0, h.ranges[0][0] - 1)) + 1;
+    const stop = src.indexOf('\n', Math.max(lo, h.ranges[h.ranges.length - 1][1] - 1));
+    return [lo, stop < 0 ? src.length : stop];
+  });
   const blit = diffed ? new Set(literalTokens(lexView(before, lang).lits).keys()) : new Set();
   const names = hunks.map(h => insertedNames(src, before || '', h, lang, litToks, blit));
   const toks = names.flat().map(t => [t.at, t.end]);
-  const uses = !toks.length ? new Map() : lang === 'python' ? pyUses(src, toks, timeoutMs) : jsUses(src, file, toks);
+  const regions = bounds.filter(Boolean);
+  const shape = lang === 'python' ? pyShape(src, toks, regions, timeoutMs) : jsShape(src, file, regions);
+  const uses = shape && (lang === 'python' ? shape.uses : !toks.length ? new Map() : jsUses(src, file, toks));
   if (!uses) return Object.assign([], { unchecked: true });
   const candidates = [];
   const needed = [];
   for (let hi = 0; hi < hunks.length; hi++) {
     const h = hunks[hi];
     if (!h.ranges.length) continue;
-    const lo = src.lastIndexOf('\n', Math.max(0, h.ranges[0][0] - 1)) + 1;
-    const last = h.ranges[h.ranges.length - 1][1];
-    let stop = src.indexOf('\n', Math.max(lo, last - 1));
-    if (stop < 0) stop = src.length;
+    const [lo, stop] = bounds[hi];
     // Per site (the inserted token a match starts in), per operator: up to max matches.
     const sites = new Map();
     EDIT_OPS[lang].forEach((op, oi) => {
@@ -749,7 +839,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const [a] of h.ranges) {
       const t = litToks.get(a);
       const mut = t && t.kind !== 'delim' && literalMutant(src, t);
-      if (mut) lits.push({ ...mut, span: [a, t.at[1]], wrap: [t.lit.s, t.lit.e], hunk: hi, site: a, line: lineOf(a) });
+      if (mut) lits.push({ ...mut, span: [a, t.at[1]], hunk: hi, site: a, line: lineOf(a) });
     }
     // Use sites: one per distinct use, plus one per replaced name.
     const refs = [];
@@ -757,13 +847,13 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const t of names[hi]) {
       const u = uses.get(t.at);
       if (!u) continue;
-      const base = { hunk: hi, site: t.at, ref: t.name, line: lineOf(t.at), wrap: u.short ? [...u.use, u.short] : u.use };
+      const base = { hunk: hi, site: t.at, ref: t.name, line: lineOf(t.at) };
       if (t.was === '') return Object.assign([], { unmutated_ref: { name: t.name, line: base.line, hunk: hi } });
       if (!seen.has(u.use.join(':'))) {
         seen.add(u.use.join(':'));
-        refs.push({ ...base, mutation: 'use_site', span: u.use, edits: [[u.use[0], u.use[1] - u.use[0], u.text]], lo: u.use[0], hi: u.use[1] });
+        refs.push({ ...base, mutation: 'use_site', span: u.use, edits: [[u.use[0], u.use[1] - u.use[0], u.text]] });
       }
-      if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, span: [t.at, t.end], edits: [[t.at, t.end - t.at, t.was]], lo: t.at, hi: t.end });
+      if (t.was) refs.push({ ...base, mutation: 'revert_reference', revert: true, span: [t.at, t.end], edits: [[t.at, t.end - t.at, t.was]] });
     }
     if (sites.size + lits.length + refs.length > EDIT_MAX_SITES) return Object.assign([], { capped: true });
     needed.push(...refs);
@@ -776,109 +866,167 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   let jsn;
   const nodes = () => jsn || (jsn = jsNodes(src, file, code));
-  const atom = new RegExp(String.raw`[A-Za-z_$][\w$]*|(?:\d|\.\d)(?:[\w.]|(?<=\d[eE])[+-])*`, 'y');
-  // [s, e) of the expression atom (literal, bracket group, name, number) at i, or null.
-  const litAt = new Map(view.lits.map(l => [l.s, l]));
-  const atomAt = (i) => {
-    const l = litAt.get(i);
-    if (l) return [l.s, l.e];
-    if ('([{'.includes(code[i])) { const e = polyglot.matchBracket(code, i); return e < 0 ? null : [i, e + 1]; }
-    atom.lastIndex = i;
-    const w = atom.exec(code);
-    return w ? [i, i + w[0].length] : null;
-  };
-  // An operator match's sham wraps the match itself when it is an atom,
-  // else its right operand, else the name before it.
-  const atomNear = ([s, e]) => {
-    const self = atomAt(s);
-    if (self && self[1] === e && !(KEYWORDS[lang].has(src.slice(s, e)) && !VALUES.test(src.slice(s, e)))) return self;
-    let i = e;
-    while (code[i] === ' ' || code[i] === '\t') i++;
-    const r = atomAt(i);
-    if (r) return r;
-    let j = s;
-    while (code[j - 1] === ' ' || code[j - 1] === '\t') j--;
-    let b = j;
-    while (b > 0 && /[\w$]/.test(code[b - 1])) b--;
-    return b < j ? [b, j] : null;
-  };
   const build = (c) => {
     if (c.built) return c.built;
     const mut = mutateAt(src, code, c.op, c.m, lang, nodes);
     if (!mut) return null;
     const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
-    return { wrap: atomNear(span), ...mut, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
+    return { edits: mut.edits, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
-  // Sham edits of a mutant that adds text: its wrap in redundant parentheses
-  // (as many characters as the mutant adds, or one more) and as many spaces
-  // at `pad`. [] when it adds nothing, null when it has no wrap.
-  const shamOf = ({ edits, hi, pad = hi, wrap }) => {
-    const grow = edits.reduce((n, [, del, ins]) => n + ins.length - del, 0);
-    if (grow <= 0) return [];
-    if (!wrap) return null;
-    const [a, e, pre = ''] = wrap;
-    const n = Math.max(1, grow - pre.length), k = Math.ceil(n / 2);
-    // Past 16 characters (parsers cap nesting) a number takes the rest: (10…0, x) / (10…0, x)[1].
-    const [open, close] = n <= 16 ? ['('.repeat(k), ')'.repeat(k)]
-      : lang === 'python' ? [`(1${'0'.repeat(Math.max(0, n - 7))},`, ')[1]'] : [`(1${'0'.repeat(Math.max(0, n - 4))},`, ')'];
-    const parens = pre ? [[a, e - a, pre + open + src.slice(a, e) + close]] : [[a, 0, open], [e, 0, close]];
-    return [...parens, [pad, 0, ' '.repeat(grow)]].sort((x, y) => x[0] - y[0]);
+  let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
+  for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
+  // The variable is read once per module load, into a module-level binding
+  // the switches test (before any statement but a docstring, `__future__`
+  // import or directive; no target before it).
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '1'` : `var ${on} = globalThis.process.env.${name} === '1';`;
+  const [at, form] = shape.hoist || [src.length, 'stmt'];
+  const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
+  // A mutant's edits as a switch on the smallest target holding them ->
+  // { edits, lo, hi } or null.
+  const switchOf = ({ edits }) => {
+    const lo = edits[0][0], hi = Math.max(...edits.map(([at, del]) => at + del));
+    let t = null;
+    for (const x of shape.targets) if (x[0] <= lo && hi <= x[1] && (lo < hi || (x[0] < lo && lo < x[1])) && (!t || x[1] - x[0] < t[1] - t[0])) t = x;
+    if (!t || t[0] < at) return null;
+    const [s, e, form, ind] = t, o = src.slice(s, e), m = applyEdits(o, edits, s);
+    const text = lang === 'python' ? (form === 'block' ? `if ${on}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${on} else (${o}))`)
+      : form === 'block' ? `if (${on}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${on}) (${m}); else (${o})` : `(${on} ? (${m}) : (${o}))`;
+    return { edits: [[s, e - s, text]], lo: s, hi: e };
   };
-  const shamMut = (edits) => ({ edits, lo: edits[0][0], hi: edits[edits.length - 1][0] });
   const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
   const kept = new Map();
   const out = [];
-  const take = ({ edits, lo, hi, pad, wrap, ...c }, sham) => {
+  const take = ({ edits, lo, hi, ...c }, sw) => {
     kept.set(key(c), (kept.get(key(c)) || 0) + 1);
-    out.push({ ...c, src: applyEdits(src, edits), ...(sham.length ? { sham: applyEdits(src, sham) } : {}) });
+    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: '1' } });
   };
   if (lang === 'python') {
-    // One batch: every candidate and its sham, the first `max` per site where both parse.
-    const built = candidates.map(build).filter(Boolean).map(b => [b, shamOf(b)]).filter(([, sh]) => sh);
-    const batch = built.flatMap(([b, sh]) => (sh.length ? [b, shamMut(sh)] : [b]));
-    const ok = batch.length ? parsesPython(src, batch, lineOf, starts, timeoutMs) : [];
+    // One batch: every candidate's switch, the first `max` per site that parse.
+    const built = candidates.map(build).filter(Boolean).map(b => [b, switchOf(b)]).filter(([, sw]) => sw);
+    const ok = built.length ? parsesPython(src, built.map(([, sw]) => sw), lineOf, starts, timeoutMs) : [];
     if (!ok) return Object.assign([], { unchecked: true });
-    let i = 0;
-    for (const [b, sh] of built) {
-      const good = ok[i] && (!sh.length || ok[i + 1]);
-      i += sh.length ? 2 : 1;
-      if (good && (kept.get(key(b)) || 0) < max) take(b, sh);
-    }
+    built.forEach(([b, sw], i) => { if (ok[i] && (kept.get(key(b)) || 0) < max) take(b, sw); });
   } else {
+    const until = performance.now() + (timeoutMs ?? 10_000);
     const parses = jsParseCheck(src, file);
     for (const c of candidates) {
+      if (performance.now() > until) return Object.assign([], { unchecked: true });
       const b = build(c);
-      const sh = b && shamOf(b);
-      if (sh && (kept.get(key(b)) || 0) < max && parses(b) && (!sh.length || parses(shamMut(sh)))) take(b, sh);
+      const sw = b && (kept.get(key(b)) || 0) < max && switchOf(b);
+      if (sw && parses(sw)) take(b, sw);
     }
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks);
+  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape.nodes, lang);
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 
-// The first inserted token other than punctuation (brackets, commas,
-// semicolons, colons, regex delimiters) and whitespace that no mutant covers
-// -> { text, at, hunk }, or null. A site covers the span every one of its
-// mutants changes (the match, the literal token, the perturbed use).
-const PUNCT = /^[()[\]{},;:]$/;
+// The first inserted token no mutant covers -> { text, at, hunk }, or null.
+// A site covers the span all its mutants change (the match, the literal
+// token, the perturbed use), but a use site covers a token other than its
+// own name only when that name lies in the token's own expression (the
+// smallest of `nodes` holding it): an operand, never an enclosing wrapper.
+// A name with no read of its own (a binding, key or keyword argument) needs
+// a covered read of the same name, and `=` / `const` / `let` / `var` the
+// covered token right after them. Commas, semicolons, colons, regex
+// delimiters and whitespace need no cover (unless `structural`), and neither
+// do brackets and Python indentation that frame only inserted code. A
+// bracket or a statement's indentation that frames kept code (a block's
+// extent, an operand's scope) is covered only by its own call's use site or
+// a dropped prefix operator right before it, never by a sibling inside it.
+// A quote that starts no lexView string is never covered.
+const BRACKET = /^[()[\]{}]$/;
+const SEP = /^[,;:]$/;
 const BOUND = /^(?:=|const|let|var)$/;
-function uncoveredToken(src, hunks, out, names, litToks) {
+function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
   const nameAt = new Set(names.flat().map(t => t.at));
-  const spans = new Map();
+  const bySite = new Map();
   for (const m of out) {
-    const k = `${m.site}${m.revert ? 'r' : ''}`, p = spans.get(k);
-    spans.set(k, p ? [Math.max(p[0], m.span[0]), Math.min(p[1], m.span[1])] : m.span);
+    const k = `${m.site}${m.revert ? 'r' : ''}`, p = bySite.get(k);
+    bySite.set(k, p ? { ...p, s: Math.max(p.s, m.span[0]), e: Math.min(p.e, m.span[1]) }
+      : { s: m.span[0], e: m.span[1], use: m.mutation === 'use_site' ? m.site : -1, prefix: /^drop_(?:unary|not)$/.test(m.mutation) });
   }
-  const covers = (a, b) => [...spans.values()].some(([s, e]) => s <= a && b <= e);
+  const spans = [...bySite.values()];
+  // A call (its use site) or prefix operator (its own site) applied to the bracket pair [o, c].
+  const applied = (o, c) => spans.some(x => x.s < o && (x.use >= 0 ? x.e === c + 1 : x.prefix && x.e <= o && !src.slice(x.e, o).trim()));
+  const owner = (a, b) => {
+    let o = null;
+    for (const n of nodes) if (n[0] <= a && b <= n[1] && (n[0] < a || b < n[1]) && (!o || n[1] - n[0] < o[1] - o[0])) o = n;
+    return o;
+  };
+  const own = (x, a, b) => { if (x.use < 0 || x.use === a) return true; const o = owner(a, b); return !!o && o[0] <= x.use && x.use < o[1]; };
+  const covers = (a, b) => spans.some(x => x.s <= a && b <= x.e && own(x, a, b));
+  const ins = hunks.flatMap(h => h.ranges).sort((x, y) => x[0] - y[0]);
+  const insAt = new Set(ins.map(r => r[0]));
+  // Every non-space character of [a, b) is inserted.
+  const fresh = (a, b) => {
+    for (let c = a, i = 0; c < b; c++) {
+      if (/\s/.test(view.kept[c])) continue;
+      while (i < ins.length && ins[i][1] <= c) i++;
+      if (i >= ins.length || ins[i][0] > c) return false;
+    }
+    return true;
+  };
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map();
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (c === ',') encl.set(i, open.length ? open[open.length - 1] : -1);
+    else if (c === '(' || c === '[' || c === '{') open.push(i);
+    else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
+  }
+  // A `;` or `,` that changes statement or value structure: JS `;` as the
+  // empty body of an `if` / `else` / loop head or before a line ASI would
+  // have joined; Python `;` on a compound statement's line (joins its suite)
+  // or a trailing comma that makes a tuple.
+  const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
+  const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
+  const structural = (a, text) => {
+    if (lang !== 'python') {
+      if (text !== ';') return false;
+      const p = prevCode(a);
+      if (/\b(?:else|do)$/.test(code.slice(0, p + 1))) return true;
+      if (code[p] === ')' && pair.has(p) && /\b(?:if|for|while)\s*$/.test(code.slice(0, pair.get(p)))) return true;
+      return /\n/.test(code.slice(a + 1, nextCode(a + 1))) && /^[([`+\-/]/.test(code[nextCode(a + 1)] || '');
+    }
+    if (text === ';') return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\b/.test(code.slice(code.lastIndexOf('\n', a - 1) + 1, a));
+    if (text !== ',') return false;
+    const n = nextCode(a + 1), q = code[n];
+    const o = encl.get(a) ?? -1;
+    if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
+    if (!')]}'.includes(q || '')) return false;
+    // Applied to a value (a call or subscript), not a display or grouping.
+    const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
+    const applied = /[\w)\]'"]$/.test(head) && !/\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head);
+    return code[o] === '(' ? !applied : code[o] === '[' && applied;
+  };
+  const strAt = new Set(view.lits.filter(l => l.kind === 'string').map(l => l.s));
   const toks = [];
   hunks.forEach((h, hunk) => h.ranges.forEach(([a, b]) => {
     const text = src.slice(a, b), t = litToks.get(a);
-    if (t ? t.kind === 'delim' : !text.trim() || PUNCT.test(text)) return;
-    toks.push({ text, at: a, end: b, hunk, name: !t && nameAt.has(a), ok: covers(a, b) });
+    const push = (ok, name = false) => toks.push({ text, at: a, end: b, hunk, name, ok });
+    if (t) {
+      if (t.kind !== 'delim') push(covers(a, b));
+    } else if (/^['"`]/.test(text) && !strAt.has(a)) push(false);
+    else if (BRACKET.test(text)) {
+      // Of two equal adjacent brackets, the inserted one is the one whose partner is inserted.
+      let q = a;
+      if (!insAt.has(pair.get(a))) for (const d of [-1, 1]) {
+        let j = a + d;
+        while (/\s/.test(code[j] || '')) j += d;
+        if (code[j] === text && !insAt.has(j) && insAt.has(pair.get(j))) q = j;
+      }
+      const p = pair.get(q);
+      const [o, c] = p === undefined ? [q, q] : q < p ? [q, p] : [p, q];
+      if (p === undefined || !fresh(o, c + 1)) push(p !== undefined && applied(o, c));
+    } else if (!text.trim()) {
+      let le = src.indexOf('\n', a);
+      if (le < 0) le = src.length;
+      if (!depth.get(a) && !fresh(a, le)) push(false);
+    } else if (!SEP.test(text)) push(covers(a, b), nameAt.has(a));
+    else if (structural(a, text)) push(false);
   }));
   const read = new Set(toks.filter(t => t.name && t.ok).map(t => t.text));
   for (const t of toks) if (t.name && !t.ok) t.ok = read.has(t.text);

@@ -156,8 +156,8 @@ test('--resume skips the analyzer, processes a pending repair once, no duplicate
   responses.reflexion = {
     file: 'src/greet.js',
     current_code: "console.log('greet', name);",
-    proposed_code: 'console.log("greet", name);',
-    reasoning: 'keep the log message, normalise quotes',
+    proposed_code: "console.log('gr' + 'eet', name);",
+    reasoning: 'keep the log message, split it',
     risk_estimate: 0.1
   };
   installStub(responses);

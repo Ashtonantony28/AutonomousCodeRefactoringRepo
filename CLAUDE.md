@@ -80,8 +80,15 @@ saturation figures are reported on the dashboard as a spend indicator only.
     closing a multi-line template / triple-quoted string gets the literal's
     tokens: a template literal or f-string is its text parts and the tokens
     of its `${}` / `{}` interpolations; a JS regex literal is its body atoms
-    and flags. A pure insertion or deletion slides to its leftmost
-    bracket-balanced place (`.f(x)` inserted, not `f(x).`). A *site* is one
+    and flags; any other string (backslash-continued ones too; a `\` +
+    CRLF continuation is mis-lexed and fails closed) is exactly one
+    `lexView` literal, a quote that starts none is no evidence, and a
+    literal respelled to the same value (`'a'` → `"a"`, `120` → `0x78`) is
+    no change (a number with no computable value, `0x1e+6000`,
+    `6e3.toFixed`, compares by its text). A pure insertion or deletion slides to its leftmost
+    bracket-balanced place, preferring one that starts with an operator or
+    separator (`.f(x)` inserted, not `f(x).`; `, g(x)` after `g(x)`, not
+    `g(x), `). A *site* is one
     inserted/changed token a mutation operator applies to (any numeric
     spelling, decimal/hex/octal/binary/exponent/`_`/BigInt/complex → value
     + 1; comparison, equality, `&&`/`||`/`??`/`and`/`or` swapped; an
@@ -98,13 +105,23 @@ saturation figures are reported on the dashboard as a spend indicator only.
     for the site it mutates: in `slice(0, 1000)` a kill of `0 → 1` covers
     `0`, never `1000`. **Fail closed per token:** every inserted or changed
     token except brackets, commas, semicolons, colons, regex delimiters and
-    whitespace must lie inside the span every mutant of one site changes
+    whitespace (a `;` or `,` that changes structure is not exempt: JS `;`
+    as the empty body of an `if` / `else` / `for` / `while` / `do` head or
+    before a line ASI would join; Python `;` on a compound statement's line,
+    a trailing comma at statement level, in a grouping paren or a
+    subscript) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
-    `const` / `let` / `var` a covered token right after them. An inserted
-    token nothing covers (an operator or keyword with no mutant: `typeof`,
-    `=>`, `@`, a Python ternary, a new `def`) is no evidence
+    `const` / `let` / `var` a covered token right after them. A token with
+    no mutant of its own is covered by a use site only when that read is
+    inside the token's own expression (its operand), never by a wrapper
+    around it. A changed bracket or line indentation (one that does not just
+    frame inserted code) is covered only by the call whose use site ends at
+    it or a dropped prefix operator right before it; a sibling site inside
+    the bracket pair or line never stands in. An inserted token nothing covers (an operator or
+    keyword with no mutant: `typeof`, `=>`, `@`, a Python ternary, a new
+    `def`, a moved bracket or indentation) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
@@ -128,16 +145,21 @@ saturation figures are reported on the dashboard as a spend indicator only.
     names; inside changed code (`includes` → `indexOf(x) !== -1`) it is no
     evidence. A read with no parse-valid use-site mutant is no evidence
     (`tests_insensitive`, `mutation.unmutated_ref`).
-  - **Sham control.** For a mutant that adds text, the kill's third run
-    (the control) is its sham, both pads in one behaviour-preserving edit:
-    as many spaces right after the mutated code (after the literal, for a
-    site inside one), and the site's expression wrapped in at least as many
-    non-space characters (redundant parentheses; past 16 characters a
-    number in a comma expression, `(10…0,x)` / Python `(10…0,x)[1]`). A
-    mutant whose sham does not parse is not used. A test that fails on the
-    sham reads the source, not the value (a size, minified-size or layout
-    check), and is no kill for that site (`mutation.sham_failed`); a sham
-    that passes is the control.
+  - **Same-text switch.** Each mutant is written into the file as a
+    runtime switch on an environment variable around the smallest
+    expression (or a `return` statement) holding the site:
+    `(_k ? (mutant) : (original))`, Python `((mutant) if _k else
+    (original))`, where `_k` (a name the file does not use) is bound once
+    per module load: JS `var _k = globalThis.process.env.K === '1';` before
+    the first statement (after a shebang / directive prologue, no line
+    added), Python `_k = __import__('os').environ.get('K') == '1'` after
+    the docstring and `__future__` imports; a site with no such place (a
+    key, a pattern, a class-member name, code before the binding) has no
+    mutant. Mutant runs set `K=1`; the kill's
+    third run (the control) is the same text with `K` unset, so a test that
+    reads the source (size, word count, layout, a grep) fails or passes
+    alike in both and is no kill (`mutation.control_failed` when no test is
+    left).
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
@@ -157,13 +179,17 @@ saturation figures are reported on the dashboard as a spend indicator only.
   refuses the added reporter, e.g. a delegated script sets one, and the run
   is repeated without it; pytest
   `--junitxml` with `--tb=short`), and a mutant is killed only when a test
-  that passed in the unmutated control run fails in both mutant runs, each
+  that passed in the switch-off control run fails in both mutant runs, each
   of which ran the same set of tests as the control. A run where a module
   failed to load (a test file process crashed, a failure raised from a
   module body — `Module._compile` / `in <module>`, or logged by the load
   hooks every run installs: a preloaded `Module._compile` wrapper, a pytest
   plugin wrapping `__import__` (not `ImportError`); test files and
-  `conftest.py` excluded — or a pytest collection error, whatever the exit
+  `conftest.py` excluded, and a throw caught on purpose is none: logged
+  inside a node:test test or suite callback (CJS `require('node:test')`, a
+  subtest counting as its parent) that passed, elsewhere in a node:test
+  file process that exits 0, or in a pytest test or collected
+  module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
@@ -173,17 +199,19 @@ saturation figures are reported on the dashboard as a spend indicator only.
   the first starts with less than that time + 0.5 s left. Only a failing run
   kills a mutant; a timed-out run is re-run once and counts only if that run
   fails. A kill must reproduce: the same test fails a second mutant run and the
-  unmutated suite then passes (three runs per kill, all inside the same
+  suite then passes with the switch off (three runs per kill, all inside the same
   budget, so suites over about a third of it end `mutation_budget`); a
-  mutant passing its second run is no kill, and an unmutated failure ends
-  the evidence (`tests_insensitive`: a flaky suite). Otherwise `reverted`
+  mutant passing its second run is no kill, and a test failing in the
+  control is none either (a flaky suite). Otherwise `reverted`
   with reason `edit_not_exercised` / `no_coverage_tool` (no test ran the
   edit, whether the suite passed or failed), `coverage_timeout` (coverage
   post-processing overran the test budget), `tests_insensitive` (a site
-  survived, a hunk has no site, or a deleted token is neither observed nor
-  replaced) or `mutation_budget` (the mutant runs did not fit their budget,
+  survived, its failing runs being load failures, `collection_errors`, or
+  failing the switch-off control, `control_failed`; a hunk has no site; an inserted token no
+  mutant covers, `uncovered_token`; a read with no use-site mutant,
+  `unmutated_ref`; or a deleted token is neither observed nor replaced) or `mutation_budget` (the mutant runs did not fit their budget,
   the edit is over 16 change hunks / 32,000 changed characters, or the
-  mutants' parse check did not finish). These five reasons are untested
+  mutants' parse check did not finish in 10 s, JS or Python). These five reasons are untested
   outcomes: no sample, calibration point, reward or Reflexion repair.
 - If `git worktree add` fails (e.g. a user branch named `refactor` blocks
   the `refactor/` ref namespace), it is retried once on `refactor-run/<run_id>`
