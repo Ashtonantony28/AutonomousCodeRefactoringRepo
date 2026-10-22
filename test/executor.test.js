@@ -177,6 +177,21 @@ test('handleSignal removes the in-flight run\'s coverage and bytecode temp dirs 
   await run;
 });
 
+test('handleSignal kills the in-flight test process group (AUDIT-26 H4)', async (t) => {
+  const { runTests } = require('../src/runner/test-runner');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg36-sig-'));
+  t.after(() => env.rm(dir));
+  const pidFile = path.join(dir, 'pid');
+  const child = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 30000)`;
+  const run = runTests({ repoRoot: dir, command: { cmd: process.execPath, args: ['-e', child], framework: 'node:test' }, timeoutMs: 30_000 });
+  await waitFor(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8'));
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
+  handleSignal('SIGTERM', null, { exit: () => {} });
+  const ended = await Promise.race([run.then(() => true), new Promise(r => setTimeout(r, 5000, false))]);
+  assert(ended, 'the test process is still running 5 s after the signal handler');
+});
+
 test('handleSignal flushes the session; an uncaught exception exits 1 (AUDIT-11 H1)', (t) => {
   const { freshSession, sessionPath } = require('../src/utils/checkpoint');
   const repo = env.copyFixture('js-basic');
@@ -195,12 +210,15 @@ for (const signal of ['SIGINT', 'SIGTERM']) test(`${signal} to the CLI mid-test 
   const marker = `refactor-sigint-${crypto.randomBytes(4).toString('hex')}`;
   const pkgPath = path.join(repo, 'package.json');
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-  pkg.scripts.test = `node -e "setTimeout(()=>{},60000)" ${marker}`;
+  // The test process says when it is past start-up (preloads loaded), so the
+  // signal always lands on a running group.
+  const ready = path.join(os.tmpdir(), `${marker}.ready`);
+  pkg.scripts.test = `node -e "require('fs').writeFileSync('${ready}', ''); setTimeout(()=>{},60000)" ${marker}`;
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
   gitInit(repo);
   const before = treeHash(repo);
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'refactor-sigint-state-'));
-  t.after(() => { env.rm(repo); env.rm(stateDir); for (const pid of procsMatching(marker)) { try { process.kill(pid, 'SIGKILL'); } catch { /* */ } } });
+  t.after(() => { env.rm(repo); env.rm(stateDir); env.rm(ready); for (const pid of procsMatching(marker)) { try { process.kill(pid, 'SIGKILL'); } catch { /* */ } } });
 
   const childEnv = { ...process.env, REFACTOR_STATE_DIR: stateDir, STUB_FIXTURE: 'js-basic' };
   delete childEnv.NODE_TEST_CONTEXT;
@@ -213,7 +231,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) test(`${signal} to the CLI mid-test 
 
   const targetState = path.join(stateDir, 'targets', crypto.createHash('sha256').update(path.resolve(repo)).digest('hex'));
   const snapPath = path.join(targetState, 'inflight.json');
-  await waitFor(() => fs.existsSync(snapPath) && procsMatching(marker).length > 0);
+  await waitFor(() => fs.existsSync(snapPath) && fs.existsSync(ready));
   const { repo_root: wtRoot } = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
   assert(wtRoot.startsWith(targetState), 'edits happen in the worktree under the state dir');
   const wtFile = path.join(wtRoot, MATH);
@@ -700,6 +718,18 @@ test('an unrelated token on the edited line is no evidence: a hunk with no mutab
   assert.strictEqual(res.mutation.run, 0);
   assert.strictEqual(res.mutation.uncovered_token_line, 3);
   assertReverted(res, repo, 'src/row.js', before, kept);
+});
+
+test('a hunk with no site at all is reverted: only an exempt separator inserted (AUDIT-26 C1)', async (t) => {
+  const cur = 'function t(a, b) {\n  const v = [a, b];\n  return v;\n}';
+  const prop = 'function t(a, b) {\n  const v = [a, b,];\n  return v;\n}';
+  const { res, repo, before, kept } = await execOn(t, 'src/t.js', cur, prop, 'module.exports = { t };',
+    "const m = require('../src/t');\ntest('t', () => { assert.deepStrictEqual(m.t(5, 1), [5, 1]); });", GATE_DIFF_TEST);
+  assert.strictEqual(res.status, 'reverted', res.stderr_tail);
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.mutants, 0);
+  assert.strictEqual(res.mutation.unmutated_hunk_line, 3);
+  assertReverted(res, repo, 'src/t.js', before, kept);
 });
 
 test('every change hunk needs its own killed mutant', async (t) => {
