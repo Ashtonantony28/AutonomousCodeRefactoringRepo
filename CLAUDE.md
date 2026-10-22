@@ -179,8 +179,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
   module body — `Module._compile` / `in <module>`, or logged by the load
   hooks every run installs: a preloaded `Module._compile` wrapper, a pytest
   plugin wrapping `__import__` (not `ImportError`); test files and
-  `conftest.py` excluded, and a throw caught on purpose is none: logged in a
-  node:test file process that exits 0, or in a pytest test or collected
+  `conftest.py` excluded, and a throw caught on purpose is none: logged
+  inside a node:test test or suite callback (CJS `require('node:test')`, a
+  subtest counting as its parent) that passed, elsewhere in a node:test
+  file process that exits 0, or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.

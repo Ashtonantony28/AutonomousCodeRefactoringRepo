@@ -521,6 +521,21 @@ test('editMutants (Python): the switch binding goes after the docstring and __fu
   }
 });
 
+test('editMutants (Python): a file that starts with a BOM gets switch mutants that load, the BOM kept first (AUDIT-28 M2)', () => {
+  const { spawnSync } = require('child_process');
+  const b = "﻿def label(n):\n    return 'n=' + str(n)\n";
+  const ms = bugInjector.editMutants(b.replace('str(n)\n', "str(n) + '!'\n"), { file: 'app/m.py', before: b });
+  assert(!ms.unchecked && ms.length, 'mutants built');
+  for (const m of ms) {
+    assert(m.src.startsWith('﻿') && m.src.split('﻿').length === 2, JSON.stringify(m.src));
+    const run = (env) => spawnSync('python3', ['-I', '-c', "import sys\nns = {}\nexec(compile(sys.stdin.buffer.read(), 'm.py', 'exec'), ns)\nprint(ns['label'](1))"],
+      { input: Buffer.from(m.src), encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.strictEqual(run({}).stdout.trim(), 'n=1!', 'switched off: the edit');
+    const on = run(m.env);
+    assert(!/SyntaxError/.test(on.stderr) && on.stdout.trim() !== 'n=1!', `${m.mutation}: ${on.stdout}${on.stderr}`);
+  }
+});
+
 test('editMutants: a JS parse check that does not finish within timeoutMs gives no mutants, marked unchecked (AUDIT-25 M1)', () => {
   const rows = Array.from({ length: 4000 }, (_, i) => `  [${i}, 'k${i}', ${i * 3}],`).join('\n');
   const b = `const T = [\n${rows}\n  [1, 'a', 2],\n];\nmodule.exports = T;\n`;
