@@ -970,36 +970,53 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
     }
     return true;
   };
-  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map();
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), lambdas = new Set();
   for (let i = 0; i < code.length; i++) {
-    const c = code[i];
-    if (c === ',') encl.set(i, open.length ? open[open.length - 1] : -1);
+    const c = code[i], top = open.length ? open[open.length - 1] : -1;
+    if (c === ',') { encl.set(i, top); commas.set(top, (commas.get(top) || 0) + 1); } else if (c === 'l' && lang === 'python' && code.startsWith('lambda', i) && !/[\w.]/.test(code[i - 1] || '') && !/\w/.test(code[i + 6] || '')) lambdas.add(top);
     else if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
   // A `;` or `,` that changes statement or value structure: JS `;` as the
-  // empty body of an `if` / `else` / loop head or before a line ASI would
-  // have joined; Python `;` on a compound statement's line (joins its suite)
-  // or a trailing comma that makes a tuple.
+  // empty body of an `if` / `else` / `for` (`for await`) / `while` / `with` /
+  // `do` head or before code the expression would continue into without it
+  // (`(`, `[`, template, `+`, `-`, `/`; not a `++` / `--` line); a `,`
+  // between two kept tokens that is not trailing (it splits an operand);
+  // Python `;` on a compound statement's logical line (joins its suite) or a
+  // trailing comma that makes a tuple: at statement level, or in a paren or
+  // subscript holding no other comma of its own (a lambda's are not).
   const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
   const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
+  const splits = (a) => {
+    const p = prevCode(a), n = nextCode(a + 1);
+    return p >= 0 && n < code.length && !')]}'.includes(code[n]) && !fresh(p, p + 1) && !fresh(n, n + 1);
+  };
   const structural = (a, text) => {
     if (lang !== 'python') {
+      if (text === ',') return splits(a);
       if (text !== ';') return false;
       const p = prevCode(a);
       if (/\b(?:else|do)$/.test(code.slice(0, p + 1))) return true;
-      if (code[p] === ')' && pair.has(p) && /\b(?:if|for|while)\s*$/.test(code.slice(0, pair.get(p)))) return true;
-      return /\n/.test(code.slice(a + 1, nextCode(a + 1))) && /^[([`+\-/]/.test(code[nextCode(a + 1)] || '');
+      if (code[p] === ')' && pair.has(p) && /\b(?:if|for(?:\s+await)?|while|with)\s*$/.test(code.slice(Math.max(0, pair.get(p) - 16), pair.get(p)))) return true;
+      const n = nextCode(a + 1);
+      return /^(?:[([`/]|\+(?!\+)|-(?!-))/.test(code.slice(n, n + 2));
     }
-    if (text === ';') return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\b/.test(code.slice(code.lastIndexOf('\n', a - 1) + 1, a));
+    if (text === ';') {
+      // `match` needs a newline after its `:`; `case` may be a name.
+      let s = code.lastIndexOf('\n', a - 1) + 1;
+      while (s > 0 && depth.get(s)) s = code.lastIndexOf('\n', s - 2) + 1;
+      return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!\s*(?:[.:]|(?:[-+*/%&|^@]|\/\/|\*\*|<<|>>)?=(?!=))))\b/.test(code.slice(s, a));
+    }
     if (text !== ',') return false;
+    if (splits(a)) return true;
     const n = nextCode(a + 1), q = code[n];
     const o = encl.get(a) ?? -1;
     if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
     if (!')]}'.includes(q || '')) return false;
     // Applied to a value (a call or subscript), not a display or grouping.
     const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
-    const applied = /[\w)\]'"]$/.test(head) && !/\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head);
+    const applied = /[\w)\]'"]$/.test(head) && !/(?<![\w.])(?:return|in|not|and|or|is|if|elif|else|while|for|with|as|except|raise|from|yield|await|lambda|del|assert|match|case)$/.test(head);
+    if (commas.get(o) > 1 && !lambdas.has(o)) return false;
     return code[o] === '(' ? !applied : code[o] === '[' && applied;
   };
   const strAt = new Set(view.lits.filter(l => l.kind === 'string').map(l => l.s));

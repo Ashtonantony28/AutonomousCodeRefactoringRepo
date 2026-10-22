@@ -106,10 +106,15 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `0`, never `1000`. **Fail closed per token:** every inserted or changed
     token except brackets, commas, semicolons, colons, regex delimiters and
     whitespace (a `;` or `,` that changes structure is not exempt: JS `;`
-    as the empty body of an `if` / `else` / `for` / `while` / `do` head or
-    before a line ASI would join; Python `;` on a compound statement's line,
-    a trailing comma at statement level, in a grouping paren or a
-    subscript) must lie inside the span every mutant of one site changes
+    as the empty body of an `if` / `else` / `for` (`for await`) / `while` /
+    `with` / `do` head or before code the expression would continue into
+    (`(`, `[`, template, `+`, `-`, `/`, same line or next; not `++` /
+    `--`); a JS or Python `,` between two kept tokens that is not trailing
+    (it splits an operand: `6000 - 1` → `6000, - 1`); Python `;` on a
+    compound statement's logical line (a multi-line header included), a
+    trailing comma at statement level, in a grouping paren (after any
+    keyword: `if`, `elif`, `while`, `for`, …) or a subscript that holds no
+    other comma of its own (a lambda's commas are not)) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
@@ -187,7 +192,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   plugin wrapping `__import__` (not `ImportError`); test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
-  subtest counting as its parent) that passed, elsewhere in a node:test
+  subtest counting as its parent; names compared as TAP writes them) that
+  passed (with no reported test or suite of that name, as below), elsewhere in a node:test
   file process that exits 0, or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other

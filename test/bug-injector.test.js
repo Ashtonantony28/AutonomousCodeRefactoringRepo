@@ -651,6 +651,42 @@ test('editMutants: every head, ASI line start, compound keyword and tuple-making
   assert.strictEqual(ind.ms.uncovered && ind.ms.uncovered.text, '        ');
 });
 
+test('editMutants: a comma making a tuple after any keyword head or beside a lambda is uncovered; one in a display with other commas, a `;` before `++` / `--` or after `match` / `case` names is not (AUDIT-32 H3, M1, L1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  const head = (kw) => (kw === 'elif' ? '    if n > 5:\n        return s\n    elif' : `    ${kw}`);
+  for (const kw of ['elif', 'while']) {
+    assert.strictEqual(unc('py', `${head(kw)} (n > 1):\n        return t\n    return s`, `${head(kw)} (n > 1,):\n        return t + 'x'\n    return s`), ',', `\`${kw} (c,):\` is always true`);
+  }
+  assert.strictEqual(unc('py', '    for (x) in xs:\n        t = x\n    return t', '    for (x,) in xs:\n        t = x\n    return t + 1'), ',', 'a `for` target unpacks');
+  assert.strictEqual(unc('py', '    return (lambda a, b: a)', '    return (lambda a, b: a,)'), ',', 'a lambda\'s commas are not the paren\'s');
+  assert.strictEqual(unc('py', '    return xs[0]', '    x, = xs[:1]\n    return x'), ',', 'an unpacking comma in new code');
+  assert.strictEqual(unc('py', '    return s.match(t)', '    return s.match(t,)'), null, 'an attribute named like a keyword is a call');
+  const tup = (...xs) => `    T = (\n${xs.map(x => `        '${x}',\n`).join('')}    )\n    return s in T`;
+  assert.strictEqual(unc('py', tup('a', 'b'), tup('a', 'b', 'c')), null, 'an element added to a multi-line tuple display');
+  assert.strictEqual(unc('py', '    return xs[n, t]', '    return xs[n, t,]'), null, 'a subscript that is already a tuple');
+  assert.strictEqual(unc('py', '    return [s, (t)]', '    return [s, (t, n,)]'), null, 'the comma before `n` makes the tuple, the element is a site');
+  for (const op of ['++', '--']) assert.strictEqual(unc('js', `  let i = n\n  ${op}t\n  return i + t;`, `  let i = n + 1;\n  ${op}t\n  return i + t;`), null, `ASI never joins a \`${op}\` line`);
+  for (const name of ['match', 'case']) {
+    assert.strictEqual(unc('py', `    ${name} = s\n    return ${name}`, `    ${name} = s; xs.append(n + 1)\n    return ${name}`), null, `\`${name}\` as a name`);
+  }
+  assert.strictEqual(unc('py', '    if (n >\n            1): t = 1\n    t = t + 1\n    return t', '    if (n >\n            1): t = 1; t = t + 2\n    return t'), ';', 'a compound statement continued over lines');
+  assert.strictEqual(unc('py', '    if n > \\\n            1: t = 1\n    t = t + 1\n    return t', '    if n > \\\n            1: t = 1; t = t + 2\n    return t'), ';', 'a backslash-continued header');
+});
+
+test('editMutants: a JS `;` after a `for await` / `with` head or before same-line code the expression would continue into, and a comma splitting kept code, are uncovered (AUDIT-31 C1, H3)', () => {
+  const unc = (b, a) => (sg30('js', b, a).ms.uncovered || {}).text || null;
+  const head = (h, b, a) => {
+    const wrap = (body) => `${h}function f(s, t, n, xs) {\n${body}\n}\nmodule.exports = { f };\n`;
+    return (bugInjector.editMutants(wrap(a), { file: 'src/x.js', before: wrap(b) }).uncovered || {}).text || null;
+  };
+  assert.strictEqual(head("'use strict';\nasync ", '  for await (const x of xs) t += x;\n  return t;', "  for await (const x of xs); t += x;\n  return t + '';"), ';', 'empty `for await` body');
+  assert.strictEqual(head('', '  with (s) t += 1;\n  return t;', "  with (s); t += 1;\n  return t + '';"), ';', 'empty `with` body (sloppy mode)');
+  assert.strictEqual(unc("  return s + (n > 1 ? 'x' : '');", "  return s + ''; + (n > 1 ? 'x' : '');"), ';', 'a same-line `;` turns a binary `+` into a statement');
+  assert.strictEqual(unc('  return s.slice(0, 6000 - 1);', '  return s.slice(0, 6000, - 1);'), ',', 'a comma splitting an operand');
+  assert.strictEqual(unc('  return s.slice(0, n);', '  return s.slice(0, n, 1);'), null, 'a comma before an inserted argument');
+  assert.strictEqual(unc('  t = t.trim()\n  return t;', '  t = t.trim(); t = t.slice(1);\n  return t;'), null, 'a `;` before a new statement');
+});
+
 test('editMutants: a moved argument-list bracket stands only on its own call or a prefix operator right before it (AUDIT-26 H1, H2)', () => {
   // `g(a) + b` -> `h(g(a + b))` / `~g(a + b)`: g's `)` moves past `+ b`.
   const wrapped = sg30('js', '  return g(s) + t;', '  return h(g(s + t));').ms;

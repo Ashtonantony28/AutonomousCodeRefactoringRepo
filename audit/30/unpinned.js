@@ -34,7 +34,7 @@ const CASES = {
   // Mutant: only `if` / `for` heads count (the test pins `if`, `for`).
   'BI-while': {
     finding: 'H1',
-    mutate: { file: BI, from: '/\\b(?:if|for|while)\\s*$/', to: '/\\b(?:if|for)\\s*$/' },
+    mutate: { file: BI, from: '/\\b(?:if|for(?:\\s+await)?|while|with)\\s*$/', to: '/\\b(?:if|for(?:\\s+await)?|with)\\s*$/' }, // SG41: re-anchored
     tests: /bug-injector|executor/,
     file: 'src/f.js',
     cur: 'function f(t, n) {\n  while (n-- > 0) t += 1;\n  return t;\n}',
@@ -49,7 +49,7 @@ const CASES = {
   // (the test pins `(`; `[`, template, `+`, `-`, `/` are unpinned).
   'BI-asichar': {
     finding: 'H1',
-    mutate: { file: BI, from: '/^[([`+\\-/]/.test(code[nextCode(a + 1)]', to: '/^[(]/.test(code[nextCode(a + 1)]' },
+    mutate: { file: BI, from: '/^(?:[([`/]|\\+(?!\\+)|-(?!-))/.test(code.slice(n, n + 2))', to: '/^[(]/.test(code.slice(n, n + 2))' }, // SG41: re-anchored
     tests: /bug-injector|executor/,
     file: 'src/f.js',
     cur: 'function f(s, n) {\n  const v = s\n  -n\n  return v;\n}',
@@ -64,7 +64,7 @@ const CASES = {
   'BI-pykw': {
     finding: 'H1',
     lang: 'py',
-    mutate: { file: BI, from: '(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\\b', to: '(?:if|elif|else)\\b' },
+    mutate: { file: BI, from: '(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!', to: '(?:if|elif|else|case(?!' }, // SG41: re-anchored
     tests: /bug-injector|executor/,
     cur: 'def f(t, xs):\n    for x in xs: t += x\n    t = t + 1\n    return t\n',
     prop: 'def f(t, xs):\n    for x in xs: t += x; t = t + 2\n    return t\n',
@@ -92,7 +92,7 @@ const CASES = {
   'BI-pykwapp': {
     finding: 'H1',
     lang: 'py',
-    mutate: { file: BI, from: '!/\\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head)', to: '!/\\b(?:return)$/.test(head)' },
+    mutate: { file: BI, from: '!/(?<![\\w.])(?:return|in|not|and|or|is|if|elif|else|while|for|with|as|except|raise|from|yield|await|lambda|del|assert|match|case)$/.test(head)', to: '!/(?<![\\w.])(?:return)$/.test(head)' }, // SG41: re-anchored
     tests: /bug-injector|executor/,
     cur: 'def f(s, t):\n    return [s in (t), 1]\n',
     prop: 'def f(s, t):\n    return [s in (t,), 2]\n',

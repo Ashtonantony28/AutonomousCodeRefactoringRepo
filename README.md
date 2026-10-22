@@ -260,7 +260,8 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
 - **Caught module-load throws are judged per test.** A module body that
   throws while a node:test test or suite callback runs (CommonJS
   `require('node:test')`; a subtest counts as its parent) is ignored when
-  that test passed (`assert.throws(() => require(...))`), so other tests in
+  that test or suite passed (`assert.throws(() => require(...))`; a name no
+  reported test or suite has falls back to the file process, below), so other tests in
   the same file or process (`--experimental-test-isolation=none`) still
   kill; when that test failed the run is a load failure and kills nothing.
   A throw outside a test callback (a test file's top-level `require`, a
@@ -282,9 +283,13 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   changes structure (not one that only frames inserted code) is covered
   only by its own call's use site or a dropped prefix operator right before
   it, never by a sibling kill inside it; a `;` or `,` that changes
-  structure (an empty `if` / `else` / loop body, a line ASI would join, a
-  Python `;` joining a suite, a trailing comma that makes a tuple) is no
-  punctuation and needs the same. Shapes with no mutant are rejected, not
+  structure (an empty `if` / `else` / loop / `with` body, code the
+  expression would continue into, a comma splitting kept code, a Python
+  `;` joining a suite, a trailing comma that makes a tuple) is no
+  punctuation and needs the same. The check is textual and fails closed:
+  a trailing comma added at Python statement level (`x = a, b,`), after a
+  `match(...)` / `case(...)` call or in a paren holding a lambda is
+  rejected even where it changes nothing. Shapes with no mutant are rejected, not
   carried: a renamed or moved object key or keyword argument with no
   inserted read of the same name, a regex class bracket, names in type
   annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or
