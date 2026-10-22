@@ -1058,6 +1058,44 @@ test('an inserted token no mutant covers is no evidence, whatever kills its sibl
   assertReverted(res, repo, 'src/parts.js', before, kept);
 });
 
+// A config test that rejects unknown REFACTOR_* keys, and one that rejects flag-like values.
+const ENV_TESTS = {
+  js: "test('config: no unknown REFACTOR_ keys', () => { assert.deepStrictEqual(Object.keys(process.env).filter(k => /^REFACTOR_MUTANT/.test(k)), []); });\n" +
+    "test('config: no REFACTOR_ flag values', () => { assert.ok(!Object.entries(process.env).some(([k, v]) => k.startsWith('REFACTOR_') && /^(?:1|true|on|yes)$/i.test(v))); });",
+  py: "import os\n\n\ndef test_no_unknown_keys():\n    assert [k for k in os.environ if k.startswith('REFACTOR_MUTANT')] == []\n\n\n" +
+    "def test_no_flag_values():\n    assert not any(k.startswith('REFACTOR_') and v.lower() in ('1', 'true', 'on', 'yes') for k, v in os.environ.items())\n"
+};
+
+test('a test that reads the environment sees the same keys and value shape in mutant and control runs: no kill (AUDIT-31 H1)', async (t) => {
+  const { res, repo, before, kept } = await execOn(t, 'src/fit.js', 'function fit(s) {\n  return String(s).slice(0, 6000);\n}',
+    'function fit(s) {\n  return String(s).slice(0, 7000);\n}', 'module.exports = { fit };',
+    `const m = require('../src/fit');\n${ENV_TESTS.js}\ntest('fit', () => { assert.strictEqual(m.fit('ab'), 'ab'); });`, null);
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert(res.mutation.control_failed >= 1 && !res.mutation.killed, JSON.stringify(res.mutation));
+  assertReverted(res, repo, 'src/fit.js', before, kept);
+});
+
+test('a Python test that reads os.environ is no kill either (AUDIT-31 H1)', { skip: hasPyTooling ? false : 'pytest + coverage.py not installed' }, async (t) => {
+  const cur = 'def fit(s):\n    return str(s)[:6000]\n';
+  const repo = pyPkgRepo(t, cur, `${ENV_TESTS.py}\n\ndef test_fit():\n    assert m.fit('ab') == 'ab'\n`);
+  const res = await withoutTestContext(() => runExecutor({ proposal: makeProposal('app/m.py', cur, 'def fit(s):\n    return str(s)[:7000]\n'), repoRoot: repo, onKept: () => 'c1' }));
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert(res.mutation.control_failed >= 1 && !res.mutation.killed, JSON.stringify(res.mutation));
+});
+
+test('`while` -> `if` is not covered by the kill of its own condition (AUDIT-31 H2)', async (t) => {
+  const { res, repo, before, kept } = await execOn(t, 'src/cut.js', 'function cut(s) {\n  let out = String(s);\n  while (out.length > 6000) out = out.slice(0, -1000);\n  return out;\n}',
+    'function cut(s) {\n  let out = String(s);\n  if (out.length > 6000) out = out.slice(0, -1000);\n  return out;\n}', 'module.exports = { cut };',
+    "const m = require('../src/cut');\ntest('cut', () => { assert.strictEqual(m.cut('a'.repeat(6500)).length, 5500); assert.strictEqual(m.cut('ab'), 'ab'); });", null);
+  assert.strictEqual(res.status, 'reverted', JSON.stringify(res.mutation));
+  assert.strictEqual(res.reason, 'tests_insensitive');
+  assert.strictEqual(res.mutation.uncovered_token, 'if');
+  assert.strictEqual(res.mutation.run, 0);
+  assertReverted(res, repo, 'src/cut.js', before, kept);
+});
+
 test('a size test that ignores whitespace fails the switch-off control too: no kill (AUDIT-21 H2)', async (t) => {
   const cur = 'function body(s) {\n  return String(s).slice(SKIP);\n}';
   const prop = 'function body(s) {\n  return String(s).slice(SKIP, SKIP + MAX_LEN);\n}';

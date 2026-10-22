@@ -18,6 +18,7 @@
 //
 // Each mutation runs only when it actually changes the source.
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -745,6 +746,9 @@ function literalMutant(src, t) {
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
+const BLOCK_KW = /^(?:if|elif|else|while|for|do)$/;
+// A switch value: 16 random lowercase letters (no digit, sign or boolean spelling).
+const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 + b % 26)).join('');
 
 // Up to `max` parse-valid mutants per site of `src` (the edited file): a
 // site is one token the edit inserted or changed, and a mutant belongs to
@@ -775,7 +779,7 @@ const EDIT_MAX_SITES = 12;
 // statement around it (jsParseCheck / parsesPython), not the file. A
 // reference with no parse-valid use-site mutant gives none, marked
 // `unmutated_ref`.
-// -> [{ mutation, src, env, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
+// -> [{ mutation, src, env, control, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -864,6 +868,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       candidates.push(...order.slice(0, max * 4));
     }
   }
+  const swappedKeyword = (hi, a, b) => diffed && hunks[hi].gaps.some(g => g.ins.some(([s, e]) => s === a && e === b) &&
+    g.del.some(([s, e]) => BLOCK_KW.test(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
   let jsn;
   const nodes = () => jsn || (jsn = jsNodes(src, file, code));
   const build = (c) => {
@@ -872,14 +878,23 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     if (!mut) return null;
     const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
+    // A block keyword that replaced another (`while` -> `if`, `elif` -> `if`)
+    // is not covered by its own condition's kill.
+    if (c.op.name === 'negate_condition') {
+      const [, ws, kw] = /^(\s*)(\w+)/.exec(c.m[0]), k = c.m.index + ws.length;
+      if (swappedKeyword(c.hunk, k, k + kw.length)) span[0] = k + kw.length;
+    }
     return { edits: mut.edits, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
   let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
   for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
   // The variable is read once per module load, into a module-level binding
   // the switches test (before any statement but a docstring, `__future__`
-  // import or directive; no target before it).
-  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '1'` : `var ${on} = globalThis.process.env.${name} === '1';`;
+  // import or directive; no target before it). Mutant and control runs both
+  // set it, to two random values of one shape (`env` / `control`), so the
+  // environment's key set and value shape are the same in all three runs.
+  const [val, off] = [token(), token()];
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '${val}'` : `var ${on} = globalThis.process.env.${name} === '${val}';`;
   const [at, form] = shape.hoist || [src.length, 'stmt'];
   const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
   // A mutant's edits as a switch on the smallest target holding them ->
@@ -899,7 +914,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   const out = [];
   const take = ({ edits, lo, hi, ...c }, sw) => {
     kept.set(key(c), (kept.get(key(c)) || 0) + 1);
-    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: '1' } });
+    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: val }, control: { [name]: off } });
   };
   if (lang === 'python') {
     // One batch: every candidate's switch, the first `max` per site that parse.
