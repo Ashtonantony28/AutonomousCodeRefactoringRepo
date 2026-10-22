@@ -78,7 +78,7 @@ const CASES = {
   // no mutant at all. Mutant: a bare hunk no longer blocks (no site to
   // judge = every site judged).
   'EX-bare': {
-    finding: 'H4',
+    finding: 'C1',
     mutate: { file: 'src/agents/executor.js', from: '  const bare = hunks.findIndex((h, i) => !h.deletion && !mutants.some(m => m.hunk === i));', to: '  const bare = -1;' },
     tests: /executor|bug-injector/,
     file: 'src/t.js',

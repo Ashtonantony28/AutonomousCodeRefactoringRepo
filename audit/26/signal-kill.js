@@ -5,12 +5,12 @@
 // starts is running when handleSignal is called; 3 s later the file must
 // not exist (the group was killed). Checked on src/ as it is and on a temp
 // copy with mutant S-kill (handleSignal no longer calls killActive); the
-// test files that drive handleSignal are then run on the mutated copy.
+// CLI signal tests are then run on the mutated copy (--reps=3).
 //
-//   node audit/26/signal-kill.js
+//   node audit/26/signal-kill.js [--reps=3]
 //
 // Prints FINDING (exit 1) when the real handler leaves the group running,
-// or when the mutated copy leaves it running and the tests stay green.
+// or when the mutated copy leaves it running and a test run stays green.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -63,14 +63,20 @@ function main() {
   if (!mut.late_write) { console.log('ok: the mutated copy also stops the write'); return; }
   dir = copy(true);
   try {
-    const files = ['test/executor.test.js', 'test/orchestrator.test.js', 'test/test-runner.test.js'];
+    // The only test that drives a real signal is the CLI one; run it --reps
+    // times (default 3): a run that stays green is a run where nothing
+    // noticed the group still running.
+    const reps = Number((process.argv.find(x => /^--reps=/.test(x)) || '--reps=3').split('=')[1]);
     const env = { ...process.env };
     delete env.NODE_TEST_CONTEXT;
-    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { cwd: dir, env, encoding: 'utf8', timeout: 900_000, maxBuffer: 64 << 20 });
-    const n = (k) => ((r.stdout || '').match(new RegExp(`^# ${k} (\\d+)`, 'm')) || [])[1];
-    const failed = [...(r.stdout || '').matchAll(/^\s*not ok \d+ - (.*)$/gm)].map(x => x[1]).filter(x => !/\.test\.js$/.test(x));
-    console.log(`tests on the mutated copy: ${files.join(' ')}: pass=${n('pass')} fail=${n('fail')}${failed.length ? ` failed: ${failed.join(' | ')}` : ''}`);
-    if (r.status === 0) { console.log('FINDING S-kill: a test process keeps writing into the worktree after the signal handler ran, and the tests stay green'); process.exitCode = 1; } else console.log('ok: a test kills the mutant');
+    let green = 0;
+    for (let i = 0; i < reps; i++) {
+      const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=to the CLI mid-test', 'test/executor.test.js'], { cwd: dir, env, encoding: 'utf8', timeout: 600_000, maxBuffer: 64 << 20 });
+      const n = (k) => ((r.stdout || '').match(new RegExp(`^# ${k} (\\d+)`, 'm')) || [])[1];
+      if (r.status === 0) green++;
+      console.log(`CLI signal tests on the mutated copy, run ${i + 1}/${reps}: pass=${n('pass')} fail=${n('fail')}`);
+    }
+    if (green) { console.log(`FINDING H4 S-kill: the test group keeps running after the signal handler, and the CLI signal tests stay green in ${green}/${reps} runs`); process.exitCode = 1; } else console.log(`ok: the CLI signal tests kill the mutant in ${reps}/${reps} runs`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
