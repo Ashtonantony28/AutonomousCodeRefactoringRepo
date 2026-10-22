@@ -451,6 +451,21 @@ test('editMutants: a block keyword that replaced another is not covered by its o
   assert(!fresh.ms.uncovered && fresh.sites.includes('negate_condition:if'), JSON.stringify(fresh.sites));
 });
 
+test('editMutants: `for`, `do` and `else` replaced by a guard, a Python `;` on a try / except / finally, async or case line and a comma splitting kept code are uncovered (AUDIT-34 H1, H2, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', '  for (; n > 0;) { n--; t += 1; }\n  return t;', '  if (n > 0) { n--; t += 1; }\n  return t;'), 'if', '`for` -> `if` runs the body once');
+  assert.strictEqual(unc('js', '  do { t += 1; } while (t < n);\n  return t;', '  if (t < n) { t += 1; } while (t < n);\n  return t;'), 'if', '`do` -> `if`');
+  assert.strictEqual(unc('py', "    if n > 5:\n        t = t[:5]\n    else:\n        t = t + '!'\n    return t", "    if n > 5:\n        t = t[:5]\n    elif n:\n        t = t + '!'\n    return t"), 'elif', '`else:` -> `elif n:`');
+  for (const [b, a] of [
+    ['    try: t = int(t)\n    except ValueError: t = 0\n    t = t + 1', '    try: t = int(t)\n    except ValueError: t = 0; t = t + 2'],
+    ['    try: t = int(t)\n    finally: n = 0\n    t = t + 1', '    try: t = int(t)\n    finally: n = 0; t = t + 2'],
+    ['    try: t = int(t)\n    except ValueError: t = 0', '    try: t = int(t); t = t + 2\n    except ValueError: t = 0'],
+    ['    async def g(): t = 1\n    t = t + 1', '    async def g(): t = 1; t = t + 2'],
+    ['    match n:\n        case 1: t = t * 3\n    t = t + 1', '    match n:\n        case 1: t = t * 3; t = t + 2']
+  ]) assert.strictEqual(unc('py', `${b}\n    return t`, `${a}\n    return t`), ';', a);
+  assert.strictEqual(unc('py', '    return max(n - 1, 0)', '    return max(n, - 1, 2)'), ',', 'a comma splitting an operand');
+});
+
 // ---------- SG34: same-text mutant switch, structure, strings ----------
 
 // Runs `call` on the module `src` (a JS file defining f) with the mutant's env set or unset.
