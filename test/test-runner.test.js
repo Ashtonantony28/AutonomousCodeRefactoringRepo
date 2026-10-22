@@ -222,12 +222,20 @@ test('V8 coverage: a pure deletion is judged at the deletion point', async (t) =
 
 test('V8 coverage: a file the tests never load is not exercised; coverage goes to a removed temp dir', async (t) => {
   const { dir } = covRepo(t);
-  const before = new Set(fs.readdirSync(os.tmpdir()).filter(n => n.startsWith('refactor-cov-')));
-  const r = await runTests({ repoRoot: dir, command: { cmd: process.execPath, args: ['-e', '0'], framework: 'npm' }, edit: spanOf('  return a + 1;') });
+  // A private TMPDIR: other runs in the shared tmpdir create such dirs too (AUDIT-30 H4).
+  const seen = path.join(tmp(t, 'refactor-seen-'), 'cov');
+  const own = tmp(t, 'refactor-tmp-');
+  const prev = process.env.TMPDIR;
+  process.env.TMPDIR = own;
+  t.after(() => { if (prev === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prev; });
+  const record = `require('fs').writeFileSync(${JSON.stringify(seen)}, process.env.NODE_V8_COVERAGE)`;
+  const r = await runTests({ repoRoot: dir, command: { cmd: process.execPath, args: ['-e', record], framework: 'npm' }, edit: spanOf('  return a + 1;') });
   assert.strictEqual(r.coverage.exercised, false);
   assert.match(r.coverage.detail, /never loaded/);
-  const left = fs.readdirSync(os.tmpdir()).filter(n => n.startsWith('refactor-cov-') && !before.has(n));
-  assert.deepStrictEqual(left, []);
+  const cov = fs.readFileSync(seen, 'utf8');
+  assert.strictEqual(path.dirname(cov), own);
+  assert.match(path.basename(cov), /^refactor-cov-/);
+  assert.deepStrictEqual(fs.readdirSync(own), [], 'coverage and bytecode dirs removed');
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['check.js', 'src'], 'nothing written into the repo');
 });
 
@@ -690,7 +698,12 @@ test('runTests: a caught load throw in a passing node:test test is no collection
   }
   const uncaught = await run("test('config', () => { require('../src/config'); });\ntest('g', () => {});\n");
   assert.strictEqual(uncaught.collection_error, true, 'the test that hit the throw failed');
-  for (const body of [`describe('s', () => { before(() => { ${caught} }); it('f', () => assert.strictEqual(1, 2)); });\n`, `${caught}\n${red}`]) {
+  // A rethrown throw (no load frame in the TAP stack) is excused only when every
+  // test of the logged name passed, and never by a test whose name it prefixes (AUDIT-30 H3, M1).
+  const rethrow = "try { require('../src/config'); } catch (e) { throw new Error('setup: ' + e.message); }";
+  for (const body of [`describe('s', () => { before(() => { ${caught} }); it('f', () => assert.strictEqual(1, 2)); });\n`, `${caught}\n${red}`,
+    `test('x', () => { ${caught} });\ntest('x', () => { ${rethrow} });\n`,
+    `test('set', () => {});\ndescribe('s', () => { ${rethrow} it('a', () => {}); });\n${red}`]) {
     assert.strictEqual((await run(body)).collection_error, true, body);
   }
 });

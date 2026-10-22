@@ -122,7 +122,7 @@ const CASES = {
   // and 'x#2', one failed, not excused. Mutant: one passing 'x' excuses it.
   'TR-dupname': {
     finding: 'H3',
-    mutate: { file: TR, from: "ids.every(id => tests[id] === 'pass')", to: "ids.some(id => tests[id] === 'pass')" },
+    mutate: { file: TR, from: "byName.set(k, byName.get(k) !== false && state === 'pass')", to: "byName.set(k, byName.get(k) === true || state === 'pass')" },
     tests: /test-runner|executor/,
     file: 'src/m.js',
     cur: 'const N = 3;',

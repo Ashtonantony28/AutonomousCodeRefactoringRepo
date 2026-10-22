@@ -215,10 +215,8 @@ function valueKey(t, lang) {
     try {
       if (lang !== 'python') return /n$/.test(n) ? `\u0005${BigInt(n.slice(0, -1))}n` : /^0\d/.test(n) ? t : Number.isNaN(Number(n)) ? t : `\u0005${Number(n)}`;
       if (/^(?:0[xob][\da-f]+|\d+)$/i.test(n)) return `\u0005${BigInt(n)}`;
-      if (Number.isNaN(Number(n))) return t;
-      if (!/j$/i.test(n)) return `\u0005${Number(n)}.0`;
-    } catch { /* not a number */ }
-    return t;
+      return Number.isNaN(Number(n)) ? t : `\u0005${Number(n)}.0`;
+    } catch { return t; }
   }
   const m = /^([rRbBuU]{0,2})('''|"""|'|")([^\\]*)\2$/.exec(t);
   return m && (lang === 'python' || (!m[1] && m[2].length === 1)) ? `\u0004${/b/i.test(m[1]) ? 'b' : ''}${m[3]}` : t;

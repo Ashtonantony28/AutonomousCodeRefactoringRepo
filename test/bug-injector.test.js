@@ -590,6 +590,7 @@ test('changeHunks: a numeric token with no computable value compares by its text
   assert.deepStrictEqual(ins('x = int(6e3.real)\n', 'x = int(7e3.real)\n', 'a.py'), ['7e3.real']);
   assert.deepStrictEqual(ins('x = 0x1e+6000\n', 'x = 0x3e+6000\n', 'a.py'), ['0x3e+6000']);
   assert.deepStrictEqual(ins('x = 6e3.toFixed();\n', 'x = 6e3.toFixed();\n', 'a.js'), []);
+  assert.deepStrictEqual(ins('x = 1e3n;\n', 'x = 1.5n;\n', 'a.js'), ['1.5n'], 'a BigInt spelling with no value');
   const { ms } = sg30('js', '  return s.slice(0, 0x1e+6000);', '  return s.slice(0, 0x2e+6000);');
   assert.strictEqual(ms.uncovered && ms.uncovered.text, '0x2e+6000', 'a number with no mutant is uncovered');
 });
@@ -629,6 +630,25 @@ test('editMutants: a `;` or `,` that changes statement or value structure is unc
   assert.strictEqual(unc('py', "    return f(s, t)", "    return f(s, t,)"), null, 'a trailing comma in a call');
   assert.strictEqual(unc('py', "    return [s, t]", "    return [s, t,]"), null, 'a trailing comma in a list');
   assert.strictEqual(unc('py', "    t = t.strip()\n    return t", "    t = t.strip(); t = t[:9]\n    return t"), null, 'joins two simple statements');
+});
+
+test('editMutants: every head, ASI line start, compound keyword and tuple-making comma of the structural rule is uncovered (AUDIT-30 H1, H2)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', '  while (n-- > 0) t += 1;\n  return t;', '  while (n-- > 0); t += 2;\n  return t;'), ';', 'empty `while` body');
+  for (const line of ['[s].join()', '`${s}`.trim()', '+n', '-n', '/x/.test(s)']) {
+    assert.strictEqual(unc('js', `  const v = s\n  ${line}\n  return v;`, `  const v = s * 2;\n  ${line}\n  return v;`), ';', `ends a statement ASI continued by ${line[0]}`);
+  }
+  for (const head of ['for x in xs', 'while n', 'with s', 'def g()', 'class C']) {
+    assert.strictEqual(unc('py', `    ${head}: t = 1\n    t = t + 1\n    return t`, `    ${head}: t = 1; t = t + 2\n    return t`), ';', `joins a line into a \`${head}\` suite`);
+  }
+  assert.strictEqual(unc('py', '    x = xs\n    return x', '    x, = xs[:1]\n    return x'), ',', 'a trailing comma before `=` unpacks');
+  for (const kw of ['in', 'not', 'and', 'or', 'is', 'if', 'else']) {
+    const expr = kw === 'if' ? 's if (t,) else 1' : kw === 'else' ? '1 if s else (t,)' : kw === 'not' ? 's and not (t,)' : `s ${kw} (t,)`;
+    assert.strictEqual(unc('py', `    return [${expr.replace('(t,)', '(t)')}, 1]`, `    return [${expr}, 2]`), ',', `a paren after \`${kw}\` groups, so its comma makes a tuple`);
+  }
+  // A site on the re-indented line itself does not cover the move into the block.
+  const ind = sg30('py', '    if n > 1:\n        t = t[:9]\n    t = t.strip()\n    return t', "    if n > 1:\n        t = t[:9]\n        t = t.strip() + '!'\n    return t");
+  assert.strictEqual(ind.ms.uncovered && ind.ms.uncovered.text, '        ');
 });
 
 test('editMutants: a moved argument-list bracket stands only on its own call or a prefix operator right before it (AUDIT-26 H1, H2)', () => {
