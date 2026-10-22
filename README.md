@@ -294,7 +294,9 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   inserted read of the same name, a regex class bracket, names in type
   annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or
   comprehension, a new function definition, a block re-indented or
-  re-bracketed around unchanged code. An operator mutant is a strong change
+  re-bracketed around unchanged code, a block keyword swapped for another
+  (`while` → `if`, `elif` → `if`: the condition's kill shows only that the
+  condition matters). An operator mutant is a strong change
   (`>>` → `<<`, `-` → `+`): a test on small inputs kills it, so a range
   change (`x | 0` for `Math.trunc`) stands on the executor bar only if the
   diff test misses it. A string (one lexer literal, backslash continuations
@@ -304,7 +306,12 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
 - **Switch control stops source readers, not value-blind tests.** Every
   mutant is an environment-variable switch in the file, and its control
   run is the same text with the switch off, so tests that read the source
-  (length, token or word counts, layout, a grep) give no kill. A site with
+  (length, token or word counts, layout, a grep) give no kill. The control
+  sets the same variable as the mutant runs, to another random 16-letter
+  value, so a test that reads the environment (unknown keys, flag-like
+  values, a snapshot) sees the same keys and value shape in all three runs;
+  only a test whose verdict depends on the exact random value could still
+  tell them apart. A site with
   no expression to switch (an object or class key, a match pattern) has no
   mutant and is rejected. A test that only notices a change of a value's
   type or size, not its content, still kills a perturbation it would not

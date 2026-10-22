@@ -323,7 +323,7 @@ const MUTANTS = [
   M('EX-again', 'redundant', EX, 'SG24: second mutant run not required to fail (backed by the per-test intersection)',
     "        if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }", "        if (again.collection_error) { count('unconfirmed'); continue; }"),
   M('EX-switchoff', 'safety', EX, 'SG34: the control run keeps the mutant switched on (no control: every failing mutant run kills)',
-    '        const control = await runSuite(m.src, Object.fromEntries(Object.keys(m.env).map(k => [k, undefined])));', '        const control = await runSuite(m.src, m.env);'),
+    '        const control = await runSuite(m.src, m.control);', '        const control = await runSuite(m.src, m.env);'),
   M('EX-ctrlpass', 'safety', EX, 'SG26/SG34: a test that did not pass in the control run (flaky, or failing on the switch text) can be a kill',
     "  return ids.filter(id => r.tests[id] === 'fail' && control.tests[id] === 'pass');", "  return ids.filter(id => r.tests[id] === 'fail');"),
   M('EX-sitekey', 'safety', EX, 'SG26: revert_reference mutant shares its site with the use-site perturbation (one kill covers both)',
@@ -386,7 +386,7 @@ const MUTANTS = [
   M('TR-pypass', 'safety', TR, 'SG33: a pytest load throw is excused in a test that failed (wrapped import failure is a kill)',
     '    _finish(not _bad)\n', '    _finish(True)\n'),
   M('EX-sham', 'safety', EX, 'SG30/SG34: the control is the edit, not the same switched text (a source-reading test kills)',
-    '        const control = await runSuite(m.src, Object.fromEntries(Object.keys(m.env).map(k => [k, undefined])));', '        const control = await runSuite(edited, {});'),
+    '        const control = await runSuite(m.src, m.control);', '        const control = await runSuite(edited, {});'),
   M('EX-env', 'safety', EX, 'SG34: the mutant runs never set the switch variable (mutant runs are control runs)',
     '  Object.entries(vars).forEach(set);', ''),
   M('BI-uncovered', 'safety', BI, 'SG30: an inserted token no mutant covers is carried by its siblings\' kills',
@@ -436,7 +436,7 @@ const MUTANTS = [
   M('TR-dupnext', 'perf', TR, 'SG32: duplicate test ids are numbered by probing from #2 each time (quadratic in repeats)',
     '    let k = id, n = next.get(id) || 2;', '    let k = id, n = 2;'),
   M('BI-hoist', 'perf', BI, 'SG35: the switch re-reads its variable on every evaluation instead of a binding read once per module load',
-    "    const text = lang === 'python' ? (form", "    on = lang === 'python' ? `__import__('os').environ.get('${name}') == '1'` : `globalThis.process.env.${name} === '1'`;\n    const text = lang === 'python' ? (form"),
+    "    const text = lang === 'python' ? (form", "    on = lang === 'python' ? `__import__('os').environ.get('${name}') == '${val}'` : `globalThis.process.env.${name} === '${val}'`;\n    const text = lang === 'python' ? (form"),
   M('BI-jsdeadline', 'perf', BI, 'SG35: the JS parse check has no time limit (a large literal statement blocks the mutant phase)',
     '      if (performance.now() > until) return', '      if (false) return'),
   M('BI-pyuses', 'label', BI, 'SG26/SG34: a use or shape check that did not finish gives no mutants unmarked (tests_insensitive, not mutation_budget)',
@@ -559,7 +559,15 @@ const MUTANTS = [
   M('BI-pybom3', 'safety', BI, 'SG38: Python use-site offsets ignore a leading BOM (perturbations land one character off)',
     'starts = [bom]', 'starts = [0]'),
   M('EX-killclr', 'label', EX, 'SG38: a surviving site leaves killed_test / killed_line from an earlier kill',
-    '        delete out.killed_line;\n        delete out.killed_test;\n', '')
+    '        delete out.killed_line;\n        delete out.killed_test;\n', ''),
+
+  // --- AUDIT-31: SG42 (env-blind switch control, swapped block keywords)
+  M('BI-ctrlunset', 'safety', BI, 'SG42: the control run unsets the switch variable (a test reading the environment\'s keys kills every mutant)',
+    'control: { [name]: off }', 'control: { [name]: undefined }'),
+  M('BI-flagval', 'safety', BI, 'SG42: the switch value is the flag `1` (a test rejecting flag-like env values kills every mutant)',
+    'const [val, off] = [token(), token()];', "const [val, off] = ['1', token()];"),
+  M('BI-kwswap', 'safety', BI, 'SG42: a block keyword that replaced another (`while` -> `if`) is covered by its own condition site',
+    'if (swappedKeyword(c.hunk, k, k + kw.length)) span[0] = k + kw.length;', '')
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.

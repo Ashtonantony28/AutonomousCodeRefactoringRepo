@@ -63,9 +63,9 @@ function fakeProposals(n = 25) {
 // branch (a Python `return` switch: single-line branches only).
 function plainMutant(m) {
   const { lexView } = require('../../src/utils/hunks');
-  const name = Object.keys(m.env)[0], on = `_${name.toLowerCase()}`;
-  const py = `${on} = __import__('os').environ.get('${name}') == '1'`, isPy = m.src.includes(py);
-  const read = isPy ? [`; ${py}`, `${py}; `, `${py}\n`].find(r => m.src.includes(r)) : `var ${on} = globalThis.process.env.${name} === '1'; `;
+  const [[name, val]] = Object.entries(m.env), on = `_${name.toLowerCase()}`;
+  const py = `${on} = __import__('os').environ.get('${name}') == '${val}'`, isPy = m.src.includes(py);
+  const read = isPy ? [`; ${py}`, `${py}; `, `${py}\n`].find(r => m.src.includes(r)) : `var ${on} = globalThis.process.env.${name} === '${val}'; `;
   const s = m.src.replace(read, '');
   const c = s.indexOf(on);
   const code = lexView(s, isPy ? 'python' : 'javascript').code;
