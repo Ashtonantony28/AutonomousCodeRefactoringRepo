@@ -64,9 +64,9 @@ function fakeProposals(n = 25) {
 function plainMutant(m) {
   const { lexView } = require('../../src/utils/hunks');
   const [[name, val]] = Object.entries(m.env), on = `_${name.toLowerCase()}`;
-  const py = `${on} = __import__('os').environ.get('${name}') == '${val}'`, isPy = m.src.includes(py);
-  const read = isPy ? [`; ${py}`, `${py}; `, `${py}\n`].find(r => m.src.includes(r)) : `var ${on} = globalThis.process.env.${name} === '${val}'; `;
-  const s = m.src.replace(read, '');
+  const py = `${on} = __import__('os').environ.get('${name}')`, isPy = m.src.includes(py);
+  const read = isPy ? [`; ${py}`, `${py}; `, `${py}\n`].find(r => m.src.includes(r)) : `var ${on} = globalThis.process.env.${name}; `;
+  const s = m.src.replace(read, '').split(`${on} ${isPy ? '==' : '==='} '${val}'`).join(on);
   const c = s.indexOf(on);
   const code = lexView(s, isPy ? 'python' : 'javascript').code;
   const close = (i) => { for (let d = 0; ; i++) { if ('([{'.includes(code[i])) d++; else if (')]}'.includes(code[i]) && !--d) return i; } };

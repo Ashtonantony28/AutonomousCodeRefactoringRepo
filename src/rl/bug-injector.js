@@ -746,7 +746,6 @@ function literalMutant(src, t) {
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
-const BLOCK_KW = /^(?:if|elif|else|while|for|do)$/;
 // A switch value: 16 random lowercase letters (no digit, sign or boolean spelling).
 const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 + b % 26)).join('');
 
@@ -869,7 +868,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     }
   }
   const swappedKeyword = (hi, a, b) => diffed && hunks[hi].gaps.some(g => g.ins.some(([s, e]) => s === a && e === b) &&
-    g.del.some(([s, e]) => BLOCK_KW.test(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
+    g.del.some(([s, e]) => KEYWORDS[lang].has(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
   let jsn;
   const nodes = () => jsn || (jsn = jsNodes(src, file, code));
   const build = (c) => {
@@ -878,8 +877,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     if (!mut) return null;
     const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
-    // A block keyword that replaced another (`while` -> `if`, `elif` -> `if`)
-    // is not covered by its own condition's kill.
+    // A block keyword whose stretch deletes another keyword (`while`, `with`,
+    // `try` -> `if`) is not covered by its own condition's kill.
     if (c.op.name === 'negate_condition') {
       const [, ws, kw] = /^(\s*)(\w+)/.exec(c.m[0]), k = c.m.index + ws.length;
       if (swappedKeyword(c.hunk, k, k + kw.length)) span[0] = k + kw.length;
@@ -889,12 +888,13 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
   for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
   // The variable is read once per module load, into a module-level binding
-  // the switches test (before any statement but a docstring, `__future__`
-  // import or directive; no target before it). Mutant and control runs both
-  // set it, to two random values of one shape (`env` / `control`), so the
-  // environment's key set and value shape are the same in all three runs.
+  // (before any statement but a docstring, `__future__` import or directive;
+  // no target before it) that each switch compares. Mutant and control runs
+  // both set it, to two random values of one shape (`env` / `control`), so
+  // the environment and the binding have the same type in all three runs.
   const [val, off] = [token(), token()];
-  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '${val}'` : `var ${on} = globalThis.process.env.${name} === '${val}';`;
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}')` : `var ${on} = globalThis.process.env.${name};`;
+  const cond = lang === 'python' ? `${on} == '${val}'` : `${on} === '${val}'`;
   const [at, form] = shape.hoist || [src.length, 'stmt'];
   const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
   // A mutant's edits as a switch on the smallest target holding them ->
@@ -905,8 +905,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const x of shape.targets) if (x[0] <= lo && hi <= x[1] && (lo < hi || (x[0] < lo && lo < x[1])) && (!t || x[1] - x[0] < t[1] - t[0])) t = x;
     if (!t || t[0] < at) return null;
     const [s, e, form, ind] = t, o = src.slice(s, e), m = applyEdits(o, edits, s);
-    const text = lang === 'python' ? (form === 'block' ? `if ${on}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${on} else (${o}))`)
-      : form === 'block' ? `if (${on}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${on}) (${m}); else (${o})` : `(${on} ? (${m}) : (${o}))`;
+    const text = lang === 'python' ? (form === 'block' ? `if ${cond}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${cond} else (${o}))`)
+      : form === 'block' ? `if (${cond}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${cond}) (${m}); else (${o})` : `(${cond} ? (${m}) : (${o}))`;
     return { edits: [[s, e - s, text]], lo: s, hi: e };
   };
   const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
