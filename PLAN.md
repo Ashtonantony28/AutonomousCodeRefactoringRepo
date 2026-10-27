@@ -102,6 +102,10 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG45 | Keyword swaps beyond the list, load failures outside the hooked process, Python switch state | SG43 | thread worker | done |
 | SG46 | ESM hook beside async loaders, bounded separator scans, nested sitecustomize | SG45 | thread worker | done |
 | SG47 | Pin SG44/SG45 separator, keyword and child-process rules | SG46 | thread worker | done |
+| SG48 | Python load hook first on PYTHONPATH, SDK retries off | SG47 | thread worker | done |
+| SG49 | Continuation `;`, keyword-less loop swaps, shifting commas, slice colons | SG48 | thread worker | done |
+| SG50 | importlib loads, CJS via import(), nested runners, Node without registerHooks | SG48 | thread worker | done |
+| SG51 | Python excepthook after operator sitecustomize; pin SG49/SG50 arms | SG50 | thread worker | done |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -297,6 +301,30 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - Per-call module-binding digests are bounded like SG20's export state (incremental hash, size cap).
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
+
+### SG51 — Python excepthook after operator sitecustomize; pin SG49/SG50 arms (A42-C1, A42-H1–H4, A42-M1, A42-L1, A42-L2)
+
+Problem: an operator sitecustomize that sets `sys.excepthook` (chaining to `sys.__excepthook__`) replaces the hook's main-module logger, so a child whose main module raises counts as a kill. Surviving safety mutants: `continued` arms (call/template, `in`/`instanceof`, `?`/`:`, binary ops), `droppedKeyword` for JS `for` and Python one-line `for`, slice `:` on a call's subscript, `exec_module` logging the module name.
+
+Acceptance: audit/42 py-excepthook and unpinned ok; those mutants killed; `audit/11/mutants.js --check` ok; audit/39 run.js 0 committed; `npm test` green.
+
+### SG50 — importlib loads, CJS via import(), nested runners, Node without registerHooks (A39-H3–H6, A39-L1, A39-L2)
+
+Problem: Python `importlib.import_module` / `reload` / `exec_module` loads are not logged; `import()` of CJS skips `Module._compile` beside `registerHooks`; a nested `node --test` with `NODE_TEST_CONTEXT` stripped is excused as `R`; no fail-closed row without `registerHooks`. Kill-control doc wording and README worker-thread limit drift.
+
+Acceptance: audit/39 h3–h6, load-probes, control-status ok; audit/37, audit/40 py-site-shadow, audit/38 ok; `audit/11/mutants.js --check` ok; `npm test` green.
+
+### SG49 — Continuation `;`, keyword-less loop swaps, shifting commas, slice colons (A39-C1, A39-H1, A39-H2, A39-M1)
+
+Problem: a `;` at the start of a continuation line is exempt; `while (c) s;` → `c && s;` commits on the `&&` kill; a `,` before kept arguments shifts them and commits on the sibling's kill; `s[k]` → `s[k:k + 1]` via an exempt `:`.
+
+Acceptance: audit/39 c1, h1, h2 and token-sites rows ok; audit/35, audit/31 0 committed; audit/38 ok; `audit/11/mutants.js --check` ok; `npm test` green.
+
+### SG48 — Python load hook first on PYTHONPATH, SDK retries off (A40-C1, A40-M1)
+
+Problem: `runTests` appends its sitecustomize hook dir to PYTHONPATH, so an operator entry with its own `sitecustomize.py` shadows it; a child import error then counts as a kill and AUDIT-35 L03 commits. The SDK client keeps its default 2 retries and 10-minute timeout (6 requests on a persistent 429).
+
+Acceptance: `node audit/40/py-site-shadow.js` and `node audit/40/sdk-retries.js` ok; `node audit/37/py-site-nest.js` ok; operator sitecustomize still runs; `npm test` green.
 
 ### SG47 — Pin SG44/SG45 separator, keyword and child-process rules (A38-H1–H5, A38-M1, A38-L2)
 
@@ -552,3 +580,11 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | SG46 | green | A test process with an async loader (`--import`, `--loader`, `--experimental-loader` in execArgv or `NODE_OPTIONS`) skips the `registerHooks` ES module hook (node fails every ES module load beside it) and logs `U <key>`: a load failure unless its node:test file process exits 0, so such suites run and edits are judged but a failing mutant run there never kills (README limits). bug-injector `uncoveredToken`: `fresh()` binary-searches its cursor, `tupleNew()` binary-searches the line's comma slice, logical line starts / ends are memoised (A33-M1); fuzz of 3,800 random JS / Python edits gives identical results to the old code. `plainMutant()` throws at the end of the string; the hook sitecustomize chains past every copy of itself (nested runs). audit/37 async-loader, sg44-scale --reps 2 (re-anchored: bounds already in src), plain-mutant-hang, py-site-nest, hook-load / py-hook --reps 3 ok; audit/35 0 committed; audit/36 comma-demotes-operand, 32 caught-load-names, 24 caught-load-failure, 28 switch-leak ok; audit/27 0/41. audit/11 re-anchored TR-jspass, BI-pylogical plus TR-urow, TR-asyncesm, TR-sitenest: `--check` 270/270, all killed (BI-pyflag now in 78 s). 5 new tests fail on the old code. npm test 530/530 ×2; bench ok (difftest p95 316 ms, validator p95 332 ms); coverage validation 94.21 / runner 94.03 / rl 98.78 / orchestrator 94.25. |
 | 2026-10-27 | audits r12 | AUDIT-38 | 0C/5H/1M/2L: SG44 separator and `semiReach` arms, SG45 any-deleted-keyword rule, child-process C/P rows and the duplicate-id `s` flag unpinned (mutated copies commit or count load failures as kills) → SG47; no flaky tests in 7 runs; 48 mutants added to audit/11. |
 | 2026-10-27 | SG47 | green | Tests only, no src change (every mutant case already gives the CLAUDE.md outcome on the real code). bug-injector: subscript and right-hand tuple commas, inserted commas no held tuple, a leading hole, a split across an inserted call holding kept code, a `;` cut before an `in` line, after an object literal or before a same-line name (`const x = t; await s.v`: load-bearing, a mutated copy commits on `drop_await`), a block `}` and `case` label as no operand, any deleted keyword (`delete` → `if`), a trailing comma at file end. test-runner: an ES module CLI child and env-stripped CJS / ESM children catching a load throw are collection errors; a U+2028 duplicate id is indexed under its name. audit/11 BI-tuplefresh re-anchored on `tupleNew`'s binary-searched comma scan: `--check` 318/318; the 12 safety mutants plus BI-seminlr, BI-semicase (label) killed. audit/38 unpinned 11/11 ok. npm test 533/533 ×3 (88–90 s); bench ok (difftest p95 200 ms, validator p95 214 ms); coverage validation 95.28 / runner 94.03 / rl 99.03 / orchestrator 94.25, bug-injector.js 99.89 (101 only). |
+| 2026-10-27 | audits r13 | AUDIT-40 | 1C/0H/1M/2L: an operator PYTHONPATH `sitecustomize` shadows the load hook, child import errors count as kills and AUDIT-35 L03 commits (C1); SDK default retries (M1) → SG48. L1/L2 any `--import` / ES module CLI `process.exit()` fail closed. |
+| 2026-10-27 | audits r13 | AUDIT-41 | 0C/0H/2M/0L: any `--import` (also a plain setup module) disables kills (M1, same as A40-L1); a runtime `module.register()` loader still crashes test processes (M2, README limit). No new super-linear scan or leak; 20k-test exec 28.9 s mutant phase. |
+| 2026-10-27 | SG48 | green | Hook dir first on PYTHONPATH; the hook's sitecustomize still chains to the next non-copy (operator's) one. `getClient` `maxRetries: 0`, 300 s timeout (`callClaude` keeps its one 10 s 429 retry). audit/40 py-site-shadow, sdk-retries, audit/37 py-site-nest ok. 2 new tests. npm test 535/535. |
+| 2026-10-27 | audits r13 | AUDIT-39 | 1C/6H/1M/2L: 9 of 14 corpus edits committed. Continuation-line `;` (C1); keyword-less loop step (H1); comma shifting kept args (H2) → SG49. importlib loads (H3), CJS via `import()` beside registerHooks (H4, SG45 regression), nested runner `R` excuse (H5), no fail-closed row without registerHooks (H6) → SG50. |
+| 2026-10-27 | SG49 | green | `semiReach`: a line break left of a `;` ends a statement only when the next kept token cannot continue the line (C1). `droppedKeyword`: a hunk deleting a block keyword (JS `do else for switch try catch finally while with`, Python `else for while with try except finally match`) more often than it inserts it is `uncovered_token` (H1; `if`/`elif` swaps still stand on their operator's kill). `shifts`: a `,` inside a kept `(`/`[` with kept code after it is structural (H2); a Python `:` in a kept subscript with no kept `:` is structural (M1). audit/39 c1/h1/h2, token-sites ok; run.js only load entries left; audit/35, 31 0 committed; audit/38 ok; audit/11 `--check` 322, 4 new mutants killed. npm test 536/536. |
+| 2026-10-27 | SG50 | green | Python load core wraps `_LoaderBasics.exec_module` (importlib `import_module` / `reload` / `exec_module`, H3). The `registerHooks` hook marks CommonJS compiled by the ES module loader (`import()`, H4), with a `node:test` wrapper module for isolation-none runs. Only the root `--test` process (`REFACTOR_LOAD_ROOT`, removed from its env) logs `R`; nested runners' file processes are spawned children (H5). No `registerHooks` → `U` row, fail closed (H6). CLAUDE.md control wording matches per-test code (L1); README limits updated (L2). audit/39 all ok (run.js 0 committed), audit/37/38/40 ok; audit/11 `--check` 327 after merge with SG49, 9 new/re-anchored killed. npm test 538/538 merged. |
+| 2026-10-27 | audits r13 | AUDIT-42 | 1C/4H/1M/3L: operator `sys.excepthook` replaces the hook's main-module logger (C1); `continued`, `droppedKeyword`, call-subscript slice and `exec_module` path arms unpinned (H1–H4) → SG51. No flaky tests in 7 runs; 27 mutants added (354). |
+| 2026-10-27 | SG51 | green | Python hook runs the chained sitecustomize first, then wraps whatever `sys.excepthook` it set (in `finally`), C1. Tests pin `continued` arms, JS / Python `for` drops, call-subscript slices, the `exec_module` `__file__` path, the no-registerHooks `U` row and a `.cjs` top-level `return`; timing test added to audit/11 FLAKY. audit/42 py-excepthook, unpinned ok; 14 mutants killed; audit/39 0 committed; audit/37/38/40 ok; `--check` 354. npm test 542/542; coverage validation 95.28 / runner 94.12 / rl 99.05 / orchestrator 94.25. |

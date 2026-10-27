@@ -938,9 +938,33 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape, lang);
+  const bare = diffed && (uncoveredToken(src, hunks, out, names, litToks, view, shape, lang) || droppedKeyword(src, before, hunks, lang));
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
+}
+
+// A hunk that deletes a block keyword more often than it inserts it is no
+// evidence, whatever replaces it: a kill of the new step (`while (c) s;` ->
+// `c && s;`) shows only that the step matters -> { text, at, hunk } of the
+// hunk's first inserted token, or null.
+const BLOCK_KW = {
+  javascript: new Set('do else for switch try catch finally while with'.split(' ')),
+  python: new Set('else for while with try except finally match'.split(' '))
+};
+function droppedKeyword(src, before, hunks, lang) {
+  for (let hunk = 0; hunk < hunks.length; hunk++) {
+    const h = hunks[hunk], n = new Map();
+    if (!h.ranges.length) continue;
+    for (const g of h.gaps) {
+      for (const [s, e] of g.del) if (BLOCK_KW[lang].has(before.slice(s, e))) n.set(before.slice(s, e), (n.get(before.slice(s, e)) || 0) + 1);
+      for (const [s, e] of g.ins) if (BLOCK_KW[lang].has(src.slice(s, e))) n.set(src.slice(s, e), (n.get(src.slice(s, e)) || 0) - 1);
+    }
+    if ([...n.values()].some(k => k > 0)) {
+      const [a, b] = h.ranges.find(([s, e]) => src.slice(s, e).trim()) || h.ranges[0];
+      return { text: src.slice(a, b), at: a, hunk };
+    }
+  }
+  return null;
 }
 
 // The first inserted token no mutant covers -> { text, at, hunk }, or null.
@@ -991,20 +1015,23 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
     }
     return true;
   };
-  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), commaAt = new Map(), lambdas = new Set();
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), commaAt = new Map(), colonAt = new Map(), lambdas = new Set();
   for (let i = 0; i < code.length; i++) {
     const c = code[i], top = open.length ? open[open.length - 1] : -1;
-    if (c === ',' || c === ';') {
+    if (c === ',' || c === ';' || c === ':') {
       encl.set(i, top);
+      if (c === ':') (colonAt.get(top) || colonAt.set(top, []).get(top)).push(i);
       if (c === ',') { commas.set(top, (commas.get(top) || 0) + 1); (commaAt.get(top) || commaAt.set(top, []).get(top)).push(i); }
     } else if (c === 'l' && lang === 'python' && code.startsWith('lambda', i) && !/[\w.]/.test(code[i - 1] || '') && !/\w/.test(code[i + 6] || '')) lambdas.add(top);
     else if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
   const fields = new Set(view.lits.filter(l => l.kind === 'fstring').flatMap(l => l.holes.map(([h]) => h - 1)));
-  // A `;` or `,` that changes statement or value structure:
+  // A `;`, `,` or `:` that changes statement or value structure:
   // - one with kept code of its own level on both sides, past inserted
   //   tokens (it splits an operand or a statement);
+  // - a `,` in a kept call, array, pattern or parameter list with kept
+  //   elements after it (it shifts them: `f(e)` -> `f(0, e)`);
   // - JS: a comma operator next to kept code (it discards or demotes a kept
   //   operand), an array elision, a `;` as the empty body of an `if` /
   //   `else` / `for` (`for await`) / `while` / `with` / `do` head or before
@@ -1015,7 +1042,7 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   //   comma (statement level, a grouping paren, a subscript, an f-string
   //   field); a trailing comma that makes a tuple: at statement level, or in
   //   a paren or subscript holding no other comma of its own (a lambda's are
-  //   not).
+  //   not); a `:` that makes a slice of a kept subscript with no kept `:`.
   const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
   const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
   // Logical line bounds, memoised per physical line.
@@ -1057,15 +1084,29 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
     }
     return null;
   };
+  // The first kept token right of a continues the expression on its left.
+  const continued = (a) => {
+    const r = reach(a, 1);
+    return !!r && /^(?:[.,?:*%<>=&|^/([`]|\+(?!\+)|-(?!-)|!=|(?:in|instanceof)(?![\w$]))/.test(code.slice(r.i, r.i + 11));
+  };
+  // In a kept `(` / `[`, kept code (not a comma) of a's level after a, past
+  // inserted tokens: a `,` there shifts kept arguments or elements.
+  const shifts = (a) => {
+    const o = encl.get(a) ?? -1, c = pair.get(o);
+    if (!'(['.includes(code[o] || '-') || c === undefined || fresh(o, o + 1)) return false;
+    for (let i = a + 1; i < c; i++) if (!/[\s,]/.test(code[i]) && !fresh(i, i + 1)) return true;
+    return false;
+  };
   // As reach, for a JS `;`: across a line break, a statement end or a
   // statement start ASI separates (a name, `++` / `--`), a block's `}` or a
-  // `case` / `default` / label `:` is no operand.
+  // `case` / `default` / label `:` is no operand; a line end is a statement
+  // end only when the kept code right of the `;` would not continue it.
   const semiReach = (a, d) => {
     const r = reach(a, d);
     if (!r) return null;
     const c = code[r.i];
     if (d > 0) return r.nl && /^(?:(?!(?:in|instanceof)\b)[\w$]|\+\+|--)/.test(code.slice(r.i, r.i + 11)) ? null : r;
-    if (r.nl && /[\w$)\]}'"`]/.test(c)) return null;
+    if (r.nl && /[\w$)\]}'"`]/.test(c) && !continued(a)) return null;
     if (c === '}') {
       const h = prevCode(pair.get(r.i) ?? 0);
       if (h < 0 || ')};{'.includes(code[h]) || /(?:=>|(?<![\w$])(?:else|try|finally|do))$/.test(code.slice(Math.max(0, h - 8), h + 1))) return null;
@@ -1094,6 +1135,7 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   const structural = (a, text) => {
     if (lang !== 'python') {
       if (text === ',' && ([code[prevCode(a)], code[nextCode(a + 1)]].includes(',') || code[prevCode(a)] === '[')) return true;
+      if (text === ',' && shifts(a)) return true;
       if (text === ',' && seqs.some(([s, e]) => s <= a && a < e) && beside(a)) return true;
       if (text === ',') return splits(a);
       if (text !== ';') return false;
@@ -1109,9 +1151,11 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
       return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!\s*(?:[.:]|(?:[-+*/%&|^@]|\/\/|\*\*|<<|>>)?=(?!=))))\b/.test(code.slice(lineStart(a), a)) ||
         splits(a);
     }
+    const o = encl.get(a) ?? -1;
+    if (text === ':') return code[o] === '[' && !fresh(o, o + 1) && pyApplied(o) && (colonAt.get(o) || []).every(i => fresh(i, i + 1));
     if (text !== ',') return false;
     if (splits(a)) return true;
-    const o = encl.get(a) ?? -1;
+    if (shifts(a)) return true;
     if (beside(a) && tupleNew(a, o)) return true;
     const n = nextCode(a + 1), q = code[n];
     if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));

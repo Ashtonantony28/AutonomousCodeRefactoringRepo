@@ -271,13 +271,25 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   module. The hooks reach child processes that keep the environment: a JS
   child a test spawns logs its throws but is never the file process (though
   it inherits `NODE_TEST_CONTEXT`), so a throw it catches is a load
-  failure; a Python child logs through a sitecustomize on `PYTHONPATH`,
-  including a main module that raises. An ES module that loads but does not
-  complete is logged too (named when a CommonJS node:test callback imports
-  it, else by the file process). Not seen: a child whose `NODE_OPTIONS` or
-  `PYTHONPATH` is replaced, `python -I` / `-E` / `-S`, a child that sets
-  its own `sys.excepthook`, worker threads, and ES modules on a Node
-  without `module.registerHooks`. A process with an async loader
+  failure, and so is one in a file process of a `node --test` a test
+  spawns (only the root runner counts as one); a Python child logs through
+  a sitecustomize put first on `PYTHONPATH` (it first runs the next
+  sitecustomize on the path, e.g. the operator's, then wraps the
+  `sys.excepthook` that one set), including a main module that raises, and modules loaded
+  through `importlib.import_module`, `importlib.reload` or a source
+  loader's `exec_module`. An ES module, or a CommonJS module `import()`
+  loads (node compiles it without `Module._compile`), that loads but does
+  not complete is logged too (named when a CommonJS node:test callback
+  imports it, else by the file process); so is a CommonJS module loaded
+  that way that ends early with a top-level `return` (a load failure, no
+  kill). Not seen: a child whose `NODE_OPTIONS` or `PYTHONPATH` is
+  replaced, `python -I` / `-E` / `-S`, a child that sets its own
+  `sys.excepthook`, a custom Python loader with its own `exec_module`, and
+  code a custom loader runs through `vm.runInThisContext` / `vm.Script`
+  (no module load). Worker threads take the same preload. On a Node
+  without `module.registerHooks` (before 22.15 / 23.5) every process fails
+  closed like one with an async loader (below): such a suite runs, but a
+  failing mutant run is no kill. A process with an async loader
   (`--import`, `--loader`, `--experimental-loader`: tsx, ts-node/esm,
   esmock) cannot take the ES module hook beside it, so its ES module loads
   are not seen: it fails closed, a load failure unless it is a node:test

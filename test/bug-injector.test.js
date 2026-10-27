@@ -481,6 +481,50 @@ test('editMutants: `for`, `do` and `else` replaced by a guard, a Python `;` on a
   assert.strictEqual(unc('py', '    return max(n - 1, 0)', '    return max(n, - 1, 2)'), ',', 'a comma splitting an operand');
 });
 
+test('editMutants: a `;` opening a continuation line, a loop turned into one step, a `,` before kept arguments and a new slice `:` are uncovered (AUDIT-39 C1, H1, H2, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', '  const v = Math.min(n, 9)\n    + Math.max(0, n - 9);\n  return v + t;', '  const v = Math.min(n, 9)\n    ; t = t + Math.max(0, n - 9);\n  return v + t;'), ';', 'cuts the operand of the line above');
+  assert.strictEqual(unc('js', '  const v = xs[0]\n    .trim();\n  return v;', '  const v = xs[0]\n    ; s(xs).trim();\n  return v;'), ';', 'cuts a member continuation');
+  assert.strictEqual(unc('js', '  while (xs.length > 9) xs.pop();\n  return xs;', '  xs.length > 9 && xs.pop();\n  return xs;'), '&&', '`while` -> `&&`');
+  assert.strictEqual(unc('js', '  while (t.length > 9) t = t.slice(1);\n  return t;', '  t.length > 9 ? t = t.slice(1) : t = t;\n  return t;'), '?', '`while` -> `?:`');
+  assert.strictEqual(unc('py', '    while n > 9:\n        n = n - 1\n    return n', '    n = n - (n > 9)\n    return n'), '(', 'Python `while` dropped');
+  assert.strictEqual(unc('js', '  return t.slice(n);', '  return t.slice(0, n);'), ',', 'shifts a kept argument');
+  assert.strictEqual(unc('js', '  return [s, t];', "  return [s, '', t];"), ',', 'shifts a kept element');
+  assert.strictEqual(unc('js', '  const [a] = xs;\n  return a;', '  const [h, a] = xs;\n  return a + h;'), ',', 'shifts a pattern element');
+  assert.strictEqual(unc('py', '    return t.replace(s, n)', "    return t.replace('x', s, n)"), ',', 'Python call');
+  assert.strictEqual(unc('py', '    return [s, t]', "    return ['x', s, t]"), ',', 'Python list');
+  assert.strictEqual(unc('py', '    return s[n]', '    return s[n:n + 1]'), ':', 'an index made a slice');
+  // Appended arguments, a new call around kept code and a kept slice need nothing more.
+  assert.strictEqual(unc('js', '  return t.slice(n);', '  return t.slice(n, 9);'), null);
+  assert.strictEqual(unc('js', '  return t;', '  return Math.max(0, t);'), null);
+  assert.strictEqual(unc('py', '    return s[n:]', '    return s[n:9]'), null);
+  assert.strictEqual(unc('js', '  while (n > 9) n = n - 1;\n  return n;', '  while (n > 9) n = n - 2;\n  return n;'), null);
+});
+
+test('editMutants: a `;` before a kept call, `in`, ternary or operator line, a dropped `for` and a slice of a call result are uncovered; a `++` line, a moved loop and a slice step are not (AUDIT-42 H1-H3, L1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  for (const [b, a] of [
+    ['t\n    (n)', 't\n    ; s(n)(n)'],
+    ['t\n    [n]', 't\n    ; s(n)[n]'],
+    ['t\n    `${n}`', 't\n    ; s(n)`${n}`'],
+    ['t\n    in xs', 't\n    ; s(t) in xs'],
+    ['t\n    instanceof xs', 't\n    ; s(t) instanceof xs'],
+    ['n\n    ? s : t', 'n\n    ; s(n) ? s : t'],
+    ['n\n    * 2', 'n\n    ; s(n) * 2'],
+    ['n\n    < t', 'n\n    ; s(n) < t'],
+    ['n\n    & t', 'n\n    ; s(n) & t']
+  ]) assert.strictEqual(unc('js', `  const v = ${b};\n  return v;`, `  const v = ${a};\n  return v;`), ';', a);
+  assert.strictEqual(unc('js', '  for (; xs.length > 9;) xs.pop();\n  return xs;', '  xs.length > 9 && xs.pop();\n  return xs;'), '&&', '`for` -> `&&`');
+  assert.strictEqual(unc('py', '    for _ in range(len(xs) - 9): xs.pop()\n    return xs', '    len(xs) > 9 and xs.pop()\n    return xs'), '>', 'Python one-line `for` dropped');
+  assert.strictEqual(unc('py', '    return s.split()[n]', '    return s.split()[n:n + 1]'), ':', 'an index of a call result made a slice');
+  assert.strictEqual(unc('py', '    return xs[0][n]', '    return xs[0][n:n + 1]'), ':', 'an index of a subscript made a slice');
+  // ASI ends the line above before `++` / `--`; a loop moved within its hunk and a step added to a kept slice need nothing more.
+  assert.strictEqual(unc('js', '  let v = n\n  ++t;\n  return v + t;', '  let v = n\n  ; s(n) + ++t;\n  return v + t;'), null);
+  assert.strictEqual(unc('js', '  let v = n\n  --t;\n  return v + t;', '  let v = n\n  ; s(n) + --t;\n  return v + t;'), null);
+  assert.strictEqual(unc('js', '  while (n > 9) n--; t = String(t).slice(0, 9) + s;\n  return n + t;', '  t = String(t).slice(0, 9) + s; while (n > 9) n--;\n  return n + t;'), null);
+  assert.strictEqual(unc('py', '    return s[n:9]', '    return s[n:9:2]'), null);
+});
+
 // ---------- SG34: same-text mutant switch, structure, strings ----------
 
 // Runs `call` on the module `src` (a JS file defining f) with the mutant's env set or unset.

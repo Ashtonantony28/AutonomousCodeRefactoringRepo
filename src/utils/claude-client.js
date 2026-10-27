@@ -12,6 +12,7 @@ const cache = require('./api-cache');
 const MODEL = 'claude-sonnet-4-20250514';
 const DEFAULT_MAX_TOKENS = 4000;
 const RATE_LIMIT_BACKOFF_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 300_000;
 
 let injected = null;
 
@@ -31,7 +32,7 @@ function getClient() {
     throw new Error('ANTHROPIC_API_KEY is not set in the environment');
   }
   const Ctor = Anthropic.Anthropic || Anthropic.default || Anthropic;
-  return new Ctor({ apiKey });
+  return new Ctor({ apiKey, maxRetries: 0, timeout: REQUEST_TIMEOUT_MS });
 }
 
 function isRateLimit(err) {

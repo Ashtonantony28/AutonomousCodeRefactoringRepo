@@ -109,17 +109,23 @@ saturation figures are reported on the dashboard as a spend indicator only.
     as the empty body of an `if` / `else` / `for` (`for await`) / `while` /
     `with` / `do` head or before code the expression would continue into
     (`(`, `[`, template, `+`, `-`, `/`, same line or next; not `++` /
-    `--`); a `,` or `;` with kept code of its own level on both sides, past
+    `--`), or at the start of a line whose kept code past inserted tokens
+    continues the line above (`a\n + b` → `a\n ; r = r + b`); a `,` or `;` with kept code of its own level on both sides, past
     inserted tokens (it splits an operand or a statement: `6000 - 1` →
     `6000 | 0, - 1`, `a && b` → `a; log(b) && b`); a JS comma operator next
     to kept code (`return a` → `return a, b`) or array elision (`[x,,]`);
+    a `,` in a kept call, array, pattern or parameter list (Python: call,
+    list, tuple) with kept elements after it, past inserted tokens (it
+    shifts them: `slice(e)` → `slice(0, e)`, `[a, b]` → `[a, '', b]`);
     a Python `,` next to kept code that makes a tuple of a statement, a
     grouping paren, a subscript or an f-string field that held no kept comma
     (`if (c)` → `if (c, log(n))`, `{x}` → `{x,}`); Python `;` on a
     compound statement's logical line (a multi-line header included), a
     trailing comma at statement level, in a grouping paren (after any
     keyword: `if`, `elif`, `while`, `for`, …) or a subscript that holds no
-    other comma of its own (a lambda's commas are not)) must lie inside the span every mutant of one site changes
+    other comma of its own (a lambda's commas are not); a Python `:` that
+    makes a slice of a kept subscript with no kept `:` (`s[k]` →
+    `s[k:k + 1]`)) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
@@ -134,7 +140,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `def`, a moved bracket or indentation; an `if` / `elif` / `while` whose
     stretch deletes another keyword (`while`, `else`, `with`, `switch`,
     `try`, `match`, `async for` → `if`), which its own condition site does
-    not cover) is no evidence
+    not cover; the first inserted token of a hunk that deletes a block
+    keyword (`while`, `for`, `do`, `else`, `with`, `switch`, `try`,
+    `catch` / `except`, `finally`, `match`) more often than it inserts it,
+    whatever replaces it: `while (c) s;` → `c && s;` / `c ? s : t = t;`) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
@@ -200,10 +209,12 @@ saturation figures are reported on the dashboard as a spend indicator only.
   failed to load (a test file process crashed, a failure raised from a
   module body — `Module._compile` / `in <module>`, or logged by the load
   hooks every run installs, children that keep the environment included:
-  a preloaded `Module._compile` wrapper, an ES module load hook (a module
-  loaded but not completed at exit; a process with an async loader gets
-  none and counts as a load failure unless it is a node:test file process
-  that exits 0), a sitecustomize wrapping `__import__`
+  a preloaded `Module._compile` wrapper, an ES module load hook (a module,
+  or a CommonJS one `import()` loads, loaded but not completed at exit; a
+  process with an async loader, or on a node without `module.registerHooks`,
+  gets none and counts as a load failure unless it is a node:test file
+  process that exits 0), a sitecustomize wrapping `__import__` and the
+  source loaders' `exec_module` (`importlib.import_module`, `reload`)
   (not `ImportError`) and logging a main module that raises, keyed by a
   pytest plugin; test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
@@ -212,7 +223,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   unescaped, control characters as TAP writes them) that
   passed (with no reported test or suite of that name, as below), elsewhere in a node:test
   file process that exits 0 (not a child it spawns, though that inherits
-  `NODE_TEST_CONTEXT`), or in a pytest test or collected
+  `NODE_TEST_CONTEXT`, nor a file process of a `node --test` it spawns),
+  or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
@@ -222,9 +234,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
   (the main run's time until a surviving mutant run measures it), none after
   the first starts with less than that time + 0.5 s left. Only a failing run
   kills a mutant; a timed-out run is re-run once and counts only if that run
-  fails. A kill must reproduce: the same test fails a second mutant run and the
-  suite then passes with the switch off (three runs per kill, all inside the same
-  budget, so suites over about a third of it end `mutation_budget`); a
+  fails. A kill must reproduce: the same test fails a second mutant run and
+  passes in a third run with the switch off, the control, whatever other
+  tests do there (three runs per kill, all inside the same budget, so
+  suites over about a third of it end `mutation_budget`); a
   mutant passing its second run is no kill, and a test failing in the
   control is none either (a flaky suite). Otherwise `reverted`
   with reason `edit_not_exercised` / `no_coverage_tool` (no test ran the

@@ -801,6 +801,117 @@ test('runTests: an ES module CLI child, or a child spawned without NODE_TEST_CON
   }
 });
 
+test('runTests: a CommonJS source caught in import(), a nested node --test a test spawns, and a node without module.registerHooks are collection errors (AUDIT-39 H4, H5, H6)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT, opts = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => {
+    if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev;
+    if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+    delete process.env.SG50_BAD;
+  });
+  const dir = tmp(t, 'refactor-sg50-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  for (const d of ['src', 'sub', 'test']) fs.mkdirSync(path.join(dir, d));
+  const body = "if (process.env.SG50_BAD) throw new Error('bad');\n";
+  fs.writeFileSync(path.join(dir, 'src/m.js'), `'use strict';\n${body}module.exports = { show: (s) => s };\n`);
+  fs.writeFileSync(path.join(dir, 'src/m.mjs'), `${body}export const show = (s) => s;\n`);
+  fs.writeFileSync(path.join(dir, 'old-node.js'), "delete require('module').registerHooks;\n");
+  const cjs = "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n";
+  const esm = "import test from 'node:test';\nimport assert from 'node:assert';\n";
+  const caught = (src) => `test('a', async () => { let m; try { m = await import('${src}'); } catch { m = null; } assert.ok(m); });\n`;
+  fs.writeFileSync(path.join(dir, 'sub/inner.js'), `${cjs}test('inner', () => { let m; try { m = require('../src/m.js'); } catch { m = null; } console.log(m ? 'LOADED' : 'MISSING'); });\n`);
+  const nested = `${cjs}test('a', () => {\n  const env = { ...process.env, NODE_TEST_CONTEXT: undefined };\n  const r = require('child_process').spawnSync(process.execPath, ['--test', require('path').join(__dirname, '../sub/inner.js')], { encoding: 'utf8', env });\n  assert.match(r.stdout, /LOADED/);\n});\n`;
+  const cases = [
+    ['esm.test.mjs', esm + caught('../src/m.js')],
+    ['cjs.test.js', cjs + caught('../src/m.js')],
+    ['nested.test.js', nested],
+    ['old.test.mjs', esm + caught('../src/m.mjs'), `--require=${path.join(dir, 'old-node.js')}`]
+  ];
+  for (const [file, text, options] of cases) {
+    for (const f of fs.readdirSync(path.join(dir, 'test'))) fs.rmSync(path.join(dir, 'test', f));
+    fs.writeFileSync(path.join(dir, 'test', file), text);
+    if (options) process.env.NODE_OPTIONS = options; else if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+    delete process.env.SG50_BAD;
+    assert.strictEqual((await runTests({ repoRoot: dir })).status, 'passed', file);
+    process.env.SG50_BAD = '1';
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, file);
+  }
+  // A CommonJS source that loads through import() and completes is no load failure.
+  if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+  delete process.env.SG50_BAD;
+  for (const f of fs.readdirSync(path.join(dir, 'test'))) fs.rmSync(path.join(dir, 'test', f));
+  fs.writeFileSync(path.join(dir, 'test/esm.test.mjs'), `${esm}test('show', async () => { const m = await import('../src/m.js'); assert.strictEqual(m.default.show('a'), 'b'); });\n`);
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed', red.stdout);
+  assert.strictEqual(red.collection_error, undefined);
+});
+
+test('runTests: on a node without module.registerHooks only a node:test file process logs P; a CommonJS source require() loads may end early (AUDIT-42 M1, L1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT, opts = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => {
+    if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev;
+    if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+  });
+  const dir = tmp(t, 'refactor-sg51u-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  for (const d of ['bin', 'src', 'test']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'src/m.mjs'), "throw new Error('bad');\n");
+  fs.writeFileSync(path.join(dir, 'bin/cli.mjs'), "try { await import('../src/m.mjs'); } catch { process.exit(0); }\n");
+  fs.writeFileSync(path.join(dir, 'old-node.js'), "delete require('module').registerHooks;\n");
+  const cjs = "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n";
+  fs.writeFileSync(path.join(dir, 'test/cli.test.js'), `${cjs}test('cli', () => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const r = require('child_process').spawnSync(process.execPath, [require('path').join(__dirname, '../bin/cli.mjs')], { env });
+  assert.strictEqual(r.status, 0);
+  const rows = require('fs').readFileSync(process.env.REFACTOR_LOAD_LOG, 'utf8').split('\\n');
+  assert(rows.some(l => l.startsWith('U\\t' + r.pid + '.')));
+  assert(!rows.some(l => l.startsWith('P\\t' + r.pid + '.')), 'a child that is no file process never passes');
+});
+`);
+  process.env.NODE_OPTIONS = `--require=${path.join(dir, 'old-node.js')}`;
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'passed', r.stdout);
+  assert.deepStrictEqual(r.tests, { cli: 'pass' });
+  // A CommonJS source require() loads that ends early with a top-level return is no load failure.
+  if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+  fs.rmSync(path.join(dir, 'test/cli.test.js'));
+  fs.writeFileSync(path.join(dir, 'src/early.cjs'), "'use strict';\nmodule.exports = { show: (s) => s };\nif (module.exports) return;\nmodule.exports = null;\n");
+  fs.writeFileSync(path.join(dir, 'test/early.test.js'), `${cjs}test('early', () => { assert.strictEqual(require('../src/early.cjs').show('a'), 'b'); });\n`);
+  const red = await runTests({ repoRoot: dir });
+  assert.strictEqual(red.status, 'failed', red.stdout);
+  assert.strictEqual(red.collection_error, undefined);
+});
+
+test('runTests: pytest: a module body that raises under importlib.import_module, reload or exec_module, in the test or a child, is a collection error (AUDIT-39 H3)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  t.after(() => { delete process.env.SG50_BAD; });
+  const dir = tmp(t, 'refactor-sg50py-');
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os\nif os.environ.get('SG50_BAD'):\n    raise ValueError('bad')\n");
+  const caught = (expr) => `    try:\n        m = ${expr}\n    except Exception:\n        m = None\n    assert m is not None\n`;
+  const child = "import importlib\\ntry:\\n    importlib.import_module('app.m'); print('ok')\\nexcept Exception:\\n    print('err')";
+  const bodies = [
+    `import importlib\n\n\ndef test_a():\n${caught("importlib.import_module('app.m')")}`,
+    `import importlib, os\n\n\ndef test_a():\n    saved = os.environ.pop('SG50_BAD', None)\n    import app.m\n    if saved is not None:\n        os.environ['SG50_BAD'] = saved\n${caught('importlib.reload(app.m)')}`,
+    `import importlib.util, pathlib\n\n\ndef load():\n    spec = importlib.util.spec_from_file_location('mm', pathlib.Path(__file__).parent.parent / 'app' / 'm.py')\n    mod = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(mod)\n    return mod\n\n\ndef test_a():\n${caught('load()')}`,
+    `import subprocess, sys\n\n\ndef test_a():\n    r = subprocess.run([sys.executable, '-c', "${child}"], capture_output=True, text=True)\n    assert r.stdout.strip() == 'ok'\n`
+  ];
+  for (const body of bodies) {
+    fs.writeFileSync(path.join(dir, 'tests/test_a.py'), body);
+    delete process.env.SG50_BAD;
+    assert.strictEqual((await runTests({ repoRoot: dir })).status, 'passed', body);
+    process.env.SG50_BAD = '1';
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, body);
+  }
+});
+
 test('loadFailed: a duplicate whose name holds U+2028 is indexed under that name (AUDIT-38 H5)', (t) => {
   const { loadFailed } = require('../src/runner/test-runner');
   const dir = tmp(t, 'refactor-sg47lf-');
@@ -1004,4 +1115,64 @@ test('runTests: pytest: a nested run (two hook dirs on PYTHONPATH) starts python
     ''].join('\n'));
   const r = await runTests({ repoRoot: dir });
   assert.strictEqual(r.status, 'passed', r.stdout);
+});
+
+test('runTests: pytest: an operator sitecustomize on PYTHONPATH still runs, and a python child that fails to import the code is still a collection error (AUDIT-40 C1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const prev = { PYTHONPATH: process.env.PYTHONPATH, SG48_MARK: process.env.SG48_MARK, SG48_BAD: process.env.SG48_BAD };
+  t.after(() => { for (const [k, v] of Object.entries(prev)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const dir = tmp(t, 'refactor-sg48py-');
+  const site = tmp(t, 'refactor-sg48site-');
+  const mark = path.join(site, 'mark');
+  fs.writeFileSync(path.join(site, 'sitecustomize.py'), "import os\nopen(os.environ['SG48_MARK'], 'a').write('x')\n");
+  process.env.PYTHONPATH = [site, prev.PYTHONPATH].filter(Boolean).join(path.delimiter);
+  process.env.SG48_MARK = mark;
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os\n\nif os.environ.get('SG48_BAD'):\n    raise RuntimeError('bad')\n\n\ndef show(s):\n    return s\n");
+  fs.writeFileSync(path.join(dir, 'tests/test_cli.py'), "import os, subprocess, sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n\ndef test_cli():\n    r = subprocess.run([sys.executable, '-c', \"import app.m as m\\nprint(m.show('ab'))\"], cwd=ROOT, capture_output=True, text=True)\n    assert r.stdout == 'ab\\n'\n");
+  delete process.env.SG48_BAD;
+  const ok = await runTests({ repoRoot: dir });
+  assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+  assert.strictEqual(fs.readFileSync(mark, 'utf8'), 'xx', 'the operator sitecustomize runs once in pytest and once in its child');
+  process.env.SG48_BAD = '1';
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.strictEqual(r.collection_error, true, r.stdout);
+});
+
+test('runTests: pytest: an operator sitecustomize that sets sys.excepthook keeps a python child main module that raises a collection error (AUDIT-42 C1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const prev = { PYTHONPATH: process.env.PYTHONPATH, SG51_BAD: process.env.SG51_BAD };
+  t.after(() => { for (const [k, v] of Object.entries(prev)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const dir = tmp(t, 'refactor-sg51py-');
+  const site = tmp(t, 'refactor-sg51site-');
+  fs.writeFileSync(path.join(site, 'sitecustomize.py'), 'import sys\ndef _report(t, v, tb):\n    sys.__excepthook__(t, v, tb)\nsys.excepthook = _report\n');
+  process.env.PYTHONPATH = [site, prev.PYTHONPATH].filter(Boolean).join(path.delimiter);
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os, sys\n\nif os.environ.get('SG51_BAD'):\n    raise RuntimeError('bad')\nprint(sys.argv[1])\n");
+  fs.writeFileSync(path.join(dir, 'tests/test_cli.py'), "import os, subprocess, sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n\ndef test_cli():\n    r = subprocess.run([sys.executable, os.path.join(ROOT, 'app', 'm.py'), 'ab'], cwd=ROOT, capture_output=True, text=True)\n    assert r.stdout == 'ab\\n'\n");
+  delete process.env.SG51_BAD;
+  const ok = await runTests({ repoRoot: dir });
+  assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+  process.env.SG51_BAD = '1';
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.strictEqual(r.collection_error, true, r.stdout);
+});
+
+test('runTests: pytest: a source loaded by path under a test-like module name that fails to load is logged by its file (AUDIT-42 H4)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const prev = process.env.SG51_BAD;
+  t.after(() => { if (prev === undefined) delete process.env.SG51_BAD; else process.env.SG51_BAD = prev; });
+  const dir = tmp(t, 'refactor-sg51exec-');
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os\nif os.environ.get('SG51_BAD'):\n    raise ValueError('bad')\n\n\ndef show(s):\n    return s\n");
+  fs.writeFileSync(path.join(dir, 'tests/test_a.py'), "import importlib.util, pathlib\n\n\ndef test_a():\n    spec = importlib.util.spec_from_file_location('test_helper', pathlib.Path(__file__).parent.parent / 'app' / 'm.py')\n    m = importlib.util.module_from_spec(spec)\n    try:\n        spec.loader.exec_module(m)\n    except Exception:\n        m = None\n    assert m is not None and m.show('a') == 'a'\n");
+  delete process.env.SG51_BAD;
+  assert.strictEqual((await runTests({ repoRoot: dir })).status, 'passed');
+  process.env.SG51_BAD = '1';
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.strictEqual(r.collection_error, true, r.stdout);
 });
