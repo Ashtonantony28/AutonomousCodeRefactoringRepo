@@ -275,7 +275,9 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   spawns (only the root runner counts as one); a Python child logs through
   a sitecustomize put first on `PYTHONPATH` (it first runs the next
   sitecustomize on the path, e.g. the operator's, then wraps the
-  `sys.excepthook` that one set), including a main module that raises, and modules loaded
+  `sys.excepthook` that one set; outside pytest, an uncaught exception is
+  also logged at exit when a later hook, e.g. an operator `usercustomize`,
+  replaced that wrap), including a main module that raises, and modules loaded
   through `importlib.import_module`, `importlib.reload` or a source
   loader's `exec_module`. An ES module, or a CommonJS module `import()`
   loads (node compiles it without `Module._compile`), that loads but does
@@ -283,13 +285,14 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   imports it, else by the file process); so is a CommonJS module loaded
   that way that ends early with a top-level `return` (a load failure, no
   kill). Not seen: a child whose `NODE_OPTIONS` or `PYTHONPATH` is
-  replaced, `python -I` / `-E` / `-S`, a child that sets its own
-  `sys.excepthook`, a custom Python loader with its own `exec_module`, and
+  replaced, `python -I` / `-E` / `-S`, a child that ends through
+  `os._exit`, a custom Python loader with its own `exec_module`, and
   code a custom loader runs through `vm.runInThisContext` / `vm.Script`
   (no module load). Worker threads take the same preload. On a Node
   without `module.registerHooks` (before 22.15 / 23.5) every process fails
   closed like one with an async loader (below): such a suite runs, but a
-  failing mutant run is no kill. A process with an async loader
+  failing mutant run is no kill, so no JS edit can commit (the Orchestrator
+  warns once when it executes one there). A process with an async loader
   (`--import`, `--loader`, `--experimental-loader`: tsx, ts-node/esm,
   esmock) cannot take the ES module hook beside it, so its ES module loads
   are not seen: it fails closed, a load failure unless it is a node:test

@@ -12,7 +12,11 @@
 // Pure editMutants calls; no pipeline, API or state.
 //   node audit/44/shift-reach.js
 
+const fs = require('fs');
+const path = require('path');
 const { L, sites, report } = require('../39/lib');
+// SG52 documents the `def` parameter list (CLAUDE.md "Python: call, list, tuple, `def` parameter list").
+const DEF_DOC = /Python: call,\s+list, tuple, `def` parameter list/.test(fs.readFileSync(path.resolve(__dirname, '..', '..', 'CLAUDE.md'), 'utf8'));
 const P = (...b) => L(...b, '');
 const ROWS = [
   ['L2', 'Py def parameter list `def f(a, b=2)` -> `def f(a, c=1, b=2)` (shifts positional callers; CLAUDE.md lists no Python parameter list)', 'app/x.py',
@@ -27,6 +31,7 @@ const ROWS = [
 report(ROWS.map(([id, label, file, before, after]) => {
   const r = sites(file, before, after);
   const onComma = r.stopped && r.uncovered === ',';
-  return { label: `[${id}] ${label}`, finding: id === 'ctl' ? !onComma : onComma,
+  const ctl = id === 'ctl' || (DEF_DOC && /^Py def/.test(label));
+  return { label: `[${id}] ${label}`, finding: ctl ? !onComma : onComma,
     detail: r.stopped ? `stops on ${JSON.stringify(r.uncovered || r.unmutated)}` : `judged on ${r.judged.join(', ')}` };
 }));
