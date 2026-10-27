@@ -201,7 +201,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
   module body — `Module._compile` / `in <module>`, or logged by the load
   hooks every run installs, children that keep the environment included:
   a preloaded `Module._compile` wrapper, an ES module load hook (a module
-  loaded but not completed at exit), a sitecustomize wrapping `__import__`
+  loaded but not completed at exit; a process with an async loader gets
+  none and counts as a load failure unless it is a node:test file process
+  that exits 0), a sitecustomize wrapping `__import__`
   (not `ImportError`) and logging a main module that raises, keyed by a
   pytest plugin; test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
