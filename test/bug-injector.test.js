@@ -908,6 +908,36 @@ test('editMutants: a subscript or right-hand tuple comma, a leading hole, a spli
   assert.strictEqual(raw('x = 1', 'x = 1,', 'app/x.py'), ',', 'a trailing comma at the end of the file');
 });
 
+test('editMutants: a deleted loop head, a block keyword offset only by an unrelated one, deleted braces or a one-line suite of several statements and a new format directive are uncovered (AUDIT-43 H1-H3, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  for (const [lang, b, a, text, why] of [
+    ['js', '  while (t.length > 9) t = t.slice(1);\n  return t;', '  t = t.slice(1);\n  return t;', 'while', 'a loop head deleted outright'],
+    ['js', '  do t = t.slice(1); while (t.length > 9);\n  return t;', '  t = t.slice(1);\n  return t;', 'do', 'a do-while head and tail deleted'],
+    ['js', '  while (xs.length > 9) xs.pop();\n  xs.sort();\n  return xs;', '  xs.length > 9 && xs.pop();\n  while (n) n = t;\n  return xs;', '&&', 'a new `while` elsewhere in the hunk'],
+    ['js', '  if (n > 9) { xs.push(t); xs.push(s); }\n  return xs;', '  n > 9 && xs.push(t); xs.push(s);\n  return xs;', '&&', 'a block guard -> `&&`'],
+    ['js', '  if (n > 9) { xs.push(t); xs.push(s); }\n  return xs;', '  if (n > 9) xs.push(t); xs.push(s);\n  return xs;', '{', 'braces deleted'],
+    ['py', '    if n > 9: xs.append(t); xs.append(s)\n    return xs', '    n > 9 and xs.append(t); xs.append(s)\n    return xs', 'and', 'a one-line suite -> `and`'],
+    ['py', "    return f'{t}'", "    return f'{t:.6000}'", ':', 'an f-string format spec'],
+    ['py', "    return f'{t}'", "    return f'{t!r}'", '!', 'an f-string conversion'],
+    ['py', "    return '%s' % t", "    return '%.6000s' % t", '%.6000s', 'a printf precision'],
+    ['py', "    return '{}'.format(t)", "    return '{:.6000}'.format(t)", '{:.6000}', 'a str.format precision']
+  ]) assert.strictEqual(unc(lang, b, a), text, why);
+  // A one-statement block, a moved loop and a changed number in a kept directive shape stand on their sites.
+  assert.strictEqual(unc('js', '  if (n > 9) { xs.push(t); }\n  return xs;', '  n > 9 && xs.push(t);\n  return xs;'), null);
+  assert.strictEqual(unc('js', '  while (n > 9) n--; t = String(t).slice(0, 9) + s;\n  return n + t;', '  t = String(t).slice(0, 9) + s; while (n > 9) n--;\n  return n + t;'), null);
+  const fmt = sg30('py', "    return f'{t:.5}' + '%5d' % n", "    return f'{t:.6}' + '%7d' % n");
+  assert.strictEqual(fmt.ms.uncovered, undefined);
+  for (const s of ['numeric_off_by_one:6', 'numeric_off_by_one:7d']) assert(fmt.sites.includes(s), fmt.sites.join(' '));
+  assert(fmt.ms.some(m => m.site === fmt.after.indexOf('7d') && m.src.includes("'%8d'")), 'the directive number is bumped');
+});
+
+test('changeHunks: an f-string format spec is a token per number or other character, not text (AUDIT-43 H3)', () => {
+  const b = "x = f'<{t:>5}>'\n", a = "x = f'<{t:>6}>'\n";
+  const [h] = bugInjector.changeHunks(b, a, 'a.py');
+  assert.deepStrictEqual(h.ranges.map(([s, e]) => a.slice(s, e)), ['6']);
+  assert.deepStrictEqual(h.deleted.map(([s, e]) => b.slice(s, e)), ['5']);
+});
+
 test('plainMutant (test helper) throws on a switch shape it does not know instead of scanning past the end (AUDIT-37 L3)', async () => {
   const { Worker } = require('worker_threads');
   const w = new Worker(`const { parentPort, workerData } = require('worker_threads');
