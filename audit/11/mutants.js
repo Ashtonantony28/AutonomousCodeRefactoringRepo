@@ -683,7 +683,7 @@ const MUTANTS = [
   M('BI-tuplefield', 'safety', BI, 'SG44: a comma in an f-string field never makes a tuple (`f"{s}"` -> `f"{s, t}"`)',
     "    return code[o] === '(' ? !pyApplied(o) : code[o] === '[' ? pyApplied(o) : fields.has(o);", "    return code[o] === '(' ? !pyApplied(o) : code[o] === '[' ? pyApplied(o) : false;"),
   M('BI-tuplefresh', 'safety', BI, 'SG44: any other comma (inserted ones too) means the level already held a tuple (`return s` -> `return s, t, u` exempt)',
-    's <= i && i < e && !fresh(i, i + 1))) return false;', 's <= i && i < e)) return false;'),
+    'if (C[j] !== a && !fresh(C[j], C[j] + 1)) return false;', 'if (C[j] !== a) return false;'),
   M('BI-tupleline', 'safety', BI, 'SG44: a statement-level comma anywhere in the file (not on the logical line) means a tuple already (`import os, sys` exempts `return s, t`)',
     'const s = o < 0 ? lineStart(a) : o + 1, e = o < 0 ? lineEnd(a) : code.length;', 'const s = o < 0 ? 0 : o + 1, e = code.length;'),
   M('BI-tuplelambda', 'label', BI, 'SG44: a comma after a lambda head counts as tuple-making (over-rejects, fails closed)',

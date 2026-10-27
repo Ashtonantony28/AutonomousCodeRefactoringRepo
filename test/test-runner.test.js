@@ -774,6 +774,43 @@ test('runTests: a load throw in a child process the test spawns or in an ES modu
   assert.strictEqual(expected.collection_error, undefined);
 });
 
+test('runTests: an ES module CLI child, or a child spawned without NODE_TEST_CONTEXT, that catches a load throw and exits 0 is a collection error (AUDIT-38 H4)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; delete process.env.SG45_BAD; });
+  const dir = tmp(t, 'refactor-sg47-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  for (const d of ['src', 'bin', 'test']) fs.mkdirSync(path.join(dir, d));
+  const body = "if (process.env.SG45_BAD) throw new Error('bad');\n";
+  fs.writeFileSync(path.join(dir, 'src/m.js'), `'use strict';\n${body}module.exports = { show: (s) => s };\n`);
+  fs.writeFileSync(path.join(dir, 'src/m.mjs'), `${body}export const show = (s) => s;\n`);
+  const catchExit = "catch (e) { console.log('error: ' + e.message); process.exit(0); }\nconsole.log(m.show(process.argv[2]));\n";
+  fs.writeFileSync(path.join(dir, 'bin/cli.js'), `'use strict';\nlet m;\ntry { m = require('../src/m.js'); } ${catchExit}`);
+  fs.writeFileSync(path.join(dir, 'bin/cli.mjs'), `let m;\ntry { m = await import('../src/m.mjs'); } ${catchExit}`);
+  const cli = (bin, env) => "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n" +
+    `test('cli', () => {\n  const env = ${env};\n  const r = require('child_process').spawnSync(process.execPath, [require('path').join(__dirname, '../bin/${bin}'), 'ab'], { encoding: 'utf8', env });\n  assert.strictEqual(r.stdout, 'ab\\n');\n});\n`;
+  const stripped = '{ ...process.env, NODE_TEST_CONTEXT: undefined }';
+  for (const [bin, env] of [['cli.mjs', 'process.env'], ['cli.mjs', stripped], ['cli.js', stripped]]) {
+    fs.writeFileSync(path.join(dir, 'test/cli.test.js'), cli(bin, env));
+    delete process.env.SG45_BAD;
+    assert.strictEqual((await runTests({ repoRoot: dir })).status, 'passed', `${bin} ${env}`);
+    process.env.SG45_BAD = '1';
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, `${bin} ${env}`);
+  }
+});
+
+test('loadFailed: a duplicate whose name holds U+2028 is indexed under that name (AUDIT-38 H5)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg47lf-');
+  const log = path.join(dir, 'load.log');
+  const name = 'a b';
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/m.js\t${JSON.stringify(name)}\n`);
+  assert.strictEqual(loadFailed(log, dir, { [name]: 'pass', [`${name}\t#2`]: 'fail' }), true);
+  assert.strictEqual(loadFailed(log, dir, { [name]: 'pass', [`${name}\t#2`]: 'pass' }), false);
+});
+
 test('loadFailed: a process whose parent is no node --test runner is a spawned child: its key never passes and its rows carry no name (AUDIT-35 C2)', (t) => {
   const { loadFailed } = require('../src/runner/test-runner');
   const dir = tmp(t, 'refactor-sg45log-');

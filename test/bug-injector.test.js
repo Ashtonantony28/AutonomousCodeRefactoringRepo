@@ -838,6 +838,26 @@ test('editMutants: head, continue-into, unpacking, tuple-key and logical-line se
     'a `;` on a multi-line header joins the suite');
 });
 
+test('editMutants: a subscript or right-hand tuple comma, a leading hole, a split across an inserted call, a `;` cut before `in`, after an object literal or before a same-line name, and any deleted keyword are uncovered (AUDIT-38 H1-H3, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  const raw = (b, a, file = 'src/x.js') => (bugInjector.editMutants(a, { file, before: b }).uncovered || {}).text || null;
+  for (const [lang, b, a, text, why] of [
+    ['py', '    return xs[n]', '    return xs[n, t]', ',', 'a subscript key made a tuple'],
+    ['py', '    return (s)', '    return (t, s)', ',', 'a tuple whose kept element is on the right'],
+    ['py', '    return s', '    return s, t, n', ',', 'inserted commas are no tuple the level held'],
+    ['js', '  return [s];', "  return [, s + ''];", ',', 'a leading hole'],
+    ['js', '  return s.slice(0, 6000 - 1);', '  return s.slice(0, Number(6000), - 1);', ',', 'an inserted call holding kept code'],
+    ['js', '  const ok = t\n    in xs;\n  return ok;', '  const ok = t; String(t)\n    in xs;\n  return ok;', ';', 'an `in` line continues the expression'],
+    ['js', '  const o = { n: s }.n + 1;\n  return o;', '  const o = { n: s }; String(t).n + 1;\n  return o;', ';', 'an object literal is an operand'],
+    ['js', '  if (n) { t = 1 }\n  return t;', '  if (n) { t = 1 }; String(t).n + 1;\n  return t;', null, 'a block is no operand'],
+    ['js', '  switch (n) {\n    case 1: t = s;\n  }\n  return t;', '  switch (n) {\n    case 1: ; t = s;\n  }\n  return t;', null, 'a `case` label is no operand'],
+    ['js', '  delete xs.k;\n  return xs;', '  if (n) xs.k = 0;\n  return xs;', 'if', 'a deleted `delete`']
+  ]) assert.strictEqual(unc(lang, b, a), text, why);
+  const aw = (body) => `'use strict';\nasync function f(s, t) {\n${body}\n  return x;\n}\n`;
+  assert.strictEqual(raw(aw('  const x = t + s.v;'), aw('  const x = t; await s.v;')), ';', 'a same-line name after `;` is an operand');
+  assert.strictEqual(raw('x = 1', 'x = 1,', 'app/x.py'), ',', 'a trailing comma at the end of the file');
+});
+
 test('plainMutant (test helper) throws on a switch shape it does not know instead of scanning past the end (AUDIT-37 L3)', async () => {
   const { Worker } = require('worker_threads');
   const w = new Worker(`const { parentPort, workerData } = require('worker_threads');
