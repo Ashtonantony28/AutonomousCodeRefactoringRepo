@@ -109,8 +109,13 @@ saturation figures are reported on the dashboard as a spend indicator only.
     as the empty body of an `if` / `else` / `for` (`for await`) / `while` /
     `with` / `do` head or before code the expression would continue into
     (`(`, `[`, template, `+`, `-`, `/`, same line or next; not `++` /
-    `--`); a JS or Python `,` between two kept tokens that is not trailing
-    (it splits an operand: `6000 - 1` → `6000, - 1`); Python `;` on a
+    `--`); a `,` or `;` with kept code of its own level on both sides, past
+    inserted tokens (it splits an operand or a statement: `6000 - 1` →
+    `6000 | 0, - 1`, `a && b` → `a; log(b) && b`); a JS comma operator next
+    to kept code (`return a` → `return a, b`) or array elision (`[x,,]`);
+    a Python `,` next to kept code that makes a tuple of a statement, a
+    grouping paren, a subscript or an f-string field that held no kept comma
+    (`if (c)` → `if (c, log(n))`, `{x}` → `{x,}`); Python `;` on a
     compound statement's logical line (a multi-line header included), a
     trailing comma at statement level, in a grouping paren (after any
     keyword: `if`, `elif`, `while`, `for`, …) or a subscript that holds no
@@ -195,7 +200,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   plugin wrapping `__import__` (not `ImportError`); test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
-  subtest counting as its parent; names compared as TAP writes them) that
+  subtest counting as its parent; names compared as TAP ids: `\#` / `\\`
+  unescaped, control characters as TAP writes them) that
   passed (with no reported test or suite of that name, as below), elsewhere in a node:test
   file process that exits 0, or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit

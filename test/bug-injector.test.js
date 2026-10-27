@@ -122,8 +122,8 @@ test('changeHunks: line hunks with token-level changes; comments ignored; deleti
 test('editMutants with the pre-edit file: only changed tokens are mutated, tagged by hunk (AUDIT-8 C1/C2)', () => {
   const before = "function toRow(u) {\n  const n = 3;\n  return { id: u.id, name: u.name, kind: 'user', n: n };\n}\n";
   const keyOrder = "function toRow(u) {\n  const n = 3;\n  return { name: u.name, id: u.id, kind: 'user', n: n };\n}\n";
-  assert.strictEqual(bugInjector.editMutants(keyOrder, { file: 'r.js', before }).uncovered.text, 'name',
-    "'user' and 3 are unchanged; the moved key has no covered read of its name: no evidence (SG30)");
+  assert.ok([',', 'name'].includes(bugInjector.editMutants(keyOrder, { file: 'r.js', before }).uncovered.text),
+    "'user' and 3 are unchanged; the moved key has no covered read of its name and its comma splits kept code: no evidence (SG30, SG44)");
   const twoHunks = "function toRow(u) {\n  const n = 4;\n  return { id: u.id, name: u.name, kind: 'admin', n: n };\n}\n";
   const ms = bugInjector.editMutants(twoHunks, { file: 'r.js', before });
   assert.deepStrictEqual([...new Set(ms.map(m => m.hunk))], [0], 'adjacent changed lines form one hunk');
@@ -711,7 +711,8 @@ test('editMutants: a comma making a tuple after any keyword head or beside a lam
   const tup = (...xs) => `    T = (\n${xs.map(x => `        '${x}',\n`).join('')}    )\n    return s in T`;
   assert.strictEqual(unc('py', tup('a', 'b'), tup('a', 'b', 'c')), null, 'an element added to a multi-line tuple display');
   assert.strictEqual(unc('py', '    return xs[n, t]', '    return xs[n, t,]'), null, 'a subscript that is already a tuple');
-  assert.strictEqual(unc('py', '    return [s, (t)]', '    return [s, (t, n,)]'), null, 'the comma before `n` makes the tuple, the element is a site');
+  assert.strictEqual(unc('py', '    return [s, (t)]', '    return [s, (t, n,)]'), ',', 'the comma before `n` makes a tuple of kept `t` (SG44)');
+  assert.strictEqual(unc('py', '    return [s, (t, u)]', '    return [s, (t, u, n,)]'), null, 'an element added to a tuple display is a site');
   for (const op of ['++', '--']) assert.strictEqual(unc('js', `  let i = n\n  ${op}t\n  return i + t;`, `  let i = n + 1;\n  ${op}t\n  return i + t;`), null, `ASI never joins a \`${op}\` line`);
   for (const name of ['match', 'case']) {
     assert.strictEqual(unc('py', `    ${name} = s\n    return ${name}`, `    ${name} = s; xs.append(n + 1)\n    return ${name}`), null, `\`${name}\` as a name`);
@@ -749,4 +750,34 @@ test('editMutants: a token with no mutant is covered by its own operands\' use s
   assert.strictEqual(wrap.ms.uncovered && wrap.ms.uncovered.text, 'typeof');
   assert(!sg30('js', '  return s;', '  return s.trim();').ms.uncovered, 'the dot of a member call stands on its name');
   assert(!sg30('py', '    return s', '    return s.strip()').ms.uncovered);
+});
+
+test('editMutants: a `,` or JS `;` beside kept code that demotes it, an elision or a new tuple is uncovered; a new element, argument or statement is not (AUDIT-36 H1, H2, AUDIT-35 H2)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  for (const [b, a, why] of [
+    ['  return s;', '  return s, t;', 'the comma operator discards `s`'],
+    ['  const x = s && t;\n  return x;', '  const x = s; String(t) && t;\n  return x;', 'the `;` cuts `&& t` off `x`'],
+    ['  return [s];', "  return [s + '',,];", 'a trailing hole'],
+    ['  return [s, t];', "  return [s + '', , t];", 'an inner hole beside an inserted sibling'],
+    ['  return s.slice(0, 6000 - 1);', '  return s.slice(0, 6000 | 0, - 1);', 'a split beside an inserted sibling']
+  ]) assert.notStrictEqual(unc('js', b, a), null, why);
+  for (const [b, a, why] of [
+    ['    if (n > 1):\n        return t\n    return s', '    if (n > 1, len(t)):\n        return t\n    return s', 'an always-true tuple'],
+    ['    return s', '    return s, t', 'a tuple of the returned value'],
+    ['    return f"{s}"', "    return f\"{s[:9] + '',}\"", 'an f-string field made a tuple'],
+    ['    x = s and t\n    return x', '    x = s; str(t) and t\n    return x', 'the `;` cuts `and t` off `x`'],
+    ['    return s[:max(6000 - 1, 0)]', '    return s[:max(6000 | 0, - 1, 0)]', 'a split beside an inserted sibling']
+  ]) assert.notStrictEqual(unc('py', b, a), null, why);
+  for (const [b, a, why] of [
+    ['  return [s];', '  return [s, t];', 'an element appended'],
+    ['  return String(s);', '  return String(s, t);', 'an argument appended'],
+    ['  let a = s;\n  return a;', '  let a = s, b = t;\n  return a + b;', 'a declarator appended'],
+    ['  let x = s;\n  return x;', '  let x = s;\n  x = x + t;\n  return x;', 'a statement after a complete one'],
+    ['  let x = s\n  return x', '  let x = s\n  x = x + t;\n  return x', 'a statement between ASI-separated ones']
+  ]) assert.strictEqual(unc('js', b, a), null, why);
+  for (const [b, a, why] of [
+    ['    return [s]', '    return [s, t]', 'an element appended'],
+    ['    return max(s)', '    return max(s, t)', 'an argument appended'],
+    ['    return (s, t)', '    return (s, t, n)', 'an element appended to a tuple']
+  ]) assert.strictEqual(unc('py', b, a), null, why);
 });

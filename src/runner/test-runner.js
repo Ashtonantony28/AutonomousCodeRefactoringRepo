@@ -386,16 +386,22 @@ function pyExercised(jsonPath, repoRoot, absFile, src, span, { noData = false } 
 // through NODE_OPTIONS unless the suite picks its own reporters) or pytest
 // JUnit XML (`--tb=short`, so a frame run by a module body reads
 // `in <module>`). -> { tests: { id: 'pass' | 'fail' | 'skip' | 'error' },
-// load } or null. `load`: a module failed to load (a test file process
-// crashed, a failure raised from a module body, a pytest collection error).
-// Only 'fail' is an assertion or exception inside a test.
+// load, suites? } or null. An id is the test's name (TAP: its suites' names
+// and its own joined by ` > `, `\#` / `\\` unescaped, control characters
+// as TAP writes them; JUnit: `classname::name`). `suites` (TAP, only when
+// any): suite ids, as tests. `load`: a module failed to load (a test file
+// process crashed, a failure raised from a module body, a pytest collection
+// error). Only 'fail' is an assertion or exception inside a test.
 const LOAD_FRAME = /\bModule\._compile\b|\bModuleJob\.run\b/;
-// tests[id] = state; a repeated id gets the next free `#n` (per-id counter).
+// tests[id] = state; a repeated id gets the next free `<id>\t#<n>` (per-id
+// counter). No name holds a raw tab (TAP writes `\t`), so no name reads as
+// another's duplicate.
+const DUP = '\t#';
 function adder(tests) {
   const next = new Map();
   return (id, state) => {
     let k = id, n = next.get(id) || 2;
-    while (k in tests) k = `${id}#${n++}`;
+    while (k in tests) k = `${id}${DUP}${n++}`;
     next.set(id, n);
     tests[k] = state;
   };
@@ -420,9 +426,9 @@ function tapResults(text) {
       }
       continue;
     }
-    const sub = line.match(/^\s*# Subtest: (.*)$/);
+    const sub = line.match(/^\s*# Subtest: (.*)$/s);
     if (sub) { names.length = indent >> 2; names.push(untap(sub[1])); continue; }
-    const m = line.match(/^\s*(not )?ok \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
+    const m = line.match(/^\s*(not )?ok \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/s);
     if (m) {
       names.length = indent >> 2;
       cur = { id: [...names, untap(m[2])].join(' > '), state: m[3] ? 'skip' : m[1] ? 'fail' : 'pass' };
@@ -542,7 +548,7 @@ function loadFailed(log, repoRoot, tests, suites) {
   const { isTestFile } = require('../utils/file-discovery');
   const rows = [...new Set(text.split('\n'))].map(l => l.split('\t'));
   const passed = new Set(rows.filter(r => r[0] === 'P').map(r => r[1]));
-  // name -> every id `name` or `name#<n>` passed, indexed once per call.
+  // name -> every id `name` or `name\t#<n>` passed, indexed once per call.
   let byName = null;
   const memo = new Map();
   const CTRL = { '\b': '\\b', '\f': '\\f', '\t': '\\t', '\n': '\\n', '\r': '\\r', '\v': '\\v' };
@@ -550,7 +556,7 @@ function loadFailed(log, repoRoot, tests, suites) {
     if (!byName) {
       byName = new Map();
       for (const [id, state] of [tests, suites].flatMap(o => Object.entries(o || {}))) {
-        const m = /^(.*)#\d+$/s.exec(id);
+        const m = /^(.*)\t#\d+$/s.exec(id);
         for (const k of m ? [id, m[1]] : [id]) byName.set(k, byName.get(k) !== false && state === 'pass');
       }
     }

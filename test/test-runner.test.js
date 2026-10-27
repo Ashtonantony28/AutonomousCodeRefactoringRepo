@@ -521,11 +521,11 @@ test('tapResults / junitResults: a fixture error is no test failure; duplicate i
   const setup = '<error message="failed on setup with &quot;fixture \'db\' not found&quot;">file t/m.py, line 4\n  def test_bad(db):\nE       fixture \'db\' not found</error>';
   assert.deepStrictEqual(junitResults(xml(tc('ok'), tc('bad', setup))), { tests: { 't.m::ok': 'pass', 't.m::bad': 'error' }, load: false });
   const fail = '<failure message="assert 1 == 2">t/m.py:5: in test_x\n    assert 1 == 2</failure>';
-  assert.deepStrictEqual(junitResults(xml(tc('x'), tc('x', fail))).tests, { 't.m::x': 'pass', 't.m::x#2': 'fail' });
-  assert.deepStrictEqual(junitResults(xml(tc('x', fail), tc('x'), tc('x'))).tests, { 't.m::x': 'fail', 't.m::x#2': 'pass', 't.m::x#3': 'pass' });
+  assert.deepStrictEqual(junitResults(xml(tc('x'), tc('x', fail))).tests, { 't.m::x': 'pass', 't.m::x\t#2': 'fail' });
+  assert.deepStrictEqual(junitResults(xml(tc('x', fail), tc('x'), tc('x'))).tests, { 't.m::x': 'fail', 't.m::x\t#2': 'pass', 't.m::x\t#3': 'pass' });
   const entry = (n, ok) => [`# Subtest: a`, `${ok ? '' : 'not '}ok ${n} - a`, '  ---', "  type: 'test'", ...(ok ? [] : ["  failureType: 'testCodeFailure'"]), '  ...'];
   const tap = ['TAP version 13', ...entry(1, true), ...entry(2, false), ...entry(3, true), '1..3'].join('\n');
-  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 'a#2': 'fail', 'a#3': 'pass' }, load: false });
+  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 'a\t#2': 'fail', 'a\t#3': 'pass' }, load: false });
 });
 
 test('runTests: node:test per-test results; a module that throws while loading, in a test or at a test file\'s top, is a collection error (AUDIT-16 C2)', async (t) => {
@@ -783,7 +783,7 @@ test('runTests: pytest: pytest.raises around an import (in a test or at a test m
   }
 });
 
-test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered #2, #3 … (AUDIT-22 C1)', () => {
+test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered \\t#2, \\t#3 … (AUDIT-22 C1)', () => {
   const { tapResults, junitResults } = require('../src/runner/test-runner');
   const n = 20_000;
   let tap = 'TAP version 13\n';
@@ -793,10 +793,10 @@ test('tapResults / junitResults: 20,000 tests sharing one name parse in linear t
   const a = tapResults(tap), b = junitResults(xml);
   assert(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
   assert.strictEqual(Object.keys(a.tests).length, n);
-  assert.strictEqual(a.tests[`works#${n}`], 'pass');
-  assert.strictEqual(b.tests[`t::works#${n}`], 'pass');
+  assert.strictEqual(a.tests[`works\t#${n}`], 'pass');
+  assert.strictEqual(b.tests[`t::works\t#${n}`], 'pass');
   const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
-  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x#3']);
+  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x\t#2']);
 });
 
 test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids once; duplicate names must all pass (AUDIT-29 H1)', (t) => {
@@ -813,8 +813,8 @@ test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids 
   const t0 = Date.now();
   assert.strictEqual(check(names, tests), false);
   assert(Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
-  assert.strictEqual(check(['a', 'a#2'], { a: 'pass', 'a#2': 'pass', 'a#2#3': 'pass' }), false);
-  assert.strictEqual(check(['a'], { a: 'pass', 'a#2': 'fail' }), true);
+  assert.strictEqual(check(['a', 'a#2'], { a: 'pass', 'a\t#2': 'pass', 'a#2': 'pass', 'a#2\t#2': 'pass' }), false);
+  assert.strictEqual(check(['a'], { a: 'pass', 'a\t#2': 'fail' }), true);
   assert.strictEqual(check(['a#2'], { a: 'fail', 'a#2': 'pass' }), false);
   assert.strictEqual(check(['a'], { 'a#x': 'pass' }), true);
 });
@@ -824,7 +824,20 @@ test('loadFailed: a failing test of the logged name is never excused by a later 
   const dir = tmp(t, 'refactor-lf34-');
   const log = path.join(dir, 'load.log');
   fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"x"\nP\t1.2\n`);
-  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x#2': 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x\t#2': 'pass' }), true);
   assert.strictEqual(loadFailed(log, dir, { x: 'fail' }, { x: 'pass' }), true);
-  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x#2': 'pass' }, { x: 'pass' }), false);
+  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x\t#2': 'pass' }, { x: 'pass' }), false);
+});
+
+test('tapResults / loadFailed: a name ending in `#<n>` is never a duplicate marker; names holding U+2028 / U+2029 are kept (AUDIT-36 L1, L2)', (t) => {
+  const { tapResults, loadFailed } = require('../src/runner/test-runner');
+  const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
+  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'dup') + ok(2, 'dup') + ok(3, 'dup\\#2')).tests), ['dup', 'dup\t#2', 'dup#2']);
+  const sep = `# Subtest: s\u2029y\n    # Subtest: in\u2028ner\n    ok 1 - in\u2028ner\n      ---\n      duration_ms: 1\n      ...\n    1..1\nok 1 - s\u2029y\n  ---\n  type: 'suite'\n  ...\n`;
+  assert.deepStrictEqual(tapResults(sep), { tests: { 's\u2029y > in\u2028ner': 'pass' }, load: false, suites: { 's\u2029y': 'pass' } });
+  const dir = tmp(t, 'refactor-lf44-');
+  const log = path.join(dir, 'load.log');
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"parse"\n`);
+  assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse#1': 'fail' }), false, 'a failing test named `parse#1` is not `parse`');
+  assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse\t#2': 'fail' }), true, 'a failing duplicate of `parse`');
 });

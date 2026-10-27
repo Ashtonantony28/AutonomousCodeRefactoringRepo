@@ -551,7 +551,8 @@ const MUTANTS = [
   M('BI-pydisplay', 'redundant', BI, 'SG41: a trailing comma in a display that already holds other commas is structural (over-rejects; fails closed)',
     'if (commas.get(o) > 1 && !lambdas.has(o)) return false;', ''),
   M('BI-pylogical', 'safety', BI, 'SG41: a Python `;` on a continuation line of a compound statement is exempt (only the physical line is read)',
-    "      while (s > 0 && depth.get(s)) s = code.lastIndexOf('\\n', s - 2) + 1;\n", ''),
+    // SG44: re-anchored (the logical line start is a helper).
+    "while (s > 0 && depth.get(s)) s = code.lastIndexOf('\\n', s - 2) + 1; return s;", 'return s;'),
   M('BI-pybom1', 'label', BI, 'SG38: the Python shape check does not strip a BOM (no switch places, fewer mutants: fails closed)',
     "        stack = list(ast.parse(src.removeprefix('\\\\ufeff')).body)", '        stack = list(ast.parse(src).body)'),
   M('BI-pybom2', 'label', BI, 'SG38: the Python parse check rejects a BOM file (mutants dropped: fails closed)',

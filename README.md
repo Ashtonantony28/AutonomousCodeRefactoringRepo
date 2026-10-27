@@ -284,12 +284,20 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   only by its own call's use site or a dropped prefix operator right before
   it, never by a sibling kill inside it; a `;` or `,` that changes
   structure (an empty `if` / `else` / loop / `with` body, code the
-  expression would continue into, a comma splitting kept code, a Python
-  `;` joining a suite, a trailing comma that makes a tuple) is no
-  punctuation and needs the same. The check is textual and fails closed:
-  a trailing comma added at Python statement level (`x = a, b,`), after a
-  `match(...)` / `case(...)` call or in a paren holding a lambda is
-  rejected even where it changes nothing. Shapes with no mutant are rejected, not
+  expression would continue into, a `,` or `;` with kept code of its level
+  on both sides past inserted code, a JS comma operator or array elision,
+  a Python `;` joining a suite, a comma that makes a tuple of kept code)
+  is no punctuation and needs the same. The check is textual and fails
+  closed: a trailing comma added at Python statement level (`x = a, b,`),
+  after a `match(...)` / `case(...)` call or in a paren holding a lambda,
+  a JS comma operator whose kept value was discarded anyway (`a();` →
+  `a(), b();`, a `for` update `i++` → `i++, j--`), a Python tuple target
+  grown from a name (`for x in xs` → `for x, y in xs`), a statement after a
+  `}` that ends an object literal, and a new statement written without `;`
+  on the line after a kept one that ends without one (`a()` →
+  `a(); log()` before a kept `b()` line: ASI is assumed only for a line
+  starting with a name or `++` / `--`) are rejected even where they change
+  nothing. Shapes with no mutant are rejected, not
   carried: a renamed or moved object key or keyword argument with no
   inserted read of the same name, a regex class bracket, names in type
   annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or
