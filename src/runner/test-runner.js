@@ -400,14 +400,18 @@ function adder(tests) {
     tests[k] = state;
   };
 }
+// node's TAP reporter writes `\\` and `\#` for `\` and `#` (control
+// characters as `\n` etc., left as they are): ids carry the names.
+const untap = (s) => s.replace(/\\([\\#])/g, '$1');
 function tapResults(text) {
-  const tests = {}, names = [], add = adder(tests);
+  const tests = {}, suites = {}, names = [], add = adder(tests), addSuite = adder(suites);
   let load = false, cur = null, yaml = null;
   for (const line of text.split('\n')) {
     const indent = line.length - line.trimStart().length;
     if (yaml !== null) {
       if (line.trim() === '...' && indent === yaml) {
-        if (cur.type !== 'suite') add(cur.id, cur.state === 'fail' && cur.failureType !== 'testCodeFailure' ? 'error' : cur.state);
+        if (cur.type === 'suite') addSuite(cur.id, cur.state);
+        else add(cur.id, cur.state === 'fail' && cur.failureType !== 'testCodeFailure' ? 'error' : cur.state);
         yaml = null;
       } else {
         const kv = line.trim().match(/^(\w+):\s*'?([\w-]*)/);
@@ -417,15 +421,16 @@ function tapResults(text) {
       continue;
     }
     const sub = line.match(/^\s*# Subtest: (.*)$/);
-    if (sub) { names.length = indent >> 2; names.push(sub[1]); continue; }
+    if (sub) { names.length = indent >> 2; names.push(untap(sub[1])); continue; }
     const m = line.match(/^\s*(not )?ok \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
     if (m) {
       names.length = indent >> 2;
-      cur = { id: [...names, m[2]].join(' > '), state: m[3] ? 'skip' : m[1] ? 'fail' : 'pass' };
+      cur = { id: [...names, untap(m[2])].join(' > '), state: m[3] ? 'skip' : m[1] ? 'fail' : 'pass' };
       yaml = indent + 2;
     }
   }
-  return Object.keys(tests).length ? { tests, load } : null;
+  if (!Object.keys(tests).length) return null;
+  return Object.keys(suites).length ? { tests, load, suites } : { tests, load };
 }
 
 const unxml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
@@ -462,8 +467,9 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // a node:test test or suite callback (CJS `require('node:test')`, wrapped
 // through Module._load; a subtest counts as its parent) is logged with that
 // test's full name (`T <key> <file> <json name>`) and passes when that test
-// passed; any other throw has key = the process, passed when a node:test file
-// process exits 0. pytest: a plugin wrapping __import__ (an ImportError is a
+// or suite passed (the process key when no reported one has that name); any
+// other throw has key = the process, passed when a node:test file process
+// exits 0. pytest: a plugin wrapping __import__ (an ImportError is a
 // missing optional module, not a load failure), key = the test or collected
 // module, passed when every phase passed; a throw outside both never passes.
 const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile, ld = M._load;
@@ -483,8 +489,7 @@ let seen = false;
 M.prototype._compile = function (...a) {
   try { return c.apply(this, a); } catch (e) {
     const t = cur.getStore();
-    if (t && typeof t.fullName === 'string') { log('T\\t' + key + '\\t' + this.filename + '\\t' + JSON.stringify(t.fullName)); throw e; }
-    log('T\\t' + key + '\\t' + this.filename);
+    log('T\\t' + key + '\\t' + this.filename + (t && typeof t.fullName === 'string' ? '\\t' + JSON.stringify(t.fullName) : ''));
     if (!seen && process.env.NODE_TEST_CONTEXT) process.on('exit', (code) => { if (code === 0) log('P\\t' + key); });
     seen = true;
     throw e;
@@ -528,9 +533,10 @@ def pytest_runtest_logfinish(nodeid, location):
     _finish(not _bad)
 `;
 // Logged load failures, not caught under a key that passed, of modules other
-// than tests and conftest. One logged inside a JS test is caught when that
-// test (every test of that name, in `tests`) passed.
-function loadFailed(log, repoRoot, tests) {
+// than tests and conftest. One logged inside a JS test or suite is caught
+// when every test and suite of that name (in `tests`, `suites`) passed, or,
+// when none has it, its process key passed.
+function loadFailed(log, repoRoot, tests, suites) {
   let text;
   try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
   const { isTestFile } = require('../utils/file-discovery');
@@ -539,10 +545,11 @@ function loadFailed(log, repoRoot, tests) {
   // name -> every id `name` or `name#<n>` passed, indexed once per call.
   let byName = null;
   const memo = new Map();
-  const testPassed = (json) => {
+  const CTRL = { '\b': '\\b', '\f': '\\f', '\t': '\\t', '\n': '\\n', '\r': '\\r', '\v': '\\v' };
+  const testPassed = (json, key) => {
     if (!byName) {
       byName = new Map();
-      for (const [id, state] of Object.entries(tests || {})) {
+      for (const [id, state] of [tests, suites].flatMap(o => Object.entries(o || {}))) {
         const m = /^(.*)#\d+$/s.exec(id);
         for (const k of m ? [id, m[1]] : [id]) byName.set(k, byName.get(k) !== false && state === 'pass');
       }
@@ -550,12 +557,14 @@ function loadFailed(log, repoRoot, tests) {
     if (!memo.has(json)) {
       let name;
       try { name = JSON.parse(json); } catch { name = null; }
-      memo.set(json, typeof name === 'string' && byName.get(name) === true);
+      // As the TAP reporter writes control characters.
+      memo.set(json, typeof name === 'string' ? byName.get(name.replace(/[\b\f\t\n\r\v]/g, c => CTRL[c])) : false);
     }
-    return memo.get(json);
+    const v = memo.get(json);
+    return v === undefined ? passed.has(key) : v;
   };
   return rows.some(([k, key, f, name]) => k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
-    !(name ? testPassed(name) : passed.has(key)));
+    !(name ? testPassed(name, key) : passed.has(key)));
 }
 
 function ownsReporters(repoRoot, env) {
@@ -639,7 +648,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
       const text = fs.readFileSync(report, 'utf8');
       perTest = pytest ? junitResults(text) : tapResults(text);
     } catch { /* no per-test report */ }
-    loaded = !loadFailed(env.REFACTOR_LOAD_LOG, repoRoot, perTest && perTest.tests);
+    loaded = !loadFailed(env.REFACTOR_LOAD_LOG, repoRoot, perTest && perTest.tests, perTest && perTest.suites);
     if (tool && !result.timedOut && !result.spawnError) {
       tCov = Date.now();
       checkDeadline(deadline);

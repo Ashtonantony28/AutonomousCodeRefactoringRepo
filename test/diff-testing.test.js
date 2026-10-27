@@ -567,7 +567,8 @@ test('targets beyond the cap and an exhausted time budget are inconclusive, neve
 test('equivalent needs a minimum of value-returning runs per target', () => {
   const cur = 'function a(x) {\n  return String(x);\n}\nfunction b(x) {\n  if (x === 1 || x === 2 || x === 3) return x;\n  throw new Error("no");\n}';
   const prop = 'function a(x) {\n  return `${x}`;\n}\nfunction b(x) {\n  if (x === 1 || x === 2 || x === 3) return x;\n  throw new Error("no");\n  // same\n}';
-  const r = inFile(cur, prop, 'a, b');
+  // A budget no contended host reaches: the reason must be the value count.
+  const r = inFile(cur, prop, 'a, b', { budgetMs: 20000, hardKillMs: 30000 });
   assert.strictEqual(r.verdict, 'inconclusive', r.reason);
   assert.match(r.reason, /b: only \d+ of \d+ runs returned comparable values/);
 });

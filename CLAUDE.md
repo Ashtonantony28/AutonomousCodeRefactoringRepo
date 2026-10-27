@@ -106,10 +106,15 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `0`, never `1000`. **Fail closed per token:** every inserted or changed
     token except brackets, commas, semicolons, colons, regex delimiters and
     whitespace (a `;` or `,` that changes structure is not exempt: JS `;`
-    as the empty body of an `if` / `else` / `for` / `while` / `do` head or
-    before a line ASI would join; Python `;` on a compound statement's line,
-    a trailing comma at statement level, in a grouping paren or a
-    subscript) must lie inside the span every mutant of one site changes
+    as the empty body of an `if` / `else` / `for` (`for await`) / `while` /
+    `with` / `do` head or before code the expression would continue into
+    (`(`, `[`, template, `+`, `-`, `/`, same line or next; not `++` /
+    `--`); a JS or Python `,` between two kept tokens that is not trailing
+    (it splits an operand: `6000 - 1` → `6000, - 1`); Python `;` on a
+    compound statement's logical line (a multi-line header included), a
+    trailing comma at statement level, in a grouping paren (after any
+    keyword: `if`, `elif`, `while`, `for`, …) or a subscript that holds no
+    other comma of its own (a lambda's commas are not)) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
@@ -121,7 +126,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
     it or a dropped prefix operator right before it; a sibling site inside
     the bracket pair or line never stands in. An inserted token nothing covers (an operator or
     keyword with no mutant: `typeof`, `=>`, `@`, a Python ternary, a new
-    `def`, a moved bracket or indentation) is no evidence
+    `def`, a moved bracket or indentation; an `if` / `elif` / `while` that
+    replaced another block keyword, which its own condition site does not
+    cover) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
@@ -150,16 +157,17 @@ saturation figures are reported on the dashboard as a spend indicator only.
     expression (or a `return` statement) holding the site:
     `(_k ? (mutant) : (original))`, Python `((mutant) if _k else
     (original))`, where `_k` (a name the file does not use) is bound once
-    per module load: JS `var _k = globalThis.process.env.K === '1';` before
+    per module load: JS `var _k = globalThis.process.env.K === 'v';` before
     the first statement (after a shebang / directive prologue, no line
-    added), Python `_k = __import__('os').environ.get('K') == '1'` after
+    added), Python `_k = __import__('os').environ.get('K') == 'v'` after
     the docstring and `__future__` imports; a site with no such place (a
     key, a pattern, a class-member name, code before the binding) has no
-    mutant. Mutant runs set `K=1`; the kill's
-    third run (the control) is the same text with `K` unset, so a test that
-    reads the source (size, word count, layout, a grep) fails or passes
-    alike in both and is no kill (`mutation.control_failed` when no test is
-    left).
+    mutant. `v` and the control's value are random 16-letter strings, new
+    per edit. Mutant runs set `K=v`; the kill's third run (the control) is
+    the same text with `K` set to the other value, so a test that reads the
+    source (size, word count, layout, a grep) or the environment (its keys,
+    flag-like values) fails or passes alike in both and is no kill
+    (`mutation.control_failed` when no test is left).
   - **Deleted tokens (every hunk, also those that insert).** Each needs the
     diff test to be `equivalent` with `deletions_observed: true`: the
     current version is probed where the deleted token is evaluated (its
@@ -187,7 +195,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
   plugin wrapping `__import__` (not `ImportError`); test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
-  subtest counting as its parent) that passed, elsewhere in a node:test
+  subtest counting as its parent; names compared as TAP writes them) that
+  passed (with no reported test or suite of that name, as below), elsewhere in a node:test
   file process that exits 0, or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other

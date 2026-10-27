@@ -18,6 +18,7 @@
 //
 // Each mutation runs only when it actually changes the source.
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -745,6 +746,9 @@ function literalMutant(src, t) {
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
+const BLOCK_KW = /^(?:if|elif|else|while|for|do)$/;
+// A switch value: 16 random lowercase letters (no digit, sign or boolean spelling).
+const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 + b % 26)).join('');
 
 // Up to `max` parse-valid mutants per site of `src` (the edited file): a
 // site is one token the edit inserted or changed, and a mutant belongs to
@@ -775,7 +779,7 @@ const EDIT_MAX_SITES = 12;
 // statement around it (jsParseCheck / parsesPython), not the file. A
 // reference with no parse-valid use-site mutant gives none, marked
 // `unmutated_ref`.
-// -> [{ mutation, src, env, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
+// -> [{ mutation, src, env, control, line, hunk, site, span, ref?, revert? }] (site: the token's offset in src; span: the range every mutant of the site changes)
 function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeoutMs }) {
   const lang = editLang(file);
   if (!lang || typeof src !== 'string') return [];
@@ -864,6 +868,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       candidates.push(...order.slice(0, max * 4));
     }
   }
+  const swappedKeyword = (hi, a, b) => diffed && hunks[hi].gaps.some(g => g.ins.some(([s, e]) => s === a && e === b) &&
+    g.del.some(([s, e]) => BLOCK_KW.test(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
   let jsn;
   const nodes = () => jsn || (jsn = jsNodes(src, file, code));
   const build = (c) => {
@@ -872,14 +878,23 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     if (!mut) return null;
     const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
+    // A block keyword that replaced another (`while` -> `if`, `elif` -> `if`)
+    // is not covered by its own condition's kill.
+    if (c.op.name === 'negate_condition') {
+      const [, ws, kw] = /^(\s*)(\w+)/.exec(c.m[0]), k = c.m.index + ws.length;
+      if (swappedKeyword(c.hunk, k, k + kw.length)) span[0] = k + kw.length;
+    }
     return { edits: mut.edits, span, mutation: c.op.name, line: lineOf(c.m.index), hunk: c.hunk, site: c.site };
   };
   let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
   for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
   // The variable is read once per module load, into a module-level binding
   // the switches test (before any statement but a docstring, `__future__`
-  // import or directive; no target before it).
-  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '1'` : `var ${on} = globalThis.process.env.${name} === '1';`;
+  // import or directive; no target before it). Mutant and control runs both
+  // set it, to two random values of one shape (`env` / `control`), so the
+  // environment's key set and value shape are the same in all three runs.
+  const [val, off] = [token(), token()];
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '${val}'` : `var ${on} = globalThis.process.env.${name} === '${val}';`;
   const [at, form] = shape.hoist || [src.length, 'stmt'];
   const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
   // A mutant's edits as a switch on the smallest target holding them ->
@@ -899,7 +914,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   const out = [];
   const take = ({ edits, lo, hi, ...c }, sw) => {
     kept.set(key(c), (kept.get(key(c)) || 0) + 1);
-    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: '1' } });
+    out.push({ ...c, src: applyEdits(src, [hoist, ...sw.edits]), env: { [name]: val }, control: { [name]: off } });
   };
   if (lang === 'python') {
     // One batch: every candidate's switch, the first `max` per site that parse.
@@ -970,36 +985,53 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
     }
     return true;
   };
-  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map();
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), lambdas = new Set();
   for (let i = 0; i < code.length; i++) {
-    const c = code[i];
-    if (c === ',') encl.set(i, open.length ? open[open.length - 1] : -1);
+    const c = code[i], top = open.length ? open[open.length - 1] : -1;
+    if (c === ',') { encl.set(i, top); commas.set(top, (commas.get(top) || 0) + 1); } else if (c === 'l' && lang === 'python' && code.startsWith('lambda', i) && !/[\w.]/.test(code[i - 1] || '') && !/\w/.test(code[i + 6] || '')) lambdas.add(top);
     else if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
   // A `;` or `,` that changes statement or value structure: JS `;` as the
-  // empty body of an `if` / `else` / loop head or before a line ASI would
-  // have joined; Python `;` on a compound statement's line (joins its suite)
-  // or a trailing comma that makes a tuple.
+  // empty body of an `if` / `else` / `for` (`for await`) / `while` / `with` /
+  // `do` head or before code the expression would continue into without it
+  // (`(`, `[`, template, `+`, `-`, `/`; not a `++` / `--` line); a `,`
+  // between two kept tokens that is not trailing (it splits an operand);
+  // Python `;` on a compound statement's logical line (joins its suite) or a
+  // trailing comma that makes a tuple: at statement level, or in a paren or
+  // subscript holding no other comma of its own (a lambda's are not).
   const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
   const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
+  const splits = (a) => {
+    const p = prevCode(a), n = nextCode(a + 1);
+    return p >= 0 && n < code.length && !')]}'.includes(code[n]) && !fresh(p, p + 1) && !fresh(n, n + 1);
+  };
   const structural = (a, text) => {
     if (lang !== 'python') {
+      if (text === ',') return splits(a);
       if (text !== ';') return false;
       const p = prevCode(a);
       if (/\b(?:else|do)$/.test(code.slice(0, p + 1))) return true;
-      if (code[p] === ')' && pair.has(p) && /\b(?:if|for|while)\s*$/.test(code.slice(0, pair.get(p)))) return true;
-      return /\n/.test(code.slice(a + 1, nextCode(a + 1))) && /^[([`+\-/]/.test(code[nextCode(a + 1)] || '');
+      if (code[p] === ')' && pair.has(p) && /\b(?:if|for(?:\s+await)?|while|with)\s*$/.test(code.slice(Math.max(0, pair.get(p) - 16), pair.get(p)))) return true;
+      const n = nextCode(a + 1);
+      return /^(?:[([`/]|\+(?!\+)|-(?!-))/.test(code.slice(n, n + 2));
     }
-    if (text === ';') return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|match|case)\b/.test(code.slice(code.lastIndexOf('\n', a - 1) + 1, a));
+    if (text === ';') {
+      // `match` needs a newline after its `:`; `case` may be a name.
+      let s = code.lastIndexOf('\n', a - 1) + 1;
+      while (s > 0 && depth.get(s)) s = code.lastIndexOf('\n', s - 2) + 1;
+      return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!\s*(?:[.:]|(?:[-+*/%&|^@]|\/\/|\*\*|<<|>>)?=(?!=))))\b/.test(code.slice(s, a));
+    }
     if (text !== ',') return false;
+    if (splits(a)) return true;
     const n = nextCode(a + 1), q = code[n];
     const o = encl.get(a) ?? -1;
     if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
     if (!')]}'.includes(q || '')) return false;
     // Applied to a value (a call or subscript), not a display or grouping.
     const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
-    const applied = /[\w)\]'"]$/.test(head) && !/\b(?:return|in|not|and|or|is|if|else|yield|await|lambda|del|assert)$/.test(head);
+    const applied = /[\w)\]'"]$/.test(head) && !/(?<![\w.])(?:return|in|not|and|or|is|if|elif|else|while|for|with|as|except|raise|from|yield|await|lambda|del|assert|match|case)$/.test(head);
+    if (commas.get(o) > 1 && !lambdas.has(o)) return false;
     return code[o] === '(' ? !applied : code[o] === '[' && applied;
   };
   const strAt = new Set(view.lits.filter(l => l.kind === 'string').map(l => l.s));

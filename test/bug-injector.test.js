@@ -436,6 +436,36 @@ test('editMutants: every inserted operator and keyword is a site of its own; one
   assert(!sg30('js', '  return String(s).slice(0, 9);', '  const max = 9;\n  return String(s).slice(0, max);').ms.uncovered, 'a declaration stands on its covered name and value');
 });
 
+test('editMutants: a block keyword that replaced another is not covered by its own condition site (AUDIT-31 H2)', () => {
+  for (const [lang, b, a] of [
+    ['js', '  while (s.length > 9) s = s.slice(1);\n  return s;', '  if (s.length > 9) s = s.slice(1);\n  return s;'],
+    ['js', '  if (s.length > 9) s = s.slice(1);\n  return s;', '  while (s.length > 9) s = s.slice(1);\n  return s;'],
+    ['py', '    while s.endswith(t):\n        s = s[:-1]\n    return s', '    if s.endswith(t):\n        s = s[:-1]\n    return s'],
+    ['py', '    if n > 9:\n        s = s[:9]\n    elif t in s:\n        s = s.strip()\n    return s', '    if n > 9:\n        s = s[:9]\n    if t in s:\n        s = s.strip()\n    return s']
+  ]) {
+    const r = sg30(lang, b, a);
+    assert.strictEqual(r.ms.uncovered && r.ms.uncovered.text, a.includes('while') ? 'while' : 'if', a);
+  }
+  // A new guard's keyword stands on its condition's kill.
+  const fresh = sg30('js', '  s = s.slice(1);\n  return s;', '  if (s.length > 9) s = s.slice(1);\n  return s;');
+  assert(!fresh.ms.uncovered && fresh.sites.includes('negate_condition:if'), JSON.stringify(fresh.sites));
+});
+
+test('editMutants: `for`, `do` and `else` replaced by a guard, a Python `;` on a try / except / finally, async or case line and a comma splitting kept code are uncovered (AUDIT-34 H1, H2, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', '  for (; n > 0;) { n--; t += 1; }\n  return t;', '  if (n > 0) { n--; t += 1; }\n  return t;'), 'if', '`for` -> `if` runs the body once');
+  assert.strictEqual(unc('js', '  do { t += 1; } while (t < n);\n  return t;', '  if (t < n) { t += 1; } while (t < n);\n  return t;'), 'if', '`do` -> `if`');
+  assert.strictEqual(unc('py', "    if n > 5:\n        t = t[:5]\n    else:\n        t = t + '!'\n    return t", "    if n > 5:\n        t = t[:5]\n    elif n:\n        t = t + '!'\n    return t"), 'elif', '`else:` -> `elif n:`');
+  for (const [b, a] of [
+    ['    try: t = int(t)\n    except ValueError: t = 0\n    t = t + 1', '    try: t = int(t)\n    except ValueError: t = 0; t = t + 2'],
+    ['    try: t = int(t)\n    finally: n = 0\n    t = t + 1', '    try: t = int(t)\n    finally: n = 0; t = t + 2'],
+    ['    try: t = int(t)\n    except ValueError: t = 0', '    try: t = int(t); t = t + 2\n    except ValueError: t = 0'],
+    ['    async def g(): t = 1\n    t = t + 1', '    async def g(): t = 1; t = t + 2'],
+    ['    match n:\n        case 1: t = t * 3\n    t = t + 1', '    match n:\n        case 1: t = t * 3; t = t + 2']
+  ]) assert.strictEqual(unc('py', `${b}\n    return t`, `${a}\n    return t`), ';', a);
+  assert.strictEqual(unc('py', '    return max(n - 1, 0)', '    return max(n, - 1, 2)'), ',', 'a comma splitting an operand');
+});
+
 // ---------- SG34: same-text mutant switch, structure, strings ----------
 
 // Runs `call` on the module `src` (a JS file defining f) with the mutant's env set or unset.
@@ -479,16 +509,16 @@ test('editMutants: the switch variable is read once per module load, into a bind
   const ms = bugInjector.editMutants(a, { file: 'src/m.js', before: b });
   assert(ms.length >= 2);
   for (const m of ms) {
-    const [name] = Object.keys(m.env);
+    const [[name, val]] = Object.entries(m.env);
     assert.strictEqual(m.src.split(name).length, 2, 'one read of the variable');
-    assert(m.src.startsWith(`#!/usr/bin/env node\n'use strict';\nvar _refactor_mutant = globalThis.process.env.${name} === '1'; function f(x) {\n`), m.src);
+    assert(m.src.startsWith(`#!/usr/bin/env node\n'use strict';\nvar _refactor_mutant = globalThis.process.env.${name} === '${val}'; function f(x) {\n`), m.src);
     assert.strictEqual(m.src.split('\n').length, a.split('\n').length, 'no line added');
     const load = () => { const mod = { exports: {} }; new Function('module', m.src.replace(/^#!.*/, ''))(mod); return mod.exports.f; };
-    process.env[name] = '1';
-    let f;
-    try { f = load(); } finally { delete process.env[name]; }
+    const withVal = (v) => { process.env[name] = v; try { return load(); } finally { delete process.env[name]; } };
+    const f = withVal(val);
     assert.notStrictEqual(f(1), 2, `${m.mutation}: switched on at load stays on`);
     assert.strictEqual(load()(1), 2, 'switched off at load: the edit');
+    assert.strictEqual(withVal(m.control[name])(1), 2, 'the control value switches it off');
   }
   // A binding name the source already uses is never reused.
   const taken = 'const _refactor_mutant = 1;\nfunction f(x) {\n  return x + _refactor_mutant;\n}\n';
@@ -496,9 +526,25 @@ test('editMutants: the switch variable is read once per module load, into a bind
   assert(t.length && t.every(m => Object.keys(m.env)[0] === 'REFACTOR_MUTANT_1' && m.src.startsWith('var _refactor_mutant_1 = ')), t.map(m => m.src).join('\n'));
 });
 
+test('editMutants: mutant and control runs set the same switch variable, to random values of one shape (AUDIT-31 H1)', () => {
+  const runs = [['src/m.js', "function f(x) {\n  return x + 1;\n}\n"], ['app/m.py', 'def f(x):\n    return x + 1\n']].map(([file, b]) =>
+    bugInjector.editMutants(b.replace('x + 1', 'x + 2'), { file, before: b }));
+  for (const ms of runs) {
+    assert(ms.length);
+    for (const m of ms) {
+      assert.deepStrictEqual(Object.keys(m.control), Object.keys(m.env), 'the same key set in the control');
+      const [on, off] = [Object.values(m.env)[0], Object.values(m.control)[0]];
+      assert(/^[a-z]{16}$/.test(on) && /^[a-z]{16}$/.test(off) && on !== off, `${on} ${off}`);
+      assert(m.src.includes(`'${on}'`) && !m.src.includes(off), 'only the switch value is in the source');
+    }
+  }
+  const again = bugInjector.editMutants("function f(x) {\n  return x + 2;\n}\n", { file: 'src/m.js', before: "function f(x) {\n  return x + 1;\n}\n" });
+  assert.notStrictEqual(again[0].env.REFACTOR_MUTANT, runs[0][0].env.REFACTOR_MUTANT, 'a fresh value per call');
+});
+
 test('editMutants (Python): the switch binding goes after the docstring and __future__ imports, read once (AUDIT-25 H1)', () => {
   const { spawnSync } = require('child_process');
-  const read = "_refactor_mutant = __import__('os').environ.get('REFACTOR_MUTANT') == '1'";
+  const read = "_refactor_mutant = __import__('os').environ.get('REFACTOR_MUTANT') == 'VAL'";
   const cases = [
     ['"""Doc."""\nfrom __future__ import annotations  # c\nimport os\n\n\ndef f(x):\n    return x + 1\n', `annotations; ${read}  # c\n`],
     ['import os\n\n\ndef f(x):\n    return x + 1\n', `${read}; import os\n`],
@@ -511,11 +557,12 @@ test('editMutants (Python): the switch binding goes after the docstring and __fu
     assert(ms.length, b);
     const doc = b.startsWith('"""') ? 'Doc.' : 'None';
     for (const m of ms) {
-      assert(m.src.includes(head), m.src);
+      assert(m.src.includes(head.replace('VAL', m.env.REFACTOR_MUTANT)), m.src);
       assert.strictEqual(m.src.split('REFACTOR_MUTANT').length, 2, 'one read of the variable');
       const run = (env) => spawnSync('python3', ['-I', '-c', code], { input: m.src, encoding: 'utf8', env: { ...process.env, ...env } }).stdout.trim();
       assert.strictEqual(run({}), `3 ${doc}`, 'switched off at load: the edit');
-      const on = run({ REFACTOR_MUTANT: '1' });
+      assert.strictEqual(run(m.control), `3 ${doc}`, 'the control value switches it off');
+      const on = run(m.env);
       assert(on !== `3 ${doc}` && on.endsWith(` ${doc}`), `${m.mutation}: switched on at load stays on; the docstring stays (${on})`);
     }
   }
@@ -649,6 +696,42 @@ test('editMutants: every head, ASI line start, compound keyword and tuple-making
   // A site on the re-indented line itself does not cover the move into the block.
   const ind = sg30('py', '    if n > 1:\n        t = t[:9]\n    t = t.strip()\n    return t', "    if n > 1:\n        t = t[:9]\n        t = t.strip() + '!'\n    return t");
   assert.strictEqual(ind.ms.uncovered && ind.ms.uncovered.text, '        ');
+});
+
+test('editMutants: a comma making a tuple after any keyword head or beside a lambda is uncovered; one in a display with other commas, a `;` before `++` / `--` or after `match` / `case` names is not (AUDIT-32 H3, M1, L1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  const head = (kw) => (kw === 'elif' ? '    if n > 5:\n        return s\n    elif' : `    ${kw}`);
+  for (const kw of ['elif', 'while']) {
+    assert.strictEqual(unc('py', `${head(kw)} (n > 1):\n        return t\n    return s`, `${head(kw)} (n > 1,):\n        return t + 'x'\n    return s`), ',', `\`${kw} (c,):\` is always true`);
+  }
+  assert.strictEqual(unc('py', '    for (x) in xs:\n        t = x\n    return t', '    for (x,) in xs:\n        t = x\n    return t + 1'), ',', 'a `for` target unpacks');
+  assert.strictEqual(unc('py', '    return (lambda a, b: a)', '    return (lambda a, b: a,)'), ',', 'a lambda\'s commas are not the paren\'s');
+  assert.strictEqual(unc('py', '    return xs[0]', '    x, = xs[:1]\n    return x'), ',', 'an unpacking comma in new code');
+  assert.strictEqual(unc('py', '    return s.match(t)', '    return s.match(t,)'), null, 'an attribute named like a keyword is a call');
+  const tup = (...xs) => `    T = (\n${xs.map(x => `        '${x}',\n`).join('')}    )\n    return s in T`;
+  assert.strictEqual(unc('py', tup('a', 'b'), tup('a', 'b', 'c')), null, 'an element added to a multi-line tuple display');
+  assert.strictEqual(unc('py', '    return xs[n, t]', '    return xs[n, t,]'), null, 'a subscript that is already a tuple');
+  assert.strictEqual(unc('py', '    return [s, (t)]', '    return [s, (t, n,)]'), null, 'the comma before `n` makes the tuple, the element is a site');
+  for (const op of ['++', '--']) assert.strictEqual(unc('js', `  let i = n\n  ${op}t\n  return i + t;`, `  let i = n + 1;\n  ${op}t\n  return i + t;`), null, `ASI never joins a \`${op}\` line`);
+  for (const name of ['match', 'case']) {
+    assert.strictEqual(unc('py', `    ${name} = s\n    return ${name}`, `    ${name} = s; xs.append(n + 1)\n    return ${name}`), null, `\`${name}\` as a name`);
+  }
+  assert.strictEqual(unc('py', '    if (n >\n            1): t = 1\n    t = t + 1\n    return t', '    if (n >\n            1): t = 1; t = t + 2\n    return t'), ';', 'a compound statement continued over lines');
+  assert.strictEqual(unc('py', '    if n > \\\n            1: t = 1\n    t = t + 1\n    return t', '    if n > \\\n            1: t = 1; t = t + 2\n    return t'), ';', 'a backslash-continued header');
+});
+
+test('editMutants: a JS `;` after a `for await` / `with` head or before same-line code the expression would continue into, and a comma splitting kept code, are uncovered (AUDIT-31 C1, H3)', () => {
+  const unc = (b, a) => (sg30('js', b, a).ms.uncovered || {}).text || null;
+  const head = (h, b, a) => {
+    const wrap = (body) => `${h}function f(s, t, n, xs) {\n${body}\n}\nmodule.exports = { f };\n`;
+    return (bugInjector.editMutants(wrap(a), { file: 'src/x.js', before: wrap(b) }).uncovered || {}).text || null;
+  };
+  assert.strictEqual(head("'use strict';\nasync ", '  for await (const x of xs) t += x;\n  return t;', "  for await (const x of xs); t += x;\n  return t + '';"), ';', 'empty `for await` body');
+  assert.strictEqual(head('', '  with (s) t += 1;\n  return t;', "  with (s); t += 1;\n  return t + '';"), ';', 'empty `with` body (sloppy mode)');
+  assert.strictEqual(unc("  return s + (n > 1 ? 'x' : '');", "  return s + ''; + (n > 1 ? 'x' : '');"), ';', 'a same-line `;` turns a binary `+` into a statement');
+  assert.strictEqual(unc('  return s.slice(0, 6000 - 1);', '  return s.slice(0, 6000, - 1);'), ',', 'a comma splitting an operand');
+  assert.strictEqual(unc('  return s.slice(0, n);', '  return s.slice(0, n, 1);'), null, 'a comma before an inserted argument');
+  assert.strictEqual(unc('  t = t.trim()\n  return t;', '  t = t.trim(); t = t.slice(1);\n  return t;'), null, 'a `;` before a new statement');
 });
 
 test('editMutants: a moved argument-list bracket stands only on its own call or a prefix operator right before it (AUDIT-26 H1, H2)', () => {

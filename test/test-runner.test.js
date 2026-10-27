@@ -501,7 +501,7 @@ test('tapResults / junitResults: per-test states; a crashed test file or a failu
     'not ok 2 - s', '  ---', "  type: 'suite'", "  failureType: 'subtestsFailed'", '  ...', '# Subtest: c', 'not ok 3 - c', '  ---', "  type: 'test'",
     "  failureType: 'cancelledByParent'", '  ...', '1..3'
   ].join('\n');
-  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 's > x': 'fail', 's > y': 'skip', c: 'error' }, load: false });
+  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 's > x': 'fail', 's > y': 'skip', c: 'error' }, load: false, suites: { s: 'fail' } });
   const lazy = tap.replace("      failureType: 'testCodeFailure'", "      failureType: 'testCodeFailure'\n      stack: |-\n        Object.<anonymous> (/r/src/a.js:1:41)\n        Module._compile (node:internal/modules/cjs/loader:1706:14)");
   assert.strictEqual(tapResults(lazy).load, true);
   const crashed = tap.replace("  failureType: 'cancelledByParent'", "  failureType: 'testCodeFailure'\n  exitCode: 1");
@@ -708,6 +708,61 @@ test('runTests: a caught load throw in a passing node:test test is no collection
   }
 });
 
+test('runTests: a caught load throw in a passing describe() callback or a test named with `#`, `\\` or a newline is no collection error; ids carry the names (AUDIT-32 H1, H2)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; });
+  const dir = tmp(t, 'refactor-sg41-');
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'test'));
+  fs.writeFileSync(path.join(dir, 'src/config.js'), "'use strict';\nif (!process.env.SG41_KEY) throw new Error('SG41_KEY required');\n");
+  const head = "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\nconst { describe, it } = test;\n";
+  const caught = "assert.throws(() => require('../src/config'), /SG41_KEY/);";
+  const red = "test('f', () => assert.strictEqual(1, 2));\n";
+  const run = async (body, cmd = 'node --test') => {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: cmd } }));
+    fs.writeFileSync(path.join(dir, 'test/a.test.js'), head + body);
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    return r;
+  };
+  for (const [body, tests] of [
+    [`describe('s', () => { ${caught} it('a', () => {}); });\n${red}`, { 's > a': 'pass', f: 'fail' }],
+    [`test('issue #12', () => { ${caught} });\n${red}`, { 'issue #12': 'pass', f: 'fail' }],
+    [`describe('s #1', () => { it('x \\\\ y', () => { ${caught} }); });\n${red}`, { 's #1 > x \\ y': 'pass', f: 'fail' }],
+    [`test('a\\nb', () => { ${caught} });\n${red}`, { 'a\\nb': 'pass', f: 'fail' }]
+  ]) {
+    for (const cmd of ['node --test', 'node --test --experimental-test-isolation=none']) {
+      const r = await run(body, cmd);
+      assert.strictEqual(r.collection_error, undefined, `${cmd}: ${body}`);
+      assert.deepStrictEqual(r.tests, tests);
+    }
+  }
+  assert.strictEqual((await run(`describe('s #1', () => { ${caught} it('a', () => assert.strictEqual(1, 2)); });\n`)).collection_error, true, 'the suite failed');
+  assert.strictEqual((await run(`test('issue #12', () => { ${caught} assert.strictEqual(1, 2); });\ntest('g', () => {});\n`)).collection_error, true, 'the test failed');
+});
+
+test('loadFailed: a logged name matches a test or suite as TAP writes it; a name no test or suite has falls back to its process key (AUDIT-32 H1, H2)', (t) => {
+  const { loadFailed, tapResults } = require('../src/runner/test-runner');
+  const entry = (n, name, type, ok = true) => [`# Subtest: ${name}`, `${ok ? '' : 'not '}ok ${n} - ${name}`, '  ---', `  type: '${type}'`, '  ...'];
+  const tap = ['TAP version 13', ...entry(1, 'issue \\#12 \\\\ x\\\\n', 'test'), ...entry(2, 's \\#1', 'suite'), ...entry(3, 'r', 'suite', false), '1..3'].join('\n');
+  const { tests, suites } = tapResults(tap);
+  assert.deepStrictEqual(tests, { 'issue #12 \\ x\\n': 'pass' });
+  assert.deepStrictEqual(suites, { 's #1': 'pass', r: 'fail' });
+  const dir = tmp(t, 'refactor-lf41-');
+  const log = path.join(dir, 'load.log');
+  const check = (name, rows = []) => {
+    fs.writeFileSync(log, [`T\t1.2\t${dir}/src/bad.js\t${JSON.stringify(name)}`, ...rows].join('\n') + '\n');
+    return loadFailed(log, dir, tests, suites);
+  };
+  assert.strictEqual(check('issue #12 \\ x\n'), false, 'a newline is written `\\n`');
+  assert.strictEqual(check('s #1'), false, 'a passing suite');
+  assert.strictEqual(check('r'), true, 'a failing suite');
+  assert.strictEqual(check('r', ['P\t1.2']), true, 'a failing suite is never excused by its process');
+  assert.strictEqual(check('gone'), true, 'no test or suite of that name, process not passed');
+  assert.strictEqual(check('gone', ['P\t1.2']), false, 'no test or suite of that name, process exited 0');
+});
+
 test('runTests: pytest: pytest.raises around an import (in a test or at a test module\'s top) is no collection error; a failing assertion elsewhere is a real failure (AUDIT-24 H1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
   const dir = tmp(t, 'refactor-sg33py-');
   fs.mkdirSync(path.join(dir, 'app'));
@@ -762,4 +817,14 @@ test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids 
   assert.strictEqual(check(['a'], { a: 'pass', 'a#2': 'fail' }), true);
   assert.strictEqual(check(['a#2'], { a: 'fail', 'a#2': 'pass' }), false);
   assert.strictEqual(check(['a'], { 'a#x': 'pass' }), true);
+});
+
+test('loadFailed: a failing test of the logged name is never excused by a later passing one or a passing suite (AUDIT-34 H3)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-lf34-');
+  const log = path.join(dir, 'load.log');
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"x"\nP\t1.2\n`);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x#2': 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail' }, { x: 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x#2': 'pass' }, { x: 'pass' }), false);
 });

@@ -44,9 +44,10 @@ function failedTests(r, control) {
 // parse-valid use-site mutant (`unmutated_ref`) is no evidence. A mutant
 // run that times out is re-run once and counts only if that run fails.
 // Each mutant is a switch in the source (editMutants): its runs set the
-// mutant's env variable, and its control run is the same text with the
-// variable unset, so a test that reads the source sees the same text in all
-// three. A kill is per test: a test that passed in the control run fails in
+// mutant's env variable to the switch's value, and its control run is the
+// same text with the variable set to another random value of the same shape,
+// so a test that reads the source or the environment's keys sees the same in
+// all three. A kill is per test: a test that passed in the control run fails in
 // both mutant runs, each of which ran the same tests as the control
 // (`failedTests`); a run where a module failed to load (`collection_error`),
 // without per-test results, or with a test missing, crashed or added is no
@@ -127,7 +128,7 @@ async function mutationEvidence({ repoRoot, file, before, edited, span, diffTest
         const again = await runSuite(m.src, m.env);
         if (!again) { out.budget_exhausted = true; return done(); }
         if (again.status !== 'failed' || again.collection_error) { count('unconfirmed'); continue; }
-        const control = await runSuite(m.src, Object.fromEntries(Object.keys(m.env).map(k => [k, undefined])));
+        const control = await runSuite(m.src, m.control);
         if (!control) { out.budget_exhausted = true; return done(); }
         const a = failedTests(r, control), b = failedTests(again, control);
         const tests = a && b ? a.filter(function (id) { return this.has(id); }, new Set(b)) : [];
