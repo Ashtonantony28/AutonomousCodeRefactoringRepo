@@ -98,6 +98,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG41 | Suite and escaped-name caught-load attribution, structural separators (incl. A31-C1, C2, H3) | SG40 | thread worker | done |
 | SG42 | Env-blind mutant switch, loop/chain keyword swaps | SG40 | thread worker | done |
 | SG43 | Pin keyword-swap, Python structural and duplicate-order rules | SG42 | thread worker | done |
+| SG44 | Separators before inserted code, TAP id collisions, doc drift | SG43 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -293,6 +294,12 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - Per-call module-binding digests are bounded like SG20's export state (incremental hash, size cap).
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
+
+### SG44 — Separators before inserted code, TAP id collisions, doc drift (A36-H1, A36-H2, A36-L1–L3)
+
+Problem: a `,` or JS `;` inserted after kept code and followed by inserted code is exempt punctuation (SG41's `splits` only catches kept code on both sides): `return a;` → `return a, b;`, Python `if (n > 1):` → `if (n > 1, log(n)):`, `const x = a && b;` → `const x = a; log(b) && b;` commit on a kill of the inserted code. Unescaped names collide with the `#n` duplicate marker (`dup#2`, `parse#1`); `tapResults` drops names containing U+2028/U+2029. `editMutants` / `tapResults` headers and CLAUDE.md's "compared as TAP writes them" are stale.
+
+Acceptance: `node audit/36/comma-demotes-operand.js` a–f ok; `node audit/36/tap-ids.js` ok (or the fail-safe collisions documented); `node audit/36/doc-drift.js` ok; audit/32 caught-load-names, structural-elif, audit/31 run.js S01–S07, audit/30 unpinned/dupprefix, audit/34 unpinned ok; audit/27 0/41; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
 
 ### SG43 — Pin keyword-swap, Python structural and duplicate-order rules (A34-H1–H3, A34-M1, A34-M2)
 
@@ -513,3 +520,5 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-22 | audits r11 | AUDIT-33 | 0C/0H/1M/2L: SG41 Python `;` logical-line walk is `;` × lines (+17 s at 2 MB, 1,500 `;`, still fails closed); `splits()` cursor restart and TAP unescape costs are small; random switch values 13 µs/edit; SG39 linear lookup holds. A29-M2 (10 s parse limit under load) and A25 M2–M6 carried. |
 | 2026-10-22 | audits r11 | AUDIT-34 | 0C/3H/2M/3L: keyword swaps `for`/`else`/`do`→`if`, Python `;` on try/async/case lines, splitting comma and last-duplicate-wins unpinned (mutated copies commit) → SG43; py-diff-testing budget test flaky under contention; 24 mutants added to audit/11 (260). |
 | 2026-10-27 | SG43 | green | Tests only, no src change: `editMutants` leaves `for`→`if`, `do`→`if` and `else:`→`elif n:` uncovered, a Python `;` on try / except / finally, `async def` and `case` lines and a splitting comma `max(n, - 1, 2)` uncovered; `loadFailed` keeps a failing `x` failing beside a later passing `x#2` or a passing suite `x`. py-diff-testing AUDIT-14 H1 test: budget 30 s / hard kill 40 s, and the one-pass bound becomes a CPU-time bound (< 6 s, this process + reaped children; ~1.8 s, old rescan ~10 s); diff-testing min-value-runs test (also seen failing under two concurrent suites) gets a 20 s budget so its reason is the value count. `audit/34/kwdo.js` also runs test/bug-injector.test.js on the mutated copy (it had no ok path with correct code). unpinned.js 7/7 ok, kwdo ok, mutants --check ok (260), the 8 mutants killed (baseline 518/518); 2× concurrent `npm test` ×2 green, `npm test` ×3 518/518, bench ok, coverage validation 94.21 / runner 93.88 / rl 98.99 / orchestrator 94.25. |
+| 2026-10-27 | audits r11 | PR #3 | SG39–SG43 and AUDIT-29..34 merged into the default branch (62dee97); work branch restarted. |
+| 2026-10-27 | audits r12 | AUDIT-36 | 0C/2H/0M/3L: a `,` / JS `;` after kept code followed by inserted code is exempt and commits (demotes the kept operand) → SG44 with TAP id collisions and doc drift. No switch leak; untested outcomes still produce no samples. |
