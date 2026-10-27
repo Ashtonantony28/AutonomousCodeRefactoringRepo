@@ -521,11 +521,11 @@ test('tapResults / junitResults: a fixture error is no test failure; duplicate i
   const setup = '<error message="failed on setup with &quot;fixture \'db\' not found&quot;">file t/m.py, line 4\n  def test_bad(db):\nE       fixture \'db\' not found</error>';
   assert.deepStrictEqual(junitResults(xml(tc('ok'), tc('bad', setup))), { tests: { 't.m::ok': 'pass', 't.m::bad': 'error' }, load: false });
   const fail = '<failure message="assert 1 == 2">t/m.py:5: in test_x\n    assert 1 == 2</failure>';
-  assert.deepStrictEqual(junitResults(xml(tc('x'), tc('x', fail))).tests, { 't.m::x': 'pass', 't.m::x#2': 'fail' });
-  assert.deepStrictEqual(junitResults(xml(tc('x', fail), tc('x'), tc('x'))).tests, { 't.m::x': 'fail', 't.m::x#2': 'pass', 't.m::x#3': 'pass' });
+  assert.deepStrictEqual(junitResults(xml(tc('x'), tc('x', fail))).tests, { 't.m::x': 'pass', 't.m::x\t#2': 'fail' });
+  assert.deepStrictEqual(junitResults(xml(tc('x', fail), tc('x'), tc('x'))).tests, { 't.m::x': 'fail', 't.m::x\t#2': 'pass', 't.m::x\t#3': 'pass' });
   const entry = (n, ok) => [`# Subtest: a`, `${ok ? '' : 'not '}ok ${n} - a`, '  ---', "  type: 'test'", ...(ok ? [] : ["  failureType: 'testCodeFailure'"]), '  ...'];
   const tap = ['TAP version 13', ...entry(1, true), ...entry(2, false), ...entry(3, true), '1..3'].join('\n');
-  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 'a#2': 'fail', 'a#3': 'pass' }, load: false });
+  assert.deepStrictEqual(tapResults(tap), { tests: { a: 'pass', 'a\t#2': 'fail', 'a\t#3': 'pass' }, load: false });
 });
 
 test('runTests: node:test per-test results; a module that throws while loading, in a test or at a test file\'s top, is a collection error (AUDIT-16 C2)', async (t) => {
@@ -742,6 +742,111 @@ test('runTests: a caught load throw in a passing describe() callback or a test n
   assert.strictEqual((await run(`test('issue #12', () => { ${caught} assert.strictEqual(1, 2); });\ntest('g', () => {});\n`)).collection_error, true, 'the test failed');
 });
 
+test('runTests: a load throw in a child process the test spawns or in an ES module caught by import() is a collection error; one a passing test expects is not (AUDIT-35 C2)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; delete process.env.SG45_BAD; });
+  const dir = tmp(t, 'refactor-sg45-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  for (const d of ['src', 'bin', 'test']) fs.mkdirSync(path.join(dir, d));
+  const body = "if (process.env.SG45_BAD) throw new Error('bad');\n";
+  fs.writeFileSync(path.join(dir, 'src/m.js'), `'use strict';\n${body}module.exports = { show: (s) => s };\n`);
+  fs.writeFileSync(path.join(dir, 'src/m.mjs'), `${body}export const show = (s) => s;\n`);
+  fs.writeFileSync(path.join(dir, 'bin/cli.js'), "'use strict';\nlet m;\ntry { m = require('../src/m'); } catch (e) { console.log('error: ' + e.message); process.exit(0); }\nconsole.log(m.show(process.argv[2]));\n");
+  const head = "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n";
+  const run = async (file, text, bad) => {
+    for (const f of fs.readdirSync(path.join(dir, 'test'))) fs.rmSync(path.join(dir, 'test', f));
+    fs.writeFileSync(path.join(dir, 'test', file), text);
+    if (bad) process.env.SG45_BAD = '1'; else delete process.env.SG45_BAD;
+    return runTests({ repoRoot: dir });
+  };
+  const cli = head + "test('cli', () => {\n  const r = require('child_process').spawnSync(process.execPath, [require('path').join(__dirname, '../bin/cli.js'), 'ab'], { encoding: 'utf8' });\n  assert.strictEqual(r.stdout, 'ab\\n');\n});\n";
+  const esm = "import test from 'node:test';\nimport assert from 'node:assert';\ntest('show', async () => {\n  let m = null;\n  try { m = await import('../src/m.mjs'); } catch { m = null; }\n  assert.ok(m);\n});\n";
+  for (const [file, text] of [['cli.test.js', cli], ['esm.test.mjs', esm]]) {
+    assert.strictEqual((await run(file, text, false)).status, 'passed', file);
+    const r = await run(file, text, true);
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, file);
+  }
+  // An ES module throw a passing (CJS) test expects is caught by that test's name.
+  const expected = await run('e.test.js', head + "test('esm', async () => { await assert.rejects(import('../src/m.mjs'), /bad/); });\ntest('f', () => assert.strictEqual(1, 2));\n", true);
+  assert.deepStrictEqual(expected.tests, { esm: 'pass', f: 'fail' });
+  assert.strictEqual(expected.collection_error, undefined);
+});
+
+test('runTests: an ES module CLI child, or a child spawned without NODE_TEST_CONTEXT, that catches a load throw and exits 0 is a collection error (AUDIT-38 H4)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev; delete process.env.SG45_BAD; });
+  const dir = tmp(t, 'refactor-sg47-');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { test: 'node --test' } }));
+  for (const d of ['src', 'bin', 'test']) fs.mkdirSync(path.join(dir, d));
+  const body = "if (process.env.SG45_BAD) throw new Error('bad');\n";
+  fs.writeFileSync(path.join(dir, 'src/m.js'), `'use strict';\n${body}module.exports = { show: (s) => s };\n`);
+  fs.writeFileSync(path.join(dir, 'src/m.mjs'), `${body}export const show = (s) => s;\n`);
+  const catchExit = "catch (e) { console.log('error: ' + e.message); process.exit(0); }\nconsole.log(m.show(process.argv[2]));\n";
+  fs.writeFileSync(path.join(dir, 'bin/cli.js'), `'use strict';\nlet m;\ntry { m = require('../src/m.js'); } ${catchExit}`);
+  fs.writeFileSync(path.join(dir, 'bin/cli.mjs'), `let m;\ntry { m = await import('../src/m.mjs'); } ${catchExit}`);
+  const cli = (bin, env) => "'use strict';\nconst test = require('node:test');\nconst assert = require('node:assert');\n" +
+    `test('cli', () => {\n  const env = ${env};\n  const r = require('child_process').spawnSync(process.execPath, [require('path').join(__dirname, '../bin/${bin}'), 'ab'], { encoding: 'utf8', env });\n  assert.strictEqual(r.stdout, 'ab\\n');\n});\n`;
+  const stripped = '{ ...process.env, NODE_TEST_CONTEXT: undefined }';
+  for (const [bin, env] of [['cli.mjs', 'process.env'], ['cli.mjs', stripped], ['cli.js', stripped]]) {
+    fs.writeFileSync(path.join(dir, 'test/cli.test.js'), cli(bin, env));
+    delete process.env.SG45_BAD;
+    assert.strictEqual((await runTests({ repoRoot: dir })).status, 'passed', `${bin} ${env}`);
+    process.env.SG45_BAD = '1';
+    const r = await runTests({ repoRoot: dir });
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, `${bin} ${env}`);
+  }
+});
+
+test('loadFailed: a duplicate whose name holds U+2028 is indexed under that name (AUDIT-38 H5)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg47lf-');
+  const log = path.join(dir, 'load.log');
+  const name = 'a b';
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/m.js\t${JSON.stringify(name)}\n`);
+  assert.strictEqual(loadFailed(log, dir, { [name]: 'pass', [`${name}\t#2`]: 'fail' }), true);
+  assert.strictEqual(loadFailed(log, dir, { [name]: 'pass', [`${name}\t#2`]: 'pass' }), false);
+});
+
+test('loadFailed: a process whose parent is no node --test runner is a spawned child: its key never passes and its rows carry no name (AUDIT-35 C2)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg45log-');
+  const log = path.join(dir, 'load.log');
+  const at = (rows) => { fs.writeFileSync(log, rows.map(r => r.join('\t')).join('\n') + '\n'); return loadFailed(log, dir, { a: 'pass' }); };
+  const T = (k, name) => ['T', k, path.join(dir, 'src/m.js'), ...(name ? [JSON.stringify(name)] : [])];
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], T('11.1'), ['P', '11.1']]), false, 'a file process that exited 0');
+  assert.strictEqual(at([['R', '10'], ['C', '12.1', '11'], T('12.1'), ['P', '12.1']]), true, 'a child of the file process');
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], T('11.1', 'a')]), false, 'named in a file process');
+  assert.strictEqual(at([['R', '10'], ['C', '12.1', '11'], T('12.1', 'a')]), true, 'a child\'s row is not excused by a test of its name');
+});
+
+test('runTests: pytest: a python child that fails to import the code or whose main module raises is a collection error (AUDIT-35 C2)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  t.after(() => { delete process.env.SG45_BAD; });
+  const dir = tmp(t, 'refactor-sg45py-');
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os\n\nif os.environ.get('SG45_BAD'):\n    raise RuntimeError('bad')\n\n\ndef show(s):\n    return s\n");
+  fs.writeFileSync(path.join(dir, 'app/n.py'), "import os\n\n\ndef show(s):\n    if os.environ.get('SG45_BAD'):\n        raise ValueError('bad')\n    return s\n");
+  const child = (code) => `import os, subprocess, sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n\ndef test_cli():\n    r = subprocess.run([sys.executable, '-c', ${JSON.stringify(code)}], cwd=ROOT, capture_output=True, text=True)\n    assert r.stdout == 'ab\\n'\n`;
+  const run = async (code, bad, extra = '') => {
+    fs.writeFileSync(path.join(dir, 'tests/test_cli.py'), child(code) + extra);
+    if (bad) process.env.SG45_BAD = '1'; else delete process.env.SG45_BAD;
+    return runTests({ repoRoot: dir });
+  };
+  for (const code of ["import sys\ntry:\n    import app.m as m\nexcept Exception as e:\n    print('error', e)\n    sys.exit(0)\nprint(m.show('ab'))", "import app.n as n\nprint(n.show('ab'))"]) {
+    assert.strictEqual((await run(code, false)).status, 'passed', code);
+    const r = await run(code, true);
+    assert.strictEqual(r.status, 'failed', r.stdout);
+    assert.strictEqual(r.collection_error, true, code);
+  }
+  const red = await run("import app.n as n\nprint(n.show('ab'))", false, '\n\ndef test_red():\n    assert 1 == 2\n');
+  assert.strictEqual(red.collection_error, undefined, 'a child that runs cleanly logs nothing');
+});
+
 test('loadFailed: a logged name matches a test or suite as TAP writes it; a name no test or suite has falls back to its process key (AUDIT-32 H1, H2)', (t) => {
   const { loadFailed, tapResults } = require('../src/runner/test-runner');
   const entry = (n, name, type, ok = true) => [`# Subtest: ${name}`, `${ok ? '' : 'not '}ok ${n} - ${name}`, '  ---', `  type: '${type}'`, '  ...'];
@@ -783,7 +888,7 @@ test('runTests: pytest: pytest.raises around an import (in a test or at a test m
   }
 });
 
-test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered #2, #3 … (AUDIT-22 C1)', () => {
+test('tapResults / junitResults: 20,000 tests sharing one name parse in linear time, numbered \\t#2, \\t#3 … (AUDIT-22 C1)', () => {
   const { tapResults, junitResults } = require('../src/runner/test-runner');
   const n = 20_000;
   let tap = 'TAP version 13\n';
@@ -793,10 +898,10 @@ test('tapResults / junitResults: 20,000 tests sharing one name parse in linear t
   const a = tapResults(tap), b = junitResults(xml);
   assert(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
   assert.strictEqual(Object.keys(a.tests).length, n);
-  assert.strictEqual(a.tests[`works#${n}`], 'pass');
-  assert.strictEqual(b.tests[`t::works#${n}`], 'pass');
+  assert.strictEqual(a.tests[`works\t#${n}`], 'pass');
+  assert.strictEqual(b.tests[`t::works\t#${n}`], 'pass');
   const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
-  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x#3']);
+  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'x#2') + ok(2, 'x') + ok(3, 'x')).tests), ['x#2', 'x', 'x\t#2']);
 });
 
 test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids once; duplicate names must all pass (AUDIT-29 H1)', (t) => {
@@ -813,8 +918,8 @@ test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids 
   const t0 = Date.now();
   assert.strictEqual(check(names, tests), false);
   assert(Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
-  assert.strictEqual(check(['a', 'a#2'], { a: 'pass', 'a#2': 'pass', 'a#2#3': 'pass' }), false);
-  assert.strictEqual(check(['a'], { a: 'pass', 'a#2': 'fail' }), true);
+  assert.strictEqual(check(['a', 'a#2'], { a: 'pass', 'a\t#2': 'pass', 'a#2': 'pass', 'a#2\t#2': 'pass' }), false);
+  assert.strictEqual(check(['a'], { a: 'pass', 'a\t#2': 'fail' }), true);
   assert.strictEqual(check(['a#2'], { a: 'fail', 'a#2': 'pass' }), false);
   assert.strictEqual(check(['a'], { 'a#x': 'pass' }), true);
 });
@@ -824,7 +929,79 @@ test('loadFailed: a failing test of the logged name is never excused by a later 
   const dir = tmp(t, 'refactor-lf34-');
   const log = path.join(dir, 'load.log');
   fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"x"\nP\t1.2\n`);
-  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x#2': 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x\t#2': 'pass' }), true);
   assert.strictEqual(loadFailed(log, dir, { x: 'fail' }, { x: 'pass' }), true);
-  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x#2': 'pass' }, { x: 'pass' }), false);
+  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x\t#2': 'pass' }, { x: 'pass' }), false);
+});
+
+test('tapResults / loadFailed: a name ending in `#<n>` is never a duplicate marker; names holding U+2028 / U+2029 are kept (AUDIT-36 L1, L2)', (t) => {
+  const { tapResults, loadFailed } = require('../src/runner/test-runner');
+  const ok = (i, id) => `ok ${i} - ${id}\n  ---\n  duration_ms: 1\n  ...\n`;
+  assert.deepStrictEqual(Object.keys(tapResults(ok(1, 'dup') + ok(2, 'dup') + ok(3, 'dup\\#2')).tests), ['dup', 'dup\t#2', 'dup#2']);
+  const sep = `# Subtest: s\u2029y\n    # Subtest: in\u2028ner\n    ok 1 - in\u2028ner\n      ---\n      duration_ms: 1\n      ...\n    1..1\nok 1 - s\u2029y\n  ---\n  type: 'suite'\n  ...\n`;
+  assert.deepStrictEqual(tapResults(sep), { tests: { 's\u2029y > in\u2028ner': 'pass' }, load: false, suites: { 's\u2029y': 'pass' } });
+  const dir = tmp(t, 'refactor-lf44-');
+  const log = path.join(dir, 'load.log');
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"parse"\n`);
+  assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse#1': 'fail' }), false, 'a failing test named `parse#1` is not `parse`');
+  assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse\t#2': 'fail' }), true, 'a failing duplicate of `parse`');
+});
+
+test('runTests: a suite with an async loader (--import + module.register, --experimental-loader, NODE_OPTIONS) runs; its ES module loads are unobserved, so a failing run is a collection error (AUDIT-37 H1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT, opts = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => {
+    if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev;
+    if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+  });
+  const dir = tmp(t, 'refactor-sg46-');
+  for (const d of ['src', 'test']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'loader.mjs'), 'export async function load(url, ctx, next) { return next(url, ctx); }\n');
+  fs.writeFileSync(path.join(dir, 'register.mjs'), "import { register } from 'node:module';\nregister('./loader.mjs', import.meta.url);\n");
+  fs.writeFileSync(path.join(dir, 'src/calc.js'), 'export const twice = (x) => 2 * x;\n');
+  const body = (n) => `import test from 'node:test';\nimport assert from 'node:assert';\nimport { twice } from '../src/calc.js';\ntest('twice', () => assert.strictEqual(twice(2), ${n}));\n`;
+  for (const [cmd, options] of [['node --import ./register.mjs --test'], ['node --experimental-loader ./loader.mjs --test'], ['node --test', '--no-warnings --import ./register.mjs']]) {
+    if (options) process.env.NODE_OPTIONS = options; else if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', type: 'module', private: true, scripts: { test: cmd } }));
+    fs.writeFileSync(path.join(dir, 'test/calc.test.js'), body(4));
+    const ok = await runTests({ repoRoot: dir });
+    assert.strictEqual(ok.status, 'passed', `${cmd}: ${ok.stdout}${ok.stderr}`);
+    assert.deepStrictEqual(ok.tests, { twice: 'pass' });
+    fs.writeFileSync(path.join(dir, 'test/calc.test.js'), body(5));
+    const red = await runTests({ repoRoot: dir });
+    assert.strictEqual(red.status, 'failed', cmd);
+    assert.strictEqual(red.collection_error, true, `${cmd}: no ES module load evidence`);
+  }
+});
+
+test('loadFailed: a process whose ES module loads are unobserved (U row) is a load failure unless its file process exited 0 (AUDIT-37 H1)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg46log-');
+  const log = path.join(dir, 'load.log');
+  const at = (rows) => { fs.writeFileSync(log, rows.map(r => r.join('\t')).join('\n') + '\n'); return loadFailed(log, dir, { a: 'pass' }); };
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], ['U', '11.1'], ['P', '11.1']]), false);
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], ['U', '11.1']]), true);
+  assert.strictEqual(at([['R', '10'], ['C', '12.1', '11'], ['U', '12.1'], ['P', '12.1']]), true, 'a spawned child never passes');
+});
+
+test('runTests: pytest: a nested run (two hook dirs on PYTHONPATH) starts python children cleanly (AUDIT-37 L4)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg46py-');
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_nest.py'), [
+    'import os, shutil, subprocess, sys, tempfile',
+    'import refactor_load_core',
+    '',
+    '',
+    'def test_nested():',
+    '    tmp = tempfile.mkdtemp()',
+    "    inner = os.path.join(tmp, 'hook')",
+    '    shutil.copytree(os.path.dirname(refactor_load_core.__file__), inner)',
+    "    env = dict(os.environ, PYTHONPATH=os.environ['PYTHONPATH'] + os.pathsep + inner)",
+    "    r = subprocess.run([sys.executable, '-c', 'pass'], env=env, capture_output=True, text=True)",
+    '    shutil.rmtree(tmp)',
+    "    assert r.stderr == ''",
+    ''].join('\n'));
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'passed', r.stdout);
 });

@@ -28,7 +28,8 @@ const T = (body) => `'use strict';\nconst test = require('node:test');\nconst as
 const EQUIV = { applicable: true, verdict: 'equivalent', runs: 12, deletions_observed: true, duration_ms: 1 };
 const BI = 'src/rl/bug-injector.js';
 const TR = 'src/runner/test-runner.js';
-const KW = 'const BLOCK_KW = /^(?:if|elif|else|while|for|do)$/;';
+// Re-anchored after SG45 (any deleted keyword is a swap).
+const KW = 'g.del.some(([s, e]) => KEYWORDS[lang].has(before.slice(s, e))';
 
 const CASES = {
   // SG42 swapped block keyword: `for (; n > 0;)` -> `if (n > 0)` runs the
@@ -38,7 +39,7 @@ const CASES = {
   // replaced it stands on its condition site.
   'BI-kwfor': {
     finding: 'H1',
-    mutate: { file: BI, from: KW, to: 'const BLOCK_KW = /^(?:if|elif|else|while|do)$/;' },
+    mutate: { file: BI, from: KW, to: 'g.del.some(([s, e]) => /^(?:if|elif|else|while|do|with|switch|try|match|async)$/.test(before.slice(s, e))' },
     tests: /bug-injector|executor/,
     file: 'src/f.js',
     cur: 'function f(t, n) {\n  for (; n > 0;) { n--; t += 1; }\n  return t;\n}',
@@ -53,7 +54,7 @@ const CASES = {
   'BI-kwelse': {
     finding: 'H1',
     lang: 'py',
-    mutate: { file: BI, from: KW, to: 'const BLOCK_KW = /^(?:if|elif|while|for|do)$/;' },
+    mutate: { file: BI, from: KW, to: 'g.del.some(([s, e]) => /^(?:if|elif|while|for|do|with|switch|try|match|async)$/.test(before.slice(s, e))' },
     tests: /bug-injector|executor/,
     cur: "def f(t, n):\n    if n > 5:\n        t = t[:5]\n    else:\n        t = t + '!'\n    return t\n",
     prop: "def f(t, n):\n    if n > 5:\n        t = t[:5]\n    elif n:\n        t = t + '!'\n    return t\n",

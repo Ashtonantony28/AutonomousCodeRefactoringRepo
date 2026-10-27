@@ -520,7 +520,8 @@ function jsNodes(src, file, code) {
 // with a value ([s, e, 'block']). No target: binding positions, plain keys and
 // member names, a member callee or tag (its `this`), a link of an optional
 // chain, a `typeof` / `delete` operand, a shorthand value, a template's quasi
-// and import sources. nodes: [s, e] of every node. hoist: where the
+// and import sources. nodes: [s, e] of every node. seqs: [s, e] between two
+// operands of a comma operator (SequenceExpression). hoist: where the
 // switch's module-level binding goes ([offset, form]: 'stmt' before the
 // first statement after any directive prologue / shebang), or null.
 const SWITCH_EXPR = /Expression$|(?<!Directive)Literal$|^Identifier$/;
@@ -530,12 +531,13 @@ const fixed = (n, p, k) => /^(?:JSX|TS)/.test(n.type) || (k === 'key' && !p.comp
 function jsShape(src, file, regions) {
   const { ast } = require('../validation/ast-checker').parseJs(src, file);
   if (!ast) return null;
-  const targets = [], nodes = [];
+  const targets = [], nodes = [], seqs = [];
   const stack = [[ast.program, null, null, false, null]];
   while (stack.length) {
     const [n, p, k, bind, es] = stack.pop();
     if (!regions.some(([a, b]) => n.start < b && n.end > a)) continue;
     nodes.push([n.start, n.end]);
+    if (n.type === 'SequenceExpression') for (let i = 1; i < n.expressions.length; i++) seqs.push([n.expressions[i - 1].end, n.expressions[i].start]);
     if (SWITCH_EXPR.test(n.type) && !bind && !fixed(n, p, k)) targets.push(es && es.start === n.start ? [es.expression.start, es.expression.end, 'stmt'] : [n.start, n.end, 'expr']);
     else if (n.type === 'ReturnStatement' && n.argument) targets.push([n.start, n.end, 'block']);
     if (/^(?:Import|Export)\w*Specifier$|^TS|^JSX|TypeAnnotation$/.test(n.type)) continue;
@@ -547,7 +549,7 @@ function jsShape(src, file, regions) {
     }
   }
   const first = ast.program.body[0];
-  return { targets, nodes, hoist: first ? [first.start, 'stmt'] : null };
+  return { targets, nodes, seqs, hoist: first ? [first.start, 'stmt'] : null };
 }
 
 // Python (ast, one python3 run): as jsUses, with offsets converted from
@@ -746,7 +748,6 @@ function literalMutant(src, t) {
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
-const BLOCK_KW = /^(?:if|elif|else|while|for|do)$/;
 // A switch value: 16 random lowercase letters (no digit, sign or boolean spelling).
 const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 + b % 26)).join('');
 
@@ -771,10 +772,12 @@ const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 
 // does not parse.
 // Each mutant is a switch: the smallest expression holding its change (for
 // a dropped `return`, the statement; jsShape / pyShape) becomes
-// `(<on> ? mutated : original)`, where `<on>` is a module-level binding
-// that reads `env` (one variable, named after nothing in src, set to '1')
-// once per module load, so `src` runs the mutant only while `env` is set,
-// and the same text with it unset is the mutant's control. A change with no switch
+// `(<on> === '<v>' ? mutated : original)` (Python `((mutated) if <on> ==
+// '<v>' else (original))`), where `<on>` is a module-level binding that
+// holds the raw value of one variable (named after nothing in src), read
+// once per module load. `env` sets it to `<v>`, a random 16-letter value,
+// so `src` runs the mutant only under `env`, and the same text under
+// `control` (another random value) is the mutant's control. A change with no switch
 // target has no mutant. Each switch is parse-checked on the smallest
 // statement around it (jsParseCheck / parsesPython), not the file. A
 // reference with no parse-valid use-site mutant gives none, marked
@@ -869,7 +872,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     }
   }
   const swappedKeyword = (hi, a, b) => diffed && hunks[hi].gaps.some(g => g.ins.some(([s, e]) => s === a && e === b) &&
-    g.del.some(([s, e]) => BLOCK_KW.test(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
+    g.del.some(([s, e]) => KEYWORDS[lang].has(before.slice(s, e)) && before.slice(s, e) !== src.slice(a, b)));
   let jsn;
   const nodes = () => jsn || (jsn = jsNodes(src, file, code));
   const build = (c) => {
@@ -878,8 +881,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     if (!mut) return null;
     const lit = c.op.string && view.lits.find(l => l.s <= c.m.index && c.m.index < l.e);
     const span = lit ? [lit.s, lit.e] : [c.m.index, c.m.index + c.m[0].length];
-    // A block keyword that replaced another (`while` -> `if`, `elif` -> `if`)
-    // is not covered by its own condition's kill.
+    // A block keyword whose stretch deletes another keyword (`while`, `with`,
+    // `try` -> `if`) is not covered by its own condition's kill.
     if (c.op.name === 'negate_condition') {
       const [, ws, kw] = /^(\s*)(\w+)/.exec(c.m[0]), k = c.m.index + ws.length;
       if (swappedKeyword(c.hunk, k, k + kw.length)) span[0] = k + kw.length;
@@ -889,12 +892,13 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   let name = 'REFACTOR_MUTANT', on = '_refactor_mutant';
   for (let k = 1; src.includes(name) || src.includes(on); k++) [name, on] = [`REFACTOR_MUTANT_${k}`, `_refactor_mutant_${k}`];
   // The variable is read once per module load, into a module-level binding
-  // the switches test (before any statement but a docstring, `__future__`
-  // import or directive; no target before it). Mutant and control runs both
-  // set it, to two random values of one shape (`env` / `control`), so the
-  // environment's key set and value shape are the same in all three runs.
+  // (before any statement but a docstring, `__future__` import or directive;
+  // no target before it) that each switch compares. Mutant and control runs
+  // both set it, to two random values of one shape (`env` / `control`), so
+  // the environment and the binding have the same type in all three runs.
   const [val, off] = [token(), token()];
-  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}') == '${val}'` : `var ${on} = globalThis.process.env.${name} === '${val}';`;
+  const read = lang === 'python' ? `${on} = __import__('os').environ.get('${name}')` : `var ${on} = globalThis.process.env.${name};`;
+  const cond = lang === 'python' ? `${on} == '${val}'` : `${on} === '${val}'`;
   const [at, form] = shape.hoist || [src.length, 'stmt'];
   const hoist = [at, 0, form === 'after' ? `; ${read}` : form === 'line' ? `${read}\n` : lang === 'python' ? `${read}; ` : `${read} `];
   // A mutant's edits as a switch on the smallest target holding them ->
@@ -905,8 +909,8 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
     for (const x of shape.targets) if (x[0] <= lo && hi <= x[1] && (lo < hi || (x[0] < lo && lo < x[1])) && (!t || x[1] - x[0] < t[1] - t[0])) t = x;
     if (!t || t[0] < at) return null;
     const [s, e, form, ind] = t, o = src.slice(s, e), m = applyEdits(o, edits, s);
-    const text = lang === 'python' ? (form === 'block' ? `if ${on}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${on} else (${o}))`)
-      : form === 'block' ? `if (${on}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${on}) (${m}); else (${o})` : `(${on} ? (${m}) : (${o}))`;
+    const text = lang === 'python' ? (form === 'block' ? `if ${cond}:\n${ind}    ${m}\n${ind}else:\n${ind}    ${o}` : `((${m}) if ${cond} else (${o}))`)
+      : form === 'block' ? `if (${cond}) { ${m} } else { ${o} }` : form === 'stmt' ? `if (${cond}) (${m}); else (${o})` : `(${cond} ? (${m}) : (${o}))`;
     return { edits: [[s, e - s, text]], lo: s, hi: e };
   };
   const key = (c) => `${c.site}${c.revert ? 'r' : ''}`;
@@ -934,7 +938,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape.nodes, lang);
+  const bare = diffed && uncoveredToken(src, hunks, out, names, litToks, view, shape, lang);
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
@@ -956,7 +960,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
 const BRACKET = /^[()[\]{}]$/;
 const SEP = /^[,;:]$/;
 const BOUND = /^(?:=|const|let|var)$/;
-function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
+function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [] }, lang) {
   const nameAt = new Set(names.flat().map(t => t.at));
   const bySite = new Map();
   for (const m of out) {
@@ -978,59 +982,142 @@ function uncoveredToken(src, hunks, out, names, litToks, view, nodes, lang) {
   const insAt = new Set(ins.map(r => r[0]));
   // Every non-space character of [a, b) is inserted.
   const fresh = (a, b) => {
-    for (let c = a, i = 0; c < b; c++) {
+    let i = 0;
+    for (let h = ins.length; i < h;) { const m = (i + h) >> 1; if (ins[m][1] <= a) i = m + 1; else h = m; }
+    for (let c = a; c < b; c++) {
       if (/\s/.test(view.kept[c])) continue;
       while (i < ins.length && ins[i][1] <= c) i++;
       if (i >= ins.length || ins[i][0] > c) return false;
     }
     return true;
   };
-  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), lambdas = new Set();
+  const code = view.code, pair = new Map(), depth = new Map([[0, 0]]), open = [], encl = new Map(), commas = new Map(), commaAt = new Map(), lambdas = new Set();
   for (let i = 0; i < code.length; i++) {
     const c = code[i], top = open.length ? open[open.length - 1] : -1;
-    if (c === ',') { encl.set(i, top); commas.set(top, (commas.get(top) || 0) + 1); } else if (c === 'l' && lang === 'python' && code.startsWith('lambda', i) && !/[\w.]/.test(code[i - 1] || '') && !/\w/.test(code[i + 6] || '')) lambdas.add(top);
+    if (c === ',' || c === ';') {
+      encl.set(i, top);
+      if (c === ',') { commas.set(top, (commas.get(top) || 0) + 1); (commaAt.get(top) || commaAt.set(top, []).get(top)).push(i); }
+    } else if (c === 'l' && lang === 'python' && code.startsWith('lambda', i) && !/[\w.]/.test(code[i - 1] || '') && !/\w/.test(code[i + 6] || '')) lambdas.add(top);
     else if (c === '(' || c === '[' || c === '{') open.push(i);
     else if ((c === ')' || c === ']' || c === '}') && open.length) { const o = open.pop(); pair.set(o, i).set(i, o); } else if (c === '\n') depth.set(i + 1, open.length + (src[i - 1] === '\\' ? 1 : 0));
   }
-  // A `;` or `,` that changes statement or value structure: JS `;` as the
-  // empty body of an `if` / `else` / `for` (`for await`) / `while` / `with` /
-  // `do` head or before code the expression would continue into without it
-  // (`(`, `[`, template, `+`, `-`, `/`; not a `++` / `--` line); a `,`
-  // between two kept tokens that is not trailing (it splits an operand);
-  // Python `;` on a compound statement's logical line (joins its suite) or a
-  // trailing comma that makes a tuple: at statement level, or in a paren or
-  // subscript holding no other comma of its own (a lambda's are not).
+  const fields = new Set(view.lits.filter(l => l.kind === 'fstring').flatMap(l => l.holes.map(([h]) => h - 1)));
+  // A `;` or `,` that changes statement or value structure:
+  // - one with kept code of its own level on both sides, past inserted
+  //   tokens (it splits an operand or a statement);
+  // - JS: a comma operator next to kept code (it discards or demotes a kept
+  //   operand), an array elision, a `;` as the empty body of an `if` /
+  //   `else` / `for` (`for await`) / `while` / `with` / `do` head or before
+  //   code the expression would continue into without it (`(`, `[`,
+  //   template, `+`, `-`, `/`; not a `++` / `--` line);
+  // - Python: a `;` on a compound statement's logical line (joins its
+  //   suite); a `,` next to kept code that makes a tuple of what held no
+  //   comma (statement level, a grouping paren, a subscript, an f-string
+  //   field); a trailing comma that makes a tuple: at statement level, or in
+  //   a paren or subscript holding no other comma of its own (a lambda's are
+  //   not).
   const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
   const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
-  const splits = (a) => {
-    const p = prevCode(a), n = nextCode(a + 1);
-    return p >= 0 && n < code.length && !')]}'.includes(code[n]) && !fresh(p, p + 1) && !fresh(n, n + 1);
+  // Logical line bounds, memoised per physical line.
+  const starts = new Map(), ends = new Map();
+  const lineStart = (a) => {
+    let s = code.lastIndexOf('\n', a - 1) + 1;
+    const walked = [];
+    while (s > 0 && depth.get(s) && !starts.has(s)) { walked.push(s); s = code.lastIndexOf('\n', s - 2) + 1; }
+    const r = starts.get(s) ?? s;
+    for (const w of walked) starts.set(w, r);
+    return r;
   };
+  const lineEnd = (a) => {
+    let k = code.indexOf('\n', a);
+    const walked = [];
+    while (k >= 0 && depth.get(k + 1) && !ends.has(k)) { walked.push(k); k = code.indexOf('\n', k + 1); }
+    const r = ends.get(k) ?? (k < 0 ? code.length : k);
+    for (const w of walked) ends.set(w, r);
+    return r;
+  };
+  // The nearest kept token on side d of separator a at its level, past
+  // inserted tokens and wholly inserted bracket pairs -> { i, nl } (nl: a line
+  // break crossed), or null at a separator, a bracket closing the level or
+  // (Python, outside brackets) the logical line's end or a header's `:`.
+  const reach = (a, d) => {
+    const o = encl.get(a) ?? -1, shut = d > 0 ? ')]}' : '([{', opens = d > 0 ? '([{' : ')]}';
+    let nl = false;
+    for (let i = a + d; i >= 0 && i < code.length; i += d) {
+      const c = code[i];
+      if (c === '\n') { if (lang === 'python' && o < 0 && !depth.get(i + 1)) return null; nl = true; continue; }
+      if (/\s/.test(c)) continue;
+      if (',;'.includes(c) || shut.includes(c)) return null;
+      if (!fresh(i, i + 1)) return lang === 'python' && o < 0 && c === ':' ? null : { i, nl };
+      if (opens.includes(c)) {
+        const p = pair.get(i);
+        if (p === undefined || !fresh(Math.min(i, p), Math.max(i, p) + 1)) return { i, nl };
+        i = p;
+      }
+    }
+    return null;
+  };
+  // As reach, for a JS `;`: across a line break, a statement end or a
+  // statement start ASI separates (a name, `++` / `--`), a block's `}` or a
+  // `case` / `default` / label `:` is no operand.
+  const semiReach = (a, d) => {
+    const r = reach(a, d);
+    if (!r) return null;
+    const c = code[r.i];
+    if (d > 0) return r.nl && /^(?:(?!(?:in|instanceof)\b)[\w$]|\+\+|--)/.test(code.slice(r.i, r.i + 11)) ? null : r;
+    if (r.nl && /[\w$)\]}'"`]/.test(c)) return null;
+    if (c === '}') {
+      const h = prevCode(pair.get(r.i) ?? 0);
+      if (h < 0 || ')};{'.includes(code[h]) || /(?:=>|(?<![\w$])(?:else|try|finally|do))$/.test(code.slice(Math.max(0, h - 8), h + 1))) return null;
+    }
+    if (c === ':' && /^\s*(?:case\b.*|default\s*|[\w$]+\s*)$/.test(code.slice(code.lastIndexOf('\n', r.i - 1) + 1, r.i))) return null;
+    return r;
+  };
+  const pyApplied = (o) => {
+    const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
+    return /[\w)\]'"]$/.test(head) && !/(?<![\w.])(?:return|in|not|and|or|is|if|elif|else|while|for|with|as|except|raise|from|yield|await|lambda|del|assert|match|case)$/.test(head);
+  };
+  // A Python `,` at a that makes a tuple where its level held no kept comma.
+  const tupleNew = (a, o) => {
+    const s = o < 0 ? lineStart(a) : o + 1, e = o < 0 ? lineEnd(a) : code.length;
+    const C = commaAt.get(o) || [];
+    let j = 0;
+    for (let h = C.length; j < h;) { const m = (j + h) >> 1; if (C[m] < s) j = m + 1; else h = m; }
+    for (; j < C.length && C[j] < e; j++) if (C[j] !== a && !fresh(C[j], C[j] + 1)) return false;
+    const head = code.slice(s, a);
+    if (/(?<![\w.])lambda\b[^:]*$/.test(head)) return false;
+    if (o < 0) return !/^\s*(?:(?:import|from|global|nonlocal|del|assert)\b|(?:async\s+)?with\b[^:]*$)/.test(head);
+    return code[o] === '(' ? !pyApplied(o) : code[o] === '[' ? pyApplied(o) : fields.has(o);
+  };
+  const splits = (a) => !!(reach(a, -1) && reach(a, 1));
+  const beside = (a) => !!(reach(a, -1) || reach(a, 1));
   const structural = (a, text) => {
     if (lang !== 'python') {
+      if (text === ',' && ([code[prevCode(a)], code[nextCode(a + 1)]].includes(',') || code[prevCode(a)] === '[')) return true;
+      if (text === ',' && seqs.some(([s, e]) => s <= a && a < e) && beside(a)) return true;
       if (text === ',') return splits(a);
       if (text !== ';') return false;
       const p = prevCode(a);
       if (/\b(?:else|do)$/.test(code.slice(0, p + 1))) return true;
       if (code[p] === ')' && pair.has(p) && /\b(?:if|for(?:\s+await)?|while|with)\s*$/.test(code.slice(Math.max(0, pair.get(p) - 16), pair.get(p)))) return true;
       const n = nextCode(a + 1);
+      if (semiReach(a, -1) && semiReach(a, 1)) return true;
       return /^(?:[([`/]|\+(?!\+)|-(?!-))/.test(code.slice(n, n + 2));
     }
     if (text === ';') {
       // `match` needs a newline after its `:`; `case` may be a name.
-      let s = code.lastIndexOf('\n', a - 1) + 1;
-      while (s > 0 && depth.get(s)) s = code.lastIndexOf('\n', s - 2) + 1;
-      return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!\s*(?:[.:]|(?:[-+*/%&|^@]|\/\/|\*\*|<<|>>)?=(?!=))))\b/.test(code.slice(s, a));
+      return /^[ \t]*(?:if|elif|else|for|while|with|try|except|finally|def|class|async|case(?!\s*(?:[.:]|(?:[-+*/%&|^@]|\/\/|\*\*|<<|>>)?=(?!=))))\b/.test(code.slice(lineStart(a), a)) ||
+        splits(a);
     }
     if (text !== ',') return false;
     if (splits(a)) return true;
-    const n = nextCode(a + 1), q = code[n];
     const o = encl.get(a) ?? -1;
+    if (beside(a) && tupleNew(a, o)) return true;
+    const n = nextCode(a + 1), q = code[n];
     if (o < 0) return q === undefined || q === ';' || q === '=' || /\n/.test(code.slice(a + 1, n));
     if (!')]}'.includes(q || '')) return false;
     // Applied to a value (a call or subscript), not a display or grouping.
-    const h = prevCode(o) + 1, head = code.slice(Math.max(0, h - 16), h);
-    const applied = /[\w)\]'"]$/.test(head) && !/(?<![\w.])(?:return|in|not|and|or|is|if|elif|else|while|for|with|as|except|raise|from|yield|await|lambda|del|assert|match|case)$/.test(head);
+    const applied = pyApplied(o);
     if (commas.get(o) > 1 && !lambdas.has(o)) return false;
     return code[o] === '(' ? !applied : code[o] === '[' && applied;
   };
