@@ -1021,7 +1021,7 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   // The nearest kept token on side d of separator a at its level, past
   // inserted tokens and wholly inserted bracket pairs -> { i, nl } (nl: a line
   // break crossed), or null at a separator, a bracket closing the level or
-  // (Python, outside brackets) the logical line's end.
+  // (Python, outside brackets) the logical line's end or a header's `:`.
   const reach = (a, d) => {
     const o = encl.get(a) ?? -1, shut = d > 0 ? ')]}' : '([{', opens = d > 0 ? '([{' : ')]}';
     let nl = false;
@@ -1030,7 +1030,7 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
       if (c === '\n') { if (lang === 'python' && o < 0 && !depth.get(i + 1)) return null; nl = true; continue; }
       if (/\s/.test(c)) continue;
       if (',;'.includes(c) || shut.includes(c)) return null;
-      if (!fresh(i, i + 1)) return { i, nl };
+      if (!fresh(i, i + 1)) return lang === 'python' && o < 0 && c === ':' ? null : { i, nl };
       if (opens.includes(c)) {
         const p = pair.get(i);
         if (p === undefined || !fresh(Math.min(i, p), Math.max(i, p) + 1)) return { i, nl };

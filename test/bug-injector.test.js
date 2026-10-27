@@ -823,3 +823,17 @@ test('editMutants: a `,` or JS `;` beside kept code that demotes it, an elision 
     ['    return (s, t)', '    return (s, t, n)', 'an element appended to a tuple']
   ]) assert.strictEqual(unc('py', b, a), null, why);
 });
+
+test('editMutants: head, continue-into, unpacking, tuple-key and logical-line separators stand where no kept code touches them (SG37, SG41 under SG44)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  for (const [b, a, why] of [
+    ['  while (xs.pop()) {}\n  return xs;', '  while (xs.pop());\n  return xs;', 'an empty `while` body'],
+    ['  let x = s\n  return x', '  let x = s; (t || s).trim()\n  return x', 'a same-line `;` before `(`'],
+    ['  let x = s\n  return x', '  let x = s; [t].forEach(String)\n  return x', 'a same-line `;` before `[`'],
+    ['  let x = s\n  return x', '  let x = s;\n  `${t}`.trim()\n  return x', 'a `;` before a template line']
+  ]) assert.strictEqual(unc('js', b, a), ';', why);
+  assert.strictEqual(unc('py', '    return n', '    y, = [t]\n    return n + y'), ',', 'an unpacking comma in new code');
+  assert.strictEqual(unc('py', '    return xs[0]', '    return xs[t,]'), ',', 'a tuple key');
+  assert.strictEqual(unc('py', '    if (n >\n            1):\n        t = s\n    return t', '    if (n >\n            1): str(t); t = s\n    return t'), ';',
+    'a `;` on a multi-line header joins the suite');
+});
