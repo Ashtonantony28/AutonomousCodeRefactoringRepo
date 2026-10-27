@@ -28,16 +28,22 @@ const ROOT = path.resolve(__dirname, '..', '..');
   console.log(`   a: ${brief(a)}`);
   const saved = process.env.NODE_OPTIONS;
   process.env.NODE_OPTIONS = `${saved || ''} --require=${path.join(ROOT, 'audit/39/old-node.js')}`.trim();
-  let b;
-  try { b = await run(); } finally { if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved; }
+  let b, warns = false;
+  try {
+    b = await run();
+    const { lacksRegisterHooks } = require(path.join(ROOT, 'src/runner/test-runner.js'));
+    warns = typeof lacksRegisterHooks === 'function' && lacksRegisterHooks(ROOT);
+  } finally { if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved; }
   console.log(`   b: ${brief(b)}`);
   const engines = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).engines || {};
   const m = /(\d+)(?:\.(\d+))?/.exec(engines.node || '');
   const floor = m ? [Number(m[1]), Number(m[2] || 0)] : [0, 0];
   const allowsOld = floor[0] < 22 || (floor[0] === 22 && floor[1] < 15);
+  // SG52: the orchestrator warns (lacksRegisterHooks) and CLAUDE.md names the floor.
+  const documented = warns && /registerHooks`\s+\(before 22\.15 \/ 23\.5: no JS edit can commit/.test(fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf8'));
   report('a control: the edit commits on this node', a.status === 'passed', brief(a), 'passed');
   report(`M1 b engines "${engines.node}" admits a node on which no JS edit can commit (no module.registerHooks: every failing mutant run is a load failure)`,
-    !(allowsOld && b.status !== 'passed'), `engines=${JSON.stringify(engines)}; ${brief(b)}`,
+    !(allowsOld && b.status !== 'passed' && !documented), `engines=${JSON.stringify(engines)}; warned+documented=${documented}; ${brief(b)}`,
     'engines.node >= 22.15 (or a startup warning / documented floor for JS targets), or b committing');
   process.exit(exitCode());
 })().catch(e => { console.error(e); process.exit(2); });

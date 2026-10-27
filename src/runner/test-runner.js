@@ -554,11 +554,13 @@ if (loader || !M.registerHooks) {
 // raises (installed by a sitecustomize, so in every interpreter on this
 // PYTHONPATH; it first runs the first sitecustomize that is no copy of it,
 // if any: nested runs put several on PYTHONPATH, then wraps whatever
-// excepthook that set), and the
-// pytest plugin that keys them.
-const PY_LOAD_CORE = `import builtins, os
+// excepthook that set; an interpreter outside pytest whose excepthook was
+// replaced later, e.g. by a usercustomize, logs an uncaught exception
+// (`sys.last_value`) at exit), and the pytest plugin that keys them.
+const PY_LOAD_CORE = `import atexit, builtins, os, sys
 _imp = builtins.__import__
 key = ''
+hook = plugin = None
 def log(s):
     try:
         with open(os.environ['REFACTOR_LOAD_LOG'], 'a') as f:
@@ -588,11 +590,17 @@ def _exec_hook(self, module):
         log('T\\t%s\\t%s' % (key, getattr(module, '__file__', None) or module.__name__.replace('.', '/') + '.py'))
         raise
 _ext._LoaderBasics.exec_module = _exec_hook
+def log_main():
+    log('T\\t%s\\t%s' % (key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
+def _exit():
+    if not plugin and sys.excepthook is not hook and getattr(sys, 'last_value', None) is not None:
+        log_main()
+atexit.register(_exit)
 `;
 const PY_SITE = `import importlib.machinery, importlib.util, os, sys
 import refactor_load_core
 def _main_raised(*a):
-    refactor_load_core.log('T\\t%s\\t%s' % (refactor_load_core.key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
+    refactor_load_core.log_main()
     _prev(*a)
 try:
     _spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))])
@@ -601,8 +609,10 @@ try:
 finally:
     _prev = sys.excepthook
     sys.excepthook = _main_raised
+    refactor_load_core.hook = _main_raised
 `;
 const PY_LOAD_HOOK = `import refactor_load_core as _c
+_c.plugin = True
 _n, _bad = 0, False
 def _start(what):
     global _n, _bad
@@ -661,6 +671,13 @@ function loadFailed(log, repoRoot, tests, suites) {
   return rows.some(([k, key, f, name]) => (k === 'U' && !passed.has(key)) ||
     (k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
     !(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))));
+}
+
+// The `node` a JS suite runs on (cwd, this env) has no `module.registerHooks`
+// (before 22.15 / 23.5): every process logs `U`, so no failing mutant run kills.
+function lacksRegisterHooks(cwd) {
+  const r = spawnSync('node', ['-p', "typeof require('module').registerHooks"], { cwd, encoding: 'utf8', timeout: 10_000 });
+  return r.status === 0 && r.stdout.trim() !== 'function';
 }
 
 function ownsReporters(repoRoot, env) {
@@ -807,4 +824,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, loadFailed, TIMEOUT_MS };
+module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, loadFailed, lacksRegisterHooks, JS_EXT, TIMEOUT_MS };

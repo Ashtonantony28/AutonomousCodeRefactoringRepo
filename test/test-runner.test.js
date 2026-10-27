@@ -1161,6 +1161,49 @@ test('runTests: pytest: an operator sitecustomize that sets sys.excepthook keeps
   assert.strictEqual(r.collection_error, true, r.stdout);
 });
 
+const userSite = hasPytest && require('child_process').spawnSync('python3', ['-c', 'import site; print(site.check_enableusersite())'], { encoding: 'utf8' }).stdout.trim() === 'True';
+test('runTests: pytest: an operator usercustomize that sets sys.excepthook keeps a python child main module that raises a collection error (AUDIT-44 C1)', { skip: userSite ? false : 'pytest not installed or the user site is disabled' }, async (t) => {
+  const prev = { PYTHONPATH: process.env.PYTHONPATH, SG52_BAD: process.env.SG52_BAD };
+  t.after(() => { for (const [k, v] of Object.entries(prev)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const dir = tmp(t, 'refactor-sg52py-');
+  const site = tmp(t, 'refactor-sg52site-');
+  fs.writeFileSync(path.join(site, 'usercustomize.py'), 'import sys\ndef _report(t, v, tb):\n    sys.__excepthook__(t, v, tb)\nsys.excepthook = _report\n');
+  process.env.PYTHONPATH = [site, prev.PYTHONPATH].filter(Boolean).join(path.delimiter);
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os, sys\n\nif os.environ.get('SG52_BAD'):\n    raise RuntimeError('bad')\nprint(sys.argv[1])\n");
+  fs.writeFileSync(path.join(dir, 'tests/test_cli.py'), "import os, subprocess, sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n\ndef test_cli():\n    r = subprocess.run([sys.executable, os.path.join(ROOT, 'app', 'm.py'), 'ab'], cwd=ROOT, capture_output=True, text=True)\n    assert r.stdout == 'ab\\n'\n");
+  delete process.env.SG52_BAD;
+  const ok = await runTests({ repoRoot: dir });
+  assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+  process.env.SG52_BAD = '1';
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.strictEqual(r.collection_error, true, r.stdout);
+});
+
+test('runTests: pytest: a test that replaces sys.excepthook beside a failing test is no collection error (AUDIT-44 C1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg52hook-');
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_a.py'), 'import sys\n\n\ndef test_hook():\n    sys.excepthook = lambda *a: None\n\n\ndef test_fails():\n    assert 1 == 2\n');
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.notStrictEqual(r.collection_error, true, r.stdout);
+});
+
+test('lacksRegisterHooks: true for a node whose module.registerHooks is missing (AUDIT-44 M1)', { skip: require('module').registerHooks ? false : 'this node lacks module.registerHooks' }, (t) => {
+  const { lacksRegisterHooks } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg52node-');
+  assert.strictEqual(lacksRegisterHooks(dir), false);
+  const pre = path.join(dir, 'old-node.js');
+  fs.writeFileSync(pre, "delete require('module').registerHooks;\n");
+  const prev = process.env.NODE_OPTIONS;
+  t.after(() => { if (prev === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = prev; });
+  process.env.NODE_OPTIONS = `--require=${pre}`;
+  assert.strictEqual(lacksRegisterHooks(dir), true);
+});
+
 test('runTests: pytest: a source loaded by path under a test-like module name that fails to load is logged by its file (AUDIT-42 H4)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
   const prev = process.env.SG51_BAD;
   t.after(() => { if (prev === undefined) delete process.env.SG51_BAD; else process.env.SG51_BAD = prev; });

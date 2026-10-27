@@ -501,6 +501,12 @@ test('editMutants: a `;` opening a continuation line, a loop turned into one ste
   assert.strictEqual(unc('js', '  while (n > 9) n = n - 1;\n  return n;', '  while (n > 9) n = n - 2;\n  return n;'), null);
 });
 
+test('editMutants: a `,` in a Python import list shifts nothing; one in a `def` parameter list does (AUDIT-44 L2)', () => {
+  const unc = (b, a) => (sg30('py', b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('    from os.path import (join)\n    return join(s, t)', '    from os.path import (basename, join)\n    return join(s, basename(t))'), null, 'import list');
+  assert.strictEqual(unc('    def g(a, b=2):\n        return a + b\n    return g(n)', '    def g(a, c=1, b=2):\n        return a + b + c\n    return g(n)'), ',', '`def` parameter list');
+});
+
 test('editMutants: a `;` before a kept call, `in`, ternary or operator line, a dropped `for` and a slice of a call result are uncovered; a `++` line, a moved loop and a slice step are not (AUDIT-42 H1-H3, L1)', () => {
   const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
   for (const [b, a] of [

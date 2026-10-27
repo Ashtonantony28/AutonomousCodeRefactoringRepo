@@ -1030,8 +1030,9 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   // A `;`, `,` or `:` that changes statement or value structure:
   // - one with kept code of its own level on both sides, past inserted
   //   tokens (it splits an operand or a statement);
-  // - a `,` in a kept call, array, pattern or parameter list with kept
-  //   elements after it (it shifts them: `f(e)` -> `f(0, e)`);
+  // - a `,` in a kept call, array, pattern or parameter list (not a Python
+  //   import list) with kept elements after it (it shifts them: `f(e)` ->
+  //   `f(0, e)`);
   // - JS: a comma operator next to kept code (it discards or demotes a kept
   //   operand), an array elision, a `;` as the empty body of an `if` /
   //   `else` / `for` (`for await`) / `while` / `with` / `do` head or before
@@ -1089,11 +1090,13 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
     const r = reach(a, 1);
     return !!r && /^(?:[.,?:*%<>=&|^/([`]|\+(?!\+)|-(?!-)|!=|(?:in|instanceof)(?![\w$]))/.test(code.slice(r.i, r.i + 11));
   };
-  // In a kept `(` / `[`, kept code (not a comma) of a's level after a, past
-  // inserted tokens: a `,` there shifts kept arguments or elements.
+  // In a kept `(` / `[` (not a Python import list), kept code (not a comma)
+  // of a's level after a, past inserted tokens: a `,` there shifts kept
+  // arguments or elements.
   const shifts = (a) => {
     const o = encl.get(a) ?? -1, c = pair.get(o);
     if (!'(['.includes(code[o] || '-') || c === undefined || fresh(o, o + 1)) return false;
+    if (lang === 'python' && /\bimport\s*$/.test(code.slice(Math.max(0, o - 16), o))) return false;
     for (let i = a + 1; i < c; i++) if (!/[\s,]/.test(code[i]) && !fresh(i, i + 1)) return true;
     return false;
   };

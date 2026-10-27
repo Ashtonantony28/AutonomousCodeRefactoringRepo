@@ -18,7 +18,7 @@ const { runHybridValidator, unconfirmedBlock, juryVotes } = require('./validatio
 const { runExecutor } = require('./agents/executor');
 const reflexion = require('./agents/reflexion');
 const { FileSnapshot, resolveEdit } = require('./runner/reverter');
-const { killActive, removeLiveDirs } = require('./runner/test-runner');
+const { killActive, removeLiveDirs, lacksRegisterHooks, JS_EXT } = require('./runner/test-runner');
 const worktree = require('./runner/worktree');
 
 const { collectSample, isLabeled } = require('./rl/collector');
@@ -34,6 +34,7 @@ const { renderDashboard } = require('./interpretability/dashboard');
 const REJECT_THRESHOLD = 0.5;
 const MIN_CRITIC_P = 0.5;
 const MIN_PERSONA_P = 0.2;
+let nodeChecked = false;
 
 function logInfo(msg) { console.log(chalk.cyan('[orch] ') + msg); }
 function logWarn(msg) { console.log(chalk.yellow('[orch] ') + msg); }
@@ -201,6 +202,10 @@ async function processProposal({ proposal, session, tracker, classifier, dryRun,
   }
 
   // Executor
+  if (!nodeChecked && JS_EXT.has(path.extname(proposal.file))) {
+    nodeChecked = true;
+    if (lacksRegisterHooks(work.root)) logWarn('node has no module.registerHooks (needs >= 22.15 / 23.5): no JS edit can commit, every failing mutant run is a load failure');
+  }
   let result;
   const tExec = performance.now();
   try {

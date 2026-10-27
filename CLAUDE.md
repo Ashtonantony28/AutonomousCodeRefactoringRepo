@@ -115,7 +115,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `6000 | 0, - 1`, `a && b` → `a; log(b) && b`); a JS comma operator next
     to kept code (`return a` → `return a, b`) or array elision (`[x,,]`);
     a `,` in a kept call, array, pattern or parameter list (Python: call,
-    list, tuple) with kept elements after it, past inserted tokens (it
+    list, tuple, `def` parameter list; not an import list) with kept
+    elements after it, past inserted tokens (it
     shifts them: `slice(e)` → `slice(0, e)`, `[a, b]` → `[a, '', b]`);
     a Python `,` next to kept code that makes a tuple of a statement, a
     grouping paren, a subscript or an f-string field that held no kept comma
@@ -211,11 +212,14 @@ saturation figures are reported on the dashboard as a spend indicator only.
   hooks every run installs, children that keep the environment included:
   a preloaded `Module._compile` wrapper, an ES module load hook (a module,
   or a CommonJS one `import()` loads, loaded but not completed at exit; a
-  process with an async loader, or on a node without `module.registerHooks`,
-  gets none and counts as a load failure unless it is a node:test file
+  process with an async loader, or on a node without `module.registerHooks`
+  (before 22.15 / 23.5: no JS edit can commit; the Orchestrator warns once
+  when it executes one there), gets none and counts as a load failure unless it is a node:test file
   process that exits 0), a sitecustomize wrapping `__import__` and the
   source loaders' `exec_module` (`importlib.import_module`, `reload`)
-  (not `ImportError`) and logging a main module that raises, keyed by a
+  (not `ImportError`) and logging a main module that raises (its
+  `sys.excepthook` wrap, or at exit outside pytest when a later hook such as
+  a `usercustomize` replaced it), keyed by a
   pytest plugin; test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
@@ -427,7 +431,8 @@ same snippet in a later run adds a sample/point. Entries stored without
 
 ## Error handling rules
 
-- Every Claude API call: retry once on rate limit (10 s backoff), then fail
+- Every Claude API call: SDK retries off, a 300 s request timeout (no
+  retry); retry once on rate limit (10 s backoff), then fail
   gracefully — never let one bad proposal crash the pipeline.
 - File ops: wrap in try/catch, log, continue.
 - `SIGINT`/`SIGTERM`: revert the in-flight edit, remove its temp dirs, flush state, exit 0.
