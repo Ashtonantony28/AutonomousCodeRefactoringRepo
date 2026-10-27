@@ -109,17 +109,23 @@ saturation figures are reported on the dashboard as a spend indicator only.
     as the empty body of an `if` / `else` / `for` (`for await`) / `while` /
     `with` / `do` head or before code the expression would continue into
     (`(`, `[`, template, `+`, `-`, `/`, same line or next; not `++` /
-    `--`); a `,` or `;` with kept code of its own level on both sides, past
+    `--`), or at the start of a line whose kept code past inserted tokens
+    continues the line above (`a\n + b` → `a\n ; r = r + b`); a `,` or `;` with kept code of its own level on both sides, past
     inserted tokens (it splits an operand or a statement: `6000 - 1` →
     `6000 | 0, - 1`, `a && b` → `a; log(b) && b`); a JS comma operator next
     to kept code (`return a` → `return a, b`) or array elision (`[x,,]`);
+    a `,` in a kept call, array, pattern or parameter list (Python: call,
+    list, tuple) with kept elements after it, past inserted tokens (it
+    shifts them: `slice(e)` → `slice(0, e)`, `[a, b]` → `[a, '', b]`);
     a Python `,` next to kept code that makes a tuple of a statement, a
     grouping paren, a subscript or an f-string field that held no kept comma
     (`if (c)` → `if (c, log(n))`, `{x}` → `{x,}`); Python `;` on a
     compound statement's logical line (a multi-line header included), a
     trailing comma at statement level, in a grouping paren (after any
     keyword: `if`, `elif`, `while`, `for`, …) or a subscript that holds no
-    other comma of its own (a lambda's commas are not)) must lie inside the span every mutant of one site changes
+    other comma of its own (a lambda's commas are not); a Python `:` that
+    makes a slice of a kept subscript with no kept `:` (`s[k]` →
+    `s[k:k + 1]`)) must lie inside the span every mutant of one site changes
     (the operator match, the literal token, the expression a use-site
     mutant perturbs); a name with no read of its own (a binding, key,
     keyword argument) needs a covered read of the same name, and `=` /
@@ -134,7 +140,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `def`, a moved bracket or indentation; an `if` / `elif` / `while` whose
     stretch deletes another keyword (`while`, `else`, `with`, `switch`,
     `try`, `match`, `async for` → `if`), which its own condition site does
-    not cover) is no evidence
+    not cover; the first inserted token of a hunk that deletes a block
+    keyword (`while`, `for`, `do`, `else`, `with`, `switch`, `try`,
+    `catch` / `except`, `finally`, `match`) more often than it inserts it,
+    whatever replaces it: `while (c) s;` → `c && s;` / `c ? s : t = t;`) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).

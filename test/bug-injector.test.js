@@ -481,6 +481,26 @@ test('editMutants: `for`, `do` and `else` replaced by a guard, a Python `;` on a
   assert.strictEqual(unc('py', '    return max(n - 1, 0)', '    return max(n, - 1, 2)'), ',', 'a comma splitting an operand');
 });
 
+test('editMutants: a `;` opening a continuation line, a loop turned into one step, a `,` before kept arguments and a new slice `:` are uncovered (AUDIT-39 C1, H1, H2, M1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  assert.strictEqual(unc('js', '  const v = Math.min(n, 9)\n    + Math.max(0, n - 9);\n  return v + t;', '  const v = Math.min(n, 9)\n    ; t = t + Math.max(0, n - 9);\n  return v + t;'), ';', 'cuts the operand of the line above');
+  assert.strictEqual(unc('js', '  const v = xs[0]\n    .trim();\n  return v;', '  const v = xs[0]\n    ; s(xs).trim();\n  return v;'), ';', 'cuts a member continuation');
+  assert.strictEqual(unc('js', '  while (xs.length > 9) xs.pop();\n  return xs;', '  xs.length > 9 && xs.pop();\n  return xs;'), '&&', '`while` -> `&&`');
+  assert.strictEqual(unc('js', '  while (t.length > 9) t = t.slice(1);\n  return t;', '  t.length > 9 ? t = t.slice(1) : t = t;\n  return t;'), '?', '`while` -> `?:`');
+  assert.strictEqual(unc('py', '    while n > 9:\n        n = n - 1\n    return n', '    n = n - (n > 9)\n    return n'), '(', 'Python `while` dropped');
+  assert.strictEqual(unc('js', '  return t.slice(n);', '  return t.slice(0, n);'), ',', 'shifts a kept argument');
+  assert.strictEqual(unc('js', '  return [s, t];', "  return [s, '', t];"), ',', 'shifts a kept element');
+  assert.strictEqual(unc('js', '  const [a] = xs;\n  return a;', '  const [h, a] = xs;\n  return a + h;'), ',', 'shifts a pattern element');
+  assert.strictEqual(unc('py', '    return t.replace(s, n)', "    return t.replace('x', s, n)"), ',', 'Python call');
+  assert.strictEqual(unc('py', '    return [s, t]', "    return ['x', s, t]"), ',', 'Python list');
+  assert.strictEqual(unc('py', '    return s[n]', '    return s[n:n + 1]'), ':', 'an index made a slice');
+  // Appended arguments, a new call around kept code and a kept slice need nothing more.
+  assert.strictEqual(unc('js', '  return t.slice(n);', '  return t.slice(n, 9);'), null);
+  assert.strictEqual(unc('js', '  return t;', '  return Math.max(0, t);'), null);
+  assert.strictEqual(unc('py', '    return s[n:]', '    return s[n:9]'), null);
+  assert.strictEqual(unc('js', '  while (n > 9) n = n - 1;\n  return n;', '  while (n > 9) n = n - 2;\n  return n;'), null);
+});
+
 // ---------- SG34: same-text mutant switch, structure, strings ----------
 
 // Runs `call` on the module `src` (a JS file defining f) with the mutant's env set or unset.
