@@ -477,7 +477,10 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // (`T <key> <file> <json name>`) and passes when that test or suite passed
 // (the process key when no reported one has that name); any other throw has
 // key = the process, passed when the process is a node:test file process
-// that exits 0. A process with NODE_TEST_CONTEXT logs its parent
+// that exits 0. A process with an async loader (`--import`, `--loader`,
+// `--experimental-loader`) cannot take the ES module hook (node fails every
+// ES module load beside one): it logs `U <key>`, a load failure unless the
+// key passes. A process with NODE_TEST_CONTEXT logs its parent
 // (`C <key> <ppid>`) and a `node --test` runner its pid (`R <pid>`): one
 // whose parent is no runner is a child a test spawned (it inherits the
 // variable), so its key never passes and its rows carry no test name.
@@ -513,7 +516,12 @@ M.prototype._compile = function (...a) {
   }
 };
 const esm = new Map();
-if (M.registerHooks) {
+const loader = process.execArgv.some(a => /^--(?:import|(?:experimental-)?loader)(?:=|$)/.test(a)) ||
+  /(?:^|\\s)"?--(?:import|(?:experimental-)?loader)(?:[=\\s"]|$)/.test(process.env.NODE_OPTIONS || '');
+if (loader) {
+  if (file) { log('C\\t' + key + '\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\t' + key); }); seen = true; }
+  log('U\\t' + key);
+} else if (M.registerHooks) {
   globalThis[Symbol.for('refactor.loaded')] = (u) => esm.delete(u);
   M.registerHooks({ load(url, ctx, next) {
     const r = next(url, ctx);
@@ -532,7 +540,8 @@ if (M.registerHooks) {
 `;
 // Python: the `__import__` wrapper and an excepthook for a main module that
 // raises (installed by a sitecustomize, so in every interpreter on this
-// PYTHONPATH; it then runs the sitecustomize it shadows, if any), and the
+// PYTHONPATH; it then runs the first sitecustomize that is no copy of it,
+// if any: nested runs put several on PYTHONPATH), and the
 // pytest plugin that keys them.
 const PY_LOAD_CORE = `import builtins, os
 _imp = builtins.__import__
@@ -559,8 +568,7 @@ def _main_raised(*a, _prev=sys.excepthook):
     refactor_load_core.log('T\\t%s\\t%s' % (refactor_load_core.key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
     _prev(*a)
 sys.excepthook = _main_raised
-_here = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if os.path.abspath(p or '.') != _here])
+_spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))])
 if _spec and _spec.loader:
     _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
 `;
@@ -589,7 +597,8 @@ def pytest_runtest_logfinish(nodeid, location):
 // Logged load failures, not caught under a key that passed, of modules other
 // than tests and conftest (a spawned child's key never passes). One logged inside a JS test or suite is caught
 // when every test and suite of that name (in `tests`, `suites`) passed, or,
-// when none has it, its process key passed.
+// when none has it, its process key passed. A `U` row (ES module loads not
+// observed) is one unless its key passed.
 function loadFailed(log, repoRoot, tests, suites) {
   let text;
   try { text = fs.readFileSync(log, 'utf8'); } catch { return false; }
@@ -619,8 +628,9 @@ function loadFailed(log, repoRoot, tests, suites) {
     const v = memo.get(json);
     return v === undefined ? passed.has(key) : v;
   };
-  return rows.some(([k, key, f, name]) => k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
-    !(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key)));
+  return rows.some(([k, key, f, name]) => (k === 'U' && !passed.has(key)) ||
+    (k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
+    !(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))));
 }
 
 function ownsReporters(repoRoot, env) {

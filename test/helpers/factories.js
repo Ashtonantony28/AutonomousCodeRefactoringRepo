@@ -69,7 +69,10 @@ function plainMutant(m) {
   const s = m.src.replace(read, '').split(`${on} ${isPy ? '==' : '==='} '${val}'`).join(on);
   const c = s.indexOf(on);
   const code = lexView(s, isPy ? 'python' : 'javascript').code;
-  const close = (i) => { for (let d = 0; ; i++) { if ('([{'.includes(code[i])) d++; else if (')]}'.includes(code[i]) && !--d) return i; } };
+  const close = (i) => {
+    for (let d = 0; i < code.length; i++) { if ('([{'.includes(code[i])) d++; else if (')]}'.includes(code[i]) && !--d) return i; }
+    throw new Error('plainMutant: unbalanced switch');
+  };
   const after = c + on.length;
   if (isPy && s.startsWith(':\n', after)) {
     const [, ind, mut] = /^:\n([ \t]*) {4}(.*)\n/.exec(s.slice(after));
@@ -79,7 +82,7 @@ function plainMutant(m) {
   if (isPy) {
     const me = c - 5;
     let mo = me - 1;
-    while (code[mo] !== '(' || close(mo) !== me) mo--;
+    while (code[mo] !== '(' || close(mo) !== me) if (--mo < 0) throw new Error('plainMutant: switch not found');
     return s.slice(0, mo - 1) + s.slice(mo + 1, me) + s.slice(close(after + 6) + 2);
   }
   if (s.slice(c - 4, c) !== 'if (') {

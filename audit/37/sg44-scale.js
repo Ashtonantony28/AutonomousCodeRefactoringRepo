@@ -54,6 +54,8 @@ function copy(patches) {
   const f = L.path.join(dir, 'src/rl/bug-injector.js');
   let text = L.fs.readFileSync(f, 'utf8');
   for (const [from, to] of [TIMER, ...patches]) {
+    // A bound already in src (SG46) leaves its patch nothing to replace.
+    if (from !== TIMER[0] && !text.includes(from)) continue;
     if (text.split(from).length !== 2) throw new Error(`patch does not apply: ${from.slice(0, 60)}`);
     text = text.replace(from, () => to);
   }

@@ -909,3 +909,62 @@ test('tapResults / loadFailed: a name ending in `#<n>` is never a duplicate mark
   assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse#1': 'fail' }), false, 'a failing test named `parse#1` is not `parse`');
   assert.strictEqual(loadFailed(log, dir, { parse: 'pass', 'parse\t#2': 'fail' }), true, 'a failing duplicate of `parse`');
 });
+
+test('runTests: a suite with an async loader (--import + module.register, --experimental-loader, NODE_OPTIONS) runs; its ES module loads are unobserved, so a failing run is a collection error (AUDIT-37 H1)', async (t) => {
+  const prev = process.env.NODE_TEST_CONTEXT, opts = process.env.NODE_OPTIONS;
+  delete process.env.NODE_TEST_CONTEXT;
+  t.after(() => {
+    if (prev !== undefined) process.env.NODE_TEST_CONTEXT = prev;
+    if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+  });
+  const dir = tmp(t, 'refactor-sg46-');
+  for (const d of ['src', 'test']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'loader.mjs'), 'export async function load(url, ctx, next) { return next(url, ctx); }\n');
+  fs.writeFileSync(path.join(dir, 'register.mjs'), "import { register } from 'node:module';\nregister('./loader.mjs', import.meta.url);\n");
+  fs.writeFileSync(path.join(dir, 'src/calc.js'), 'export const twice = (x) => 2 * x;\n');
+  const body = (n) => `import test from 'node:test';\nimport assert from 'node:assert';\nimport { twice } from '../src/calc.js';\ntest('twice', () => assert.strictEqual(twice(2), ${n}));\n`;
+  for (const [cmd, options] of [['node --import ./register.mjs --test'], ['node --experimental-loader ./loader.mjs --test'], ['node --test', '--no-warnings --import ./register.mjs']]) {
+    if (options) process.env.NODE_OPTIONS = options; else if (opts === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = opts;
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', type: 'module', private: true, scripts: { test: cmd } }));
+    fs.writeFileSync(path.join(dir, 'test/calc.test.js'), body(4));
+    const ok = await runTests({ repoRoot: dir });
+    assert.strictEqual(ok.status, 'passed', `${cmd}: ${ok.stdout}${ok.stderr}`);
+    assert.deepStrictEqual(ok.tests, { twice: 'pass' });
+    fs.writeFileSync(path.join(dir, 'test/calc.test.js'), body(5));
+    const red = await runTests({ repoRoot: dir });
+    assert.strictEqual(red.status, 'failed', cmd);
+    assert.strictEqual(red.collection_error, true, `${cmd}: no ES module load evidence`);
+  }
+});
+
+test('loadFailed: a process whose ES module loads are unobserved (U row) is a load failure unless its file process exited 0 (AUDIT-37 H1)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-sg46log-');
+  const log = path.join(dir, 'load.log');
+  const at = (rows) => { fs.writeFileSync(log, rows.map(r => r.join('\t')).join('\n') + '\n'); return loadFailed(log, dir, { a: 'pass' }); };
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], ['U', '11.1'], ['P', '11.1']]), false);
+  assert.strictEqual(at([['R', '10'], ['C', '11.1', '10'], ['U', '11.1']]), true);
+  assert.strictEqual(at([['R', '10'], ['C', '12.1', '11'], ['U', '12.1'], ['P', '12.1']]), true, 'a spawned child never passes');
+});
+
+test('runTests: pytest: a nested run (two hook dirs on PYTHONPATH) starts python children cleanly (AUDIT-37 L4)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const dir = tmp(t, 'refactor-sg46py-');
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'tests/test_nest.py'), [
+    'import os, shutil, subprocess, sys, tempfile',
+    'import refactor_load_core',
+    '',
+    '',
+    'def test_nested():',
+    '    tmp = tempfile.mkdtemp()',
+    "    inner = os.path.join(tmp, 'hook')",
+    '    shutil.copytree(os.path.dirname(refactor_load_core.__file__), inner)',
+    "    env = dict(os.environ, PYTHONPATH=os.environ['PYTHONPATH'] + os.pathsep + inner)",
+    "    r = subprocess.run([sys.executable, '-c', 'pass'], env=env, capture_output=True, text=True)",
+    '    shutil.rmtree(tmp)',
+    "    assert r.stderr == ''",
+    ''].join('\n'));
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'passed', r.stdout);
+});

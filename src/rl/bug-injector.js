@@ -982,7 +982,9 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   const insAt = new Set(ins.map(r => r[0]));
   // Every non-space character of [a, b) is inserted.
   const fresh = (a, b) => {
-    for (let c = a, i = 0; c < b; c++) {
+    let i = 0;
+    for (let h = ins.length; i < h;) { const m = (i + h) >> 1; if (ins[m][1] <= a) i = m + 1; else h = m; }
+    for (let c = a; c < b; c++) {
       if (/\s/.test(view.kept[c])) continue;
       while (i < ins.length && ins[i][1] <= c) i++;
       if (i >= ins.length || ins[i][0] > c) return false;
@@ -1016,8 +1018,24 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   //   not).
   const prevCode = (i) => { while (i > 0 && /\s/.test(code[i - 1])) i--; return i - 1; };
   const nextCode = (i) => { while (i < code.length && /\s/.test(code[i])) i++; return i; };
-  const lineStart = (a) => { let s = code.lastIndexOf('\n', a - 1) + 1; while (s > 0 && depth.get(s)) s = code.lastIndexOf('\n', s - 2) + 1; return s; };
-  const lineEnd = (a) => { let k = code.indexOf('\n', a); while (k >= 0 && depth.get(k + 1)) k = code.indexOf('\n', k + 1); return k < 0 ? code.length : k; };
+  // Logical line bounds, memoised per physical line.
+  const starts = new Map(), ends = new Map();
+  const lineStart = (a) => {
+    let s = code.lastIndexOf('\n', a - 1) + 1;
+    const walked = [];
+    while (s > 0 && depth.get(s) && !starts.has(s)) { walked.push(s); s = code.lastIndexOf('\n', s - 2) + 1; }
+    const r = starts.get(s) ?? s;
+    for (const w of walked) starts.set(w, r);
+    return r;
+  };
+  const lineEnd = (a) => {
+    let k = code.indexOf('\n', a);
+    const walked = [];
+    while (k >= 0 && depth.get(k + 1) && !ends.has(k)) { walked.push(k); k = code.indexOf('\n', k + 1); }
+    const r = ends.get(k) ?? (k < 0 ? code.length : k);
+    for (const w of walked) ends.set(w, r);
+    return r;
+  };
   // The nearest kept token on side d of separator a at its level, past
   // inserted tokens and wholly inserted bracket pairs -> { i, nl } (nl: a line
   // break crossed), or null at a separator, a bracket closing the level or
@@ -1062,7 +1080,10 @@ function uncoveredToken(src, hunks, out, names, litToks, view, { nodes, seqs = [
   // A Python `,` at a that makes a tuple where its level held no kept comma.
   const tupleNew = (a, o) => {
     const s = o < 0 ? lineStart(a) : o + 1, e = o < 0 ? lineEnd(a) : code.length;
-    if ((commaAt.get(o) || []).some(i => i !== a && s <= i && i < e && !fresh(i, i + 1))) return false;
+    const C = commaAt.get(o) || [];
+    let j = 0;
+    for (let h = C.length; j < h;) { const m = (j + h) >> 1; if (C[m] < s) j = m + 1; else h = m; }
+    for (; j < C.length && C[j] < e; j++) if (C[j] !== a && !fresh(C[j], C[j] + 1)) return false;
     const head = code.slice(s, a);
     if (/(?<![\w.])lambda\b[^:]*$/.test(head)) return false;
     if (o < 0) return !/^\s*(?:(?:import|from|global|nonlocal|del|assert)\b|(?:async\s+)?with\b[^:]*$)/.test(head);

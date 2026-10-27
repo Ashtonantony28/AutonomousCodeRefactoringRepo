@@ -382,7 +382,8 @@ const MUTANTS = [
     // AUDIT-30: re-anchored after SG38 (loadFailed takes per-test names).
     '!(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))', '!(name && !spawned.has(key) ? testPassed(name, key) : false)'),
   M('TR-jspass', 'safety', TR, 'SG33: a JS load throw is excused in a test process that exits non-zero (uncaught or wrapped load failure is a kill)',
-    '(code) => { if (code === 0)', '(code) => { if (true)'),
+    // SG46: re-anchored (the async-loader branch passes its key the same way).
+    "if (!seen && file) process.on('exit', (code) => { if (code === 0)", "if (!seen && file) process.on('exit', (code) => { if (true)"),
   M('TR-pypass', 'safety', TR, 'SG33: a pytest load throw is excused in a test that failed (wrapped import failure is a kill)',
     '    _finish(not _bad)\n', '    _finish(True)\n'),
   M('EX-sham', 'safety', EX, 'SG30/SG34: the control is the edit, not the same switched text (a source-reading test kills)',
@@ -551,8 +552,8 @@ const MUTANTS = [
   M('BI-pydisplay', 'redundant', BI, 'SG41: a trailing comma in a display that already holds other commas is structural (over-rejects; fails closed)',
     'if (commas.get(o) > 1 && !lambdas.has(o)) return false;', ''),
   M('BI-pylogical', 'safety', BI, 'SG41: a Python `;` on a continuation line of a compound statement is exempt (only the physical line is read)',
-    // SG44: re-anchored (the logical line start is a helper).
-    "while (s > 0 && depth.get(s)) s = code.lastIndexOf('\\n', s - 2) + 1; return s;", 'return s;'),
+    // SG44: re-anchored (the logical line start is a helper); SG46: memoised.
+    "while (s > 0 && depth.get(s) && !starts.has(s)) { walked.push(s); s = code.lastIndexOf('\\n', s - 2) + 1; }", ''),
   M('BI-pybom1', 'label', BI, 'SG38: the Python shape check does not strip a BOM (no switch places, fewer mutants: fails closed)',
     "        stack = list(ast.parse(src.removeprefix('\\\\ufeff')).body)", '        stack = list(ast.parse(src).body)'),
   M('BI-pybom2', 'label', BI, 'SG38: the Python parse check rejects a BOM file (mutants dropped: fails closed)',
@@ -635,7 +636,14 @@ const MUTANTS = [
   M('BI-ctrlsame', 'control', BI, 'SG42: the control value is the switch value (no kill ever: fails closed)',
     'const [val, off] = [token(), token()];', 'const val = token(), off = val;'),
   M('EX-ctrlnone', 'safety', EX, "SG42: the executor's control run leaves the switch variable unset (key sets differ)",
-    '        const control = await runSuite(m.src, m.control);', '        const control = await runSuite(m.src, {});')
+    '        const control = await runSuite(m.src, m.control);', '        const control = await runSuite(m.src, {});'),
+  // --- SG46 (AUDIT-37)
+  M('TR-urow', 'safety', TR, 'SG46: a process whose ES module loads are unobserved (async loader) is no load failure (an unseen load throw kills)',
+    "(k === 'U' && !passed.has(key)) ||", 'false ||'),
+  M('TR-asyncesm', 'label', TR, 'SG46: the ES module hook is registered beside an async loader (every test process crashes: edit_not_exercised, fails closed)',
+    'if (loader) {', 'if (false) {'),
+  M('TR-sitenest', 'label', TR, 'SG46: a hook sitecustomize chains to another copy of itself (nested runs recurse: stderr noise, fails closed)',
+    "if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))", "if os.path.abspath(p or '.') != os.path.dirname(os.path.abspath(__file__))")
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.

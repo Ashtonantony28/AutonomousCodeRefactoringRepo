@@ -277,7 +277,16 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   it, else by the file process). Not seen: a child whose `NODE_OPTIONS` or
   `PYTHONPATH` is replaced, `python -I` / `-E` / `-S`, a child that sets
   its own `sys.excepthook`, worker threads, and ES modules on a Node
-  without `module.registerHooks`. A child that drops the whole environment
+  without `module.registerHooks`. A process with an async loader
+  (`--import`, `--loader`, `--experimental-loader`: tsx, ts-node/esm,
+  esmock) cannot take the ES module hook beside it, so its ES module loads
+  are not seen: it fails closed, a load failure unless it is a node:test
+  file process that exits 0, so such a suite runs and its edits are judged
+  but a failing mutant run there is no kill (`tests_insensitive`). A loader
+  registered later from code (`module.register` in a test file or a
+  `--require` preload) crashes that process (a load failure, no kill).
+  Several hook copies on `PYTHONPATH` (nested runs) chain to the first
+  sitecustomize that is none of them. A child that drops the whole environment
   drops the switch variable too and runs the edit, not the mutant.
 - **Use-site perturbations are small value changes.** A read is perturbed
   by number + 1, string + `~`, last list/dict entry dropped, or a skipped

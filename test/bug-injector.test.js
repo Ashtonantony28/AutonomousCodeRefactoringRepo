@@ -837,3 +837,16 @@ test('editMutants: head, continue-into, unpacking, tuple-key and logical-line se
   assert.strictEqual(unc('py', '    if (n >\n            1):\n        t = s\n    return t', '    if (n >\n            1): str(t); t = s\n    return t'), ';',
     'a `;` on a multi-line header joins the suite');
 });
+
+test('plainMutant (test helper) throws on a switch shape it does not know instead of scanning past the end (AUDIT-37 L3)', async () => {
+  const { Worker } = require('worker_threads');
+  const w = new Worker(`const { parentPort, workerData } = require('worker_threads');
+    try { parentPort.postMessage(require(workerData).plainMutant({ env: { K: 'v' }, src: 'var _k = globalThis.process.env.K; x = _k;\\n' })); } catch (e) { parentPort.postMessage('threw ' + e.message); }`,
+  { eval: true, workerData: path.join(__dirname, 'helpers/factories.js') });
+  const out = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve('hung'), 5000);
+    w.on('message', (m) => { clearTimeout(t); resolve(m); });
+  });
+  await w.terminate();
+  assert.match(out, /^threw plainMutant/);
+});
