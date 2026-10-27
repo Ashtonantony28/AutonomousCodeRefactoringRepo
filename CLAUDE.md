@@ -131,9 +131,10 @@ saturation figures are reported on the dashboard as a spend indicator only.
     it or a dropped prefix operator right before it; a sibling site inside
     the bracket pair or line never stands in. An inserted token nothing covers (an operator or
     keyword with no mutant: `typeof`, `=>`, `@`, a Python ternary, a new
-    `def`, a moved bracket or indentation; an `if` / `elif` / `while` that
-    replaced another block keyword, which its own condition site does not
-    cover) is no evidence
+    `def`, a moved bracket or indentation; an `if` / `elif` / `while` whose
+    stretch deletes another keyword (`while`, `else`, `with`, `switch`,
+    `try`, `match`, `async for` → `if`), which its own condition site does
+    not cover) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
@@ -160,12 +161,14 @@ saturation figures are reported on the dashboard as a spend indicator only.
   - **Same-text switch.** Each mutant is written into the file as a
     runtime switch on an environment variable around the smallest
     expression (or a `return` statement) holding the site:
-    `(_k ? (mutant) : (original))`, Python `((mutant) if _k else
-    (original))`, where `_k` (a name the file does not use) is bound once
-    per module load: JS `var _k = globalThis.process.env.K === 'v';` before
-    the first statement (after a shebang / directive prologue, no line
-    added), Python `_k = __import__('os').environ.get('K') == 'v'` after
-    the docstring and `__future__` imports; a site with no such place (a
+    `(_k === 'v' ? (mutant) : (original))`, Python `((mutant) if _k ==
+    'v' else (original))`, where `_k` (a name the file does not use) is
+    bound once per module load to the variable's raw value: JS `var _k =
+    globalThis.process.env.K;` before the first statement (after a shebang
+    / directive prologue, no line added), Python `_k =
+    __import__('os').environ.get('K')` after the docstring and
+    `__future__` imports (a string in mutant and control runs alike, so
+    module state shows no flag); a site with no such place (a
     key, a pattern, a class-member name, code before the binding) has no
     mutant. `v` and the control's value are random 16-letter strings, new
     per edit. Mutant runs set `K=v`; the kill's third run (the control) is
@@ -196,14 +199,18 @@ saturation figures are reported on the dashboard as a spend indicator only.
   of which ran the same set of tests as the control. A run where a module
   failed to load (a test file process crashed, a failure raised from a
   module body — `Module._compile` / `in <module>`, or logged by the load
-  hooks every run installs: a preloaded `Module._compile` wrapper, a pytest
-  plugin wrapping `__import__` (not `ImportError`); test files and
+  hooks every run installs, children that keep the environment included:
+  a preloaded `Module._compile` wrapper, an ES module load hook (a module
+  loaded but not completed at exit), a sitecustomize wrapping `__import__`
+  (not `ImportError`) and logging a main module that raises, keyed by a
+  pytest plugin; test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
   subtest counting as its parent; names compared as TAP ids: `\#` / `\\`
   unescaped, control characters as TAP writes them) that
   passed (with no reported test or suite of that name, as below), elsewhere in a node:test
-  file process that exits 0, or in a pytest test or collected
+  file process that exits 0 (not a child it spawns, though that inherits
+  `NODE_TEST_CONTEXT`), or in a pytest test or collected
   module that passed — or a pytest collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.

@@ -268,7 +268,17 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   hook, an ESM `import test from 'node:test'` suite) is ignored only when
   its node:test file process exits 0, so there a caught throw beside the
   killing test still blocks every kill. pytest keys it by test or collected
-  module.
+  module. The hooks reach child processes that keep the environment: a JS
+  child a test spawns logs its throws but is never the file process (though
+  it inherits `NODE_TEST_CONTEXT`), so a throw it catches is a load
+  failure; a Python child logs through a sitecustomize on `PYTHONPATH`,
+  including a main module that raises. An ES module that loads but does not
+  complete is logged too (named when a CommonJS node:test callback imports
+  it, else by the file process). Not seen: a child whose `NODE_OPTIONS` or
+  `PYTHONPATH` is replaced, `python -I` / `-E` / `-S`, a child that sets
+  its own `sys.excepthook`, worker threads, and ES modules on a Node
+  without `module.registerHooks`. A child that drops the whole environment
+  drops the switch variable too and runs the edit, not the mutant.
 - **Use-site perturbations are small value changes.** A read is perturbed
   by number + 1, string + `~`, last list/dict entry dropped, or a skipped
   call (a namespace call passes its first non-literal argument through).
@@ -302,9 +312,10 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   inserted read of the same name, a regex class bracket, names in type
   annotations, `typeof`, `=>`, `@`, `*args`, a Python ternary or
   comprehension, a new function definition, a block re-indented or
-  re-bracketed around unchanged code, a block keyword swapped for another
-  (`while` → `if`, `elif` → `if`: the condition's kill shows only that the
-  condition matters). An operator mutant is a strong change
+  re-bracketed around unchanged code, a guard keyword whose stretch deletes
+  another keyword (`while`, `with`, `switch`, `try`, `match` → `if`,
+  `elif` → `if`: the condition's kill shows only that the condition
+  matters). An operator mutant is a strong change
   (`>>` → `<<`, `-` → `+`): a test on small inputs kills it, so a range
   change (`x | 0` for `Math.trunc`) stands on the executor bar only if the
   diff test misses it. A string (one lexer literal, backslash continuations
@@ -317,9 +328,11 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   (length, token or word counts, layout, a grep) give no kill. The control
   sets the same variable as the mutant runs, to another random 16-letter
   value, so a test that reads the environment (unknown keys, flag-like
-  values, a snapshot) sees the same keys and value shape in all three runs;
-  only a test whose verdict depends on the exact random value could still
-  tell them apart. A site with
+  values, a snapshot) sees the same keys and value shape in all three runs.
+  The module-level binding the switches compare holds that raw value, so a
+  test that inspects module state (`vars(m)`, `dir(m)`, a sloppy script's
+  globals) sees the same names and types too; only a test whose verdict
+  depends on the exact random value could still tell them apart. A site with
   no expression to switch (an object or class key, a match pattern) has no
   mutant and is rejected. A test that only notices a change of a value's
   type or size, not its content, still kills a perturbation it would not

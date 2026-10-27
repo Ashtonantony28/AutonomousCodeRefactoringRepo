@@ -451,6 +451,21 @@ test('editMutants: a block keyword that replaced another is not covered by its o
   assert(!fresh.ms.uncovered && fresh.sites.includes('negate_condition:if'), JSON.stringify(fresh.sites));
 });
 
+test('editMutants: a guard keyword whose stretch deletes any other keyword (`with`, `switch`, `try`, `match`, `async for`) is not covered by its own condition site (AUDIT-35 C1)', () => {
+  const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
+  const sloppy = (body) => `function f(s, o) {\n${body}\n  return s;\n}\n`;
+  const w = bugInjector.editMutants(sloppy('  with (o || {}) s = s.slice(0, 9);').replace('with', 'if'), { file: 'src/x.js', before: sloppy('  with (o || {}) s = s.slice(0, 9);') });
+  assert.strictEqual(w.uncovered && w.uncovered.text, 'if', 'JS `with` -> `if`');
+  assert.strictEqual(unc('js', '  switch (n) { default: s = s.trim(); }\n  return s;', '  if (n) { s = s.trim(); }\n  return s;'), 'if', '`switch` -> `if`');
+  assert.strictEqual(unc('js', '  try { s = s.trim(); } finally { n = 0; }\n  return s;', '  if (n) { s = s.trim(); }\n  n = 0;\n  return s;'), 'if', '`try` -> `if`');
+  for (const [b, a, kw] of [
+    ['    with t:\n        s = s.strip()\n    return s', '    if t:\n        s = s.strip()\n    return s', 'if'],
+    ['    try:\n        s = s.strip()\n    finally:\n        pass\n    return s', '    if s:\n        s = s.strip()\n    return s', 'if'],
+    ['    match n:\n        case _:\n            s = s.strip()\n    return s', '    if n:\n        s = s.strip()\n    return s', 'if'],
+    ['    async for c in xs:\n        s = s + c\n    return s', '    while c in xs:\n        s = s + c\n    return s', 'while']
+  ]) assert.strictEqual(unc('py', b, a), kw, a);
+});
+
 test('editMutants: `for`, `do` and `else` replaced by a guard, a Python `;` on a try / except / finally, async or case line and a comma splitting kept code are uncovered (AUDIT-34 H1, H2, M1)', () => {
   const unc = (lang, b, a) => (sg30(lang, b, a).ms.uncovered || {}).text || null;
   assert.strictEqual(unc('js', '  for (; n > 0;) { n--; t += 1; }\n  return t;', '  if (n > 0) { n--; t += 1; }\n  return t;'), 'if', '`for` -> `if` runs the body once');
@@ -484,13 +499,13 @@ test('editMutants: a mutant is a switch: the same text runs the original unless 
     assert.strictEqual(runJs(m, "f('abcdef', 0, 2)", false), 'bc', `switch off: the edit (${m.mutation})`);
     assert.notStrictEqual(runJs(m, "f('abcdef', 0, 2)", true), 'bc', `switch on: the mutant (${m.mutation})`);
   }
-  assert(ms.every(m => m.src.includes('slice(1, (_refactor_mutant ? ') || m.src.includes('slice(1, n + (_refactor_mutant ? ')), 'the smallest expression holding the change');
+  assert(ms.every(m => m.src.includes(`slice(1, (_refactor_mutant === '${m.env.REFACTOR_MUTANT}' ? `) || m.src.includes(`slice(1, n + (_refactor_mutant === '${m.env.REFACTOR_MUTANT}' ? `)), 'the smallest expression holding the change');
   // A dropped return switches its statement; a call in statement position its expression statement.
   const ret = sg30('js', '  return t;', '  if (n) return s;\n  return t;').ms.find(m => m.mutation === 'drop_return');
   assert.strictEqual(runJs(ret, 'f(1, 2, 3)', false), 1);
   assert.strictEqual(runJs(ret, 'f(1, 2, 3)', true), 2);
   const stmt = sg30('js', '  return xs;', '  xs.push(n);\n  return xs;').ms.find(m => m.ref === 'push');
-  assert.match(stmt.src, /\n {2}if \(_refactor_mutant\) \(void 0\); else \(xs\.push\(n\)\);\n/, 'no line can start with the switch');
+  assert.match(stmt.src, /\n {2}if \(_refactor_mutant === '[a-z]{16}'\) \(void 0\); else \(xs\.push\(n\)\);\n/, 'no line can start with the switch');
   assert.deepStrictEqual(runJs(stmt, 'f(0, 0, 5, [])', false), [5]);
   assert.deepStrictEqual(runJs(stmt, 'f(0, 0, 5, [])', true), []);
   // A member callee keeps its receiver: the call is switched, not `s.trim`.
@@ -498,7 +513,7 @@ test('editMutants: a mutant is a switch: the same text runs the original unless 
   assert(call.src.includes(': (s.trim()))'), call.src);
   // Python: the same switch through os.environ.
   const py = sg30('py', '    return str(s)[1:]', '    return str(s)[1:n]').ms.find(m => m.ref === 'n');
-  assert.match(py.src, /\[1:\(\(.*\) if _refactor_mutant else \(n\)\)\]/);
+  assert.match(py.src, /\[1:\(\(.*\) if _refactor_mutant == '[a-z]{16}' else \(n\)\)\]/);
 });
 
 // ---------- SG35: switch read once per module, bounded JS parse check ----------
@@ -511,7 +526,7 @@ test('editMutants: the switch variable is read once per module load, into a bind
   for (const m of ms) {
     const [[name, val]] = Object.entries(m.env);
     assert.strictEqual(m.src.split(name).length, 2, 'one read of the variable');
-    assert(m.src.startsWith(`#!/usr/bin/env node\n'use strict';\nvar _refactor_mutant = globalThis.process.env.${name} === '${val}'; function f(x) {\n`), m.src);
+    assert(m.src.startsWith(`#!/usr/bin/env node\n'use strict';\nvar _refactor_mutant = globalThis.process.env.${name}; function f(x) {\n`) && m.src.includes(`_refactor_mutant === '${val}'`), m.src);
     assert.strictEqual(m.src.split('\n').length, a.split('\n').length, 'no line added');
     const load = () => { const mod = { exports: {} }; new Function('module', m.src.replace(/^#!.*/, ''))(mod); return mod.exports.f; };
     const withVal = (v) => { process.env[name] = v; try { return load(); } finally { delete process.env[name]; } };
@@ -542,9 +557,36 @@ test('editMutants: mutant and control runs set the same switch variable, to rand
   assert.notStrictEqual(again[0].env.REFACTOR_MUTANT, runs[0][0].env.REFACTOR_MUTANT, 'a fresh value per call');
 });
 
+test('editMutants: the switch binding holds a value of one type in mutant and control runs: module state shows no flag (AUDIT-35 H1)', () => {
+  const { spawnSync } = require('child_process');
+  const pb = 'DEBUG = False\n\n\ndef f(x):\n    return x[:6000]\n';
+  const code = "import json, sys\nns = {}\nexec(compile(sys.stdin.read(), 'm.py', 'exec'), ns)\n" +
+    "print(json.dumps(sorted((k, type(v).__name__) for k, v in ns.items() if k != '__builtins__' and not callable(v))), [k for k, v in ns.items() if v is True])";
+  const pms = bugInjector.editMutants(pb.replace('6000', '7000'), { file: 'app/m.py', before: pb });
+  assert(pms.length);
+  for (const m of pms) {
+    const [on, off] = [m.env, m.control].map(e => spawnSync('python3', ['-I', '-c', code], { input: m.src, encoding: 'utf8', env: { ...process.env, ...e } }));
+    assert.strictEqual(on.status, 0, on.stderr);
+    assert.strictEqual(on.stdout, off.stdout, 'the same module state in mutant and control runs');
+    assert(on.stdout.trim().endsWith(' []'), on.stdout);
+  }
+  const vm = require('vm');
+  const jb = 'var max = 6000;\nfunction f(x) {\n  return x.slice(0, max);\n}\n';
+  const jms = bugInjector.editMutants(jb.replace('0, max', '1, max'), { file: 'src/m.js', before: jb });
+  assert(jms.length);
+  for (const m of jms) {
+    const [on, off] = [m.env, m.control].map(env => {
+      const ctx = vm.createContext({ process: { env } });
+      vm.runInContext(m.src, ctx);
+      return JSON.stringify(Object.entries(ctx).filter(([k]) => k !== 'process').map(([k, v]) => [k, typeof v, v === true]));
+    });
+    assert.strictEqual(on, off, 'a sloppy script\'s globals have the same types in mutant and control runs');
+  }
+});
+
 test('editMutants (Python): the switch binding goes after the docstring and __future__ imports, read once (AUDIT-25 H1)', () => {
   const { spawnSync } = require('child_process');
-  const read = "_refactor_mutant = __import__('os').environ.get('REFACTOR_MUTANT') == 'VAL'";
+  const read = "_refactor_mutant = __import__('os').environ.get('REFACTOR_MUTANT')";
   const cases = [
     ['"""Doc."""\nfrom __future__ import annotations  # c\nimport os\n\n\ndef f(x):\n    return x + 1\n', `annotations; ${read}  # c\n`],
     ['import os\n\n\ndef f(x):\n    return x + 1\n', `${read}; import os\n`],
