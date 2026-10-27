@@ -614,7 +614,8 @@ const MUTANTS = [
   M('BI-kwlist', 'safety', BI, 'SG42 list: only `if|elif|else|while|for|do` count as replaced (`with` / `switch` / `try` -> `if` covered by its own condition)',
     'g.del.some(([s, e]) => KEYWORDS[lang].has(before.slice(s, e))', 'g.del.some(([s, e]) => /^(?:if|elif|else|while|for|do)$/.test(before.slice(s, e))'),
   M('TR-esmhook', 'safety', TR, 'SG45: ES modules are not tracked (a caught import() throw kills)',
-    'if (M.registerHooks) {', 'if (false) {'),
+    // SG50: re-anchored (the hook is the branch without a loader).
+    '  M.registerHooks({ resolve(', '  ({ resolve('),
   M('TR-childfile', 'safety', TR, 'SG45: a child inheriting NODE_TEST_CONTEXT counts as a file process (its caught throw is excused on exit 0)',
     "const spawned = new Set(rows.filter(r => r[0] === 'C' && !runners.has(r[2])).map(r => r[1]));", 'const spawned = new Set();'),
   M('TR-childname', 'safety', TR, 'SG45: a spawned child\'s named row is excused by a parent test of that name',
@@ -641,7 +642,7 @@ const MUTANTS = [
   M('TR-urow', 'safety', TR, 'SG46: a process whose ES module loads are unobserved (async loader) is no load failure (an unseen load throw kills)',
     "(k === 'U' && !passed.has(key)) ||", 'false ||'),
   M('TR-asyncesm', 'label', TR, 'SG46: the ES module hook is registered beside an async loader (every test process crashes: edit_not_exercised, fails closed)',
-    'if (loader) {', 'if (false) {'),
+    'if (loader || !M.registerHooks) {', 'if (!M.registerHooks) {'),
   M('TR-sitenest', 'label', TR, 'SG46: a hook sitecustomize chains to another copy of itself (nested runs recurse: stderr noise, fails closed)',
     "if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))", "if os.path.abspath(p or '.') != os.path.dirname(os.path.abspath(__file__))"),
 
@@ -731,7 +732,7 @@ const MUTANTS = [
   M('TR-tapok2028', 'safety', TR, 'SG44: `ok` lines holding U+2028 / U+2029 are dropped (a failing test of that name is not seen)',
     'const m = line.match(/^\\s*(not )?ok \\d+ - (.*?)(?: # (SKIP|TODO)\\b.*)?$/s);', 'const m = line.match(/^\\s*(not )?ok \\d+ - (.*?)(?: # (SKIP|TODO)\\b.*)?$/);'),
   M('TR-runnerrow', 'label', TR, 'SG45: `node --test` runners log no `R` row (every file process reads as a spawned child: caught top-level throws block kills, fails closed)',
-    "if (process.execArgv.includes('--test')) log('R\\\\t' + process.pid);", ''),
+    "if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\\\t' + process.pid); }", ''),
   M('TR-crow', 'safety', TR, 'SG45: a CJS load throw logs no `C` row (a spawned child that catches and exits 0 is excused)',
     "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", ''),
   M('TR-esmcrow', 'safety', TR, 'SG45: an ES module load failure logs no `C` row (a spawned child that catches an import() throw and exits 0 is excused)',
@@ -747,11 +748,25 @@ const MUTANTS = [
   M('TR-cjspfile', 'safety', TR, 'SG45: a CJS process without NODE_TEST_CONTEXT logs `P` on exit 0 (an env-stripped child that catches a require() throw is excused)',
     "    if (!seen && file) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });", "    if (!seen) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });"),
   M('TR-runnerall', 'safety', TR, 'SG45: every hooked process logs an `R` row (a file process reads as a runner, so its spawned children are not marked)',
-    "if (process.execArgv.includes('--test')) log('R\\\\t' + process.pid);", "log('R\\\\t' + process.pid);"),
+    // SG50: re-anchored (only the root runner logs `R`).
+    "if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\\\t' + process.pid); }", "log('R\\\\t' + process.pid);"),
   M('TR-cppid', 'label', TR, 'SG45: the CJS `C` row names the process itself, not its parent (every file process reads as spawned: fails closed)',
     "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.pid);\n"),
   M('TR-pychain', 'label', TR, 'SG45: the sitecustomize the hook shadows is not run (the suite loses its own site setup)',
-    'if _spec and _spec.loader:\n    _spec.loader', 'if False:\n    _spec.loader')
+    'if _spec and _spec.loader:\n    _spec.loader', 'if False:\n    _spec.loader'),
+  M('TR-rootany', 'safety', TR, 'SG50: every `node --test` process logs `R` (the file process of a nested runner a test spawns is excused)',
+    "process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT)", "process.execArgv.includes('--test'))"),
+  M('TR-cjsesm', 'safety', TR, 'SG50: CommonJS loaded through import() gets no completion mark (it bypasses Module._compile: a caught throw kills)',
+    "if ((r.format === 'module' || cjs) && r.source != null) {", "if (r.format === 'module' && r.source != null) {"),
+  M('TR-esmtest', 'safety', TR, 'SG50: node:test required by CommonJS the ES module loader compiles is not wrapped (a caught throw in a passing test under --experimental-test-isolation=none blocks kills)',
+    "spec === 'node:test' && viaEsm.has(ctx.parentURL) ?", 'false ?'),
+  { id: 'TR-oldnode', kind: 'safety', why: 'SG50: a node without module.registerHooks logs no `U` row (its ES module load failures kill)',
+    edits: [
+      { file: TR, from: 'if (loader || !M.registerHooks) {', to: 'if (loader) {' },
+      { file: TR, from: '} else {\n  globalThis[Symbol.for', to: '} else if (M.registerHooks) {\n  globalThis[Symbol.for' }
+    ] },
+  M('TR-pyexec', 'safety', TR, 'SG50: Python loader exec_module is not wrapped (importlib.import_module / reload / exec_module throws kill)',
+    '_ext._LoaderBasics.exec_module = _exec_hook', 'pass')
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.
