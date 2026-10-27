@@ -1005,3 +1005,27 @@ test('runTests: pytest: a nested run (two hook dirs on PYTHONPATH) starts python
   const r = await runTests({ repoRoot: dir });
   assert.strictEqual(r.status, 'passed', r.stdout);
 });
+
+test('runTests: pytest: an operator sitecustomize on PYTHONPATH still runs, and a python child that fails to import the code is still a collection error (AUDIT-40 C1)', { skip: hasPytest ? false : 'pytest not installed' }, async (t) => {
+  const prev = { PYTHONPATH: process.env.PYTHONPATH, SG48_MARK: process.env.SG48_MARK, SG48_BAD: process.env.SG48_BAD };
+  t.after(() => { for (const [k, v] of Object.entries(prev)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const dir = tmp(t, 'refactor-sg48py-');
+  const site = tmp(t, 'refactor-sg48site-');
+  const mark = path.join(site, 'mark');
+  fs.writeFileSync(path.join(site, 'sitecustomize.py'), "import os\nopen(os.environ['SG48_MARK'], 'a').write('x')\n");
+  process.env.PYTHONPATH = [site, prev.PYTHONPATH].filter(Boolean).join(path.delimiter);
+  process.env.SG48_MARK = mark;
+  for (const d of ['app', 'tests']) fs.mkdirSync(path.join(dir, d));
+  fs.writeFileSync(path.join(dir, 'pytest.ini'), '[pytest]\n');
+  fs.writeFileSync(path.join(dir, 'app/__init__.py'), '');
+  fs.writeFileSync(path.join(dir, 'app/m.py'), "import os\n\nif os.environ.get('SG48_BAD'):\n    raise RuntimeError('bad')\n\n\ndef show(s):\n    return s\n");
+  fs.writeFileSync(path.join(dir, 'tests/test_cli.py'), "import os, subprocess, sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n\ndef test_cli():\n    r = subprocess.run([sys.executable, '-c', \"import app.m as m\\nprint(m.show('ab'))\"], cwd=ROOT, capture_output=True, text=True)\n    assert r.stdout == 'ab\\n'\n");
+  delete process.env.SG48_BAD;
+  const ok = await runTests({ repoRoot: dir });
+  assert.strictEqual(ok.status, 'passed', ok.stdout + ok.stderr);
+  assert.strictEqual(fs.readFileSync(mark, 'utf8'), 'xx', 'the operator sitecustomize runs once in pytest and once in its child');
+  process.env.SG48_BAD = '1';
+  const r = await runTests({ repoRoot: dir });
+  assert.strictEqual(r.status, 'failed', r.stdout);
+  assert.strictEqual(r.collection_error, true, r.stdout);
+});

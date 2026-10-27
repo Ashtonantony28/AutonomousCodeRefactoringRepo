@@ -271,8 +271,9 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   module. The hooks reach child processes that keep the environment: a JS
   child a test spawns logs its throws but is never the file process (though
   it inherits `NODE_TEST_CONTEXT`), so a throw it catches is a load
-  failure; a Python child logs through a sitecustomize on `PYTHONPATH`,
-  including a main module that raises. An ES module that loads but does not
+  failure; a Python child logs through a sitecustomize put first on
+  `PYTHONPATH` (it then runs the next sitecustomize on the path, e.g. the
+  operator's), including a main module that raises. An ES module that loads but does not
   complete is logged too (named when a CommonJS node:test callback imports
   it, else by the file process). Not seen: a child whose `NODE_OPTIONS` or
   `PYTHONPATH` is replaced, `python -I` / `-E` / `-S`, a child that sets

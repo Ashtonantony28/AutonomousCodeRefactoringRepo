@@ -687,7 +687,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
   env.REFACTOR_LOAD_LOG = path.join(pycDir, 'load.log');
   if (pytest) {
     for (const [f, t] of [['refactor_load_core.py', PY_LOAD_CORE], ['refactor_load_hook.py', PY_LOAD_HOOK], ['sitecustomize.py', PY_SITE]]) fs.writeFileSync(path.join(pycDir, f), t);
-    env.PYTHONPATH = [env.PYTHONPATH, pycDir].filter(Boolean).join(path.delimiter);
+    env.PYTHONPATH = [pycDir, env.PYTHONPATH].filter(Boolean).join(path.delimiter);
     reportArgs.push('-p', 'refactor_load_hook');
   } else {
     fs.writeFileSync(path.join(pycDir, 'load-hook.js'), JS_LOAD_HOOK);

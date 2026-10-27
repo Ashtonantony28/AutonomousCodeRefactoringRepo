@@ -53,3 +53,17 @@ test('every fixture has proposals and canned responses', () => {
     assert(r.critic && r.executor, name);
   }
 });
+
+test('callClaude: the SDK client does not retry on its own; a 500 is one request (AUDIT-40 M1)', async (t) => {
+  const core = require('@anthropic-ai/sdk/core');
+  const fetch = core.APIClient.prototype.fetchWithTimeout, key = process.env.ANTHROPIC_API_KEY;
+  const timeouts = [];
+  t.after(() => { core.APIClient.prototype.fetchWithTimeout = fetch; if (key === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = key; });
+  process.env.ANTHROPIC_API_KEY = 'sk-test-dummy';
+  core.APIClient.prototype.fetchWithTimeout = async function (url, init, ms) {
+    timeouts.push(ms);
+    return new Response(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'x' } }), { status: 500, headers: { 'content-type': 'application/json', 'retry-after-ms': '1' } });
+  };
+  await assert.rejects(callClaude({ system: 's', user: 'm1' }), (e) => e.status === 500);
+  assert.deepStrictEqual(timeouts, [300_000]);
+});
