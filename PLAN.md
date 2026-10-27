@@ -98,7 +98,8 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG41 | Suite and escaped-name caught-load attribution, structural separators (incl. A31-C1, C2, H3) | SG40 | thread worker | done |
 | SG42 | Env-blind mutant switch, loop/chain keyword swaps | SG40 | thread worker | done |
 | SG43 | Pin keyword-swap, Python structural and duplicate-order rules | SG42 | thread worker | done |
-| SG44 | Separators before inserted code, TAP id collisions, doc drift | SG43 | thread worker | in progress |
+| SG44 | Separators before inserted code, TAP id collisions, doc drift (incl. A35-H2) | SG43 | thread worker | in progress |
+| SG45 | Keyword swaps beyond the list, load failures outside the hooked process, Python switch state | SG43 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -295,11 +296,19 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
 
+### SG45 — Keyword swaps beyond the list, load failures outside the hooked process, Python switch state (A35-C1, A35-C2, A35-H1, A35-L1)
+
+Problem: `with`, `switch` or Python `try` replaced by `if` is covered by the new `if`'s own condition kill (`BLOCK_KW` lists only `if|elif|else|while|for|do`; K01, K02 commit). A module that fails to load outside the hooked test process still kills: a JS CLI child inheriting `NODE_TEST_CONTEXT` catches and exits 0 (L01), a Python subprocess has no load hook (L03), an ESM module caught by `import()` is never logged (L04). The Python switch binding is a module attribute that differs between mutant and control runs, so a `vars(m)` test kills every site (F01). README covers CJS caught loads only.
+
+Acceptance: `node audit/35/run.js --only K01,K02,L01,L02,L03,L04,F01,F02` 0 committed (controls still stop); `node audit/35/token-sites.js` keyword rows ok; audit/31 run.js 0 committed, audit/28 switch-leak, audit/25 switch-hot, audit/24 caught-load-failure, audit/28 caught-load-same-file ok; audit/27 0/41, audit/23 ≤ 5; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code; README/CLAUDE.md updated.
+
 ### SG44 — Separators before inserted code, TAP id collisions, doc drift (A36-H1, A36-H2, A36-L1–L3)
 
 Problem: a `,` or JS `;` inserted after kept code and followed by inserted code is exempt punctuation (SG41's `splits` only catches kept code on both sides): `return a;` → `return a, b;`, Python `if (n > 1):` → `if (n > 1, log(n)):`, `const x = a && b;` → `const x = a; log(b) && b;` commit on a kill of the inserted code. Unescaped names collide with the `#n` duplicate marker (`dup#2`, `parse#1`); `tapResults` drops names containing U+2028/U+2029. `editMutants` / `tapResults` headers and CLAUDE.md's "compared as TAP writes them" are stale.
 
-Acceptance: `node audit/36/comma-demotes-operand.js` a–f ok; `node audit/36/tap-ids.js` ok (or the fail-safe collisions documented); `node audit/36/doc-drift.js` ok; audit/32 caught-load-names, structural-elif, audit/31 run.js S01–S07, audit/30 unpinned/dupprefix, audit/34 unpinned ok; audit/27 0/41; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
+Also (AUDIT-35 H2): JS array holes `[x,,]` and an inner hole beside an inserted sibling, an operand-splitting comma beside an inserted sibling (`6000 | 0, - 1`), and a Python f-string `{x,}` commit on a sibling site.
+
+Acceptance: `node audit/35/run.js --only S01,S02,S03,S04` 0 committed; `node audit/36/comma-demotes-operand.js` a–f ok; `node audit/36/tap-ids.js` ok (or the fail-safe collisions documented); `node audit/36/doc-drift.js` ok; audit/32 caught-load-names, structural-elif, audit/31 run.js S01–S07, audit/30 unpinned/dupprefix, audit/34 unpinned ok; audit/27 0/41; `node audit/11/mutants.js --check` ok; `npm test` ×2, bench, coverage within budgets; new tests fail on old code.
 
 ### SG43 — Pin keyword-swap, Python structural and duplicate-order rules (A34-H1–H3, A34-M1, A34-M2)
 
@@ -522,3 +531,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | SG43 | green | Tests only, no src change: `editMutants` leaves `for`→`if`, `do`→`if` and `else:`→`elif n:` uncovered, a Python `;` on try / except / finally, `async def` and `case` lines and a splitting comma `max(n, - 1, 2)` uncovered; `loadFailed` keeps a failing `x` failing beside a later passing `x#2` or a passing suite `x`. py-diff-testing AUDIT-14 H1 test: budget 30 s / hard kill 40 s, and the one-pass bound becomes a CPU-time bound (< 6 s, this process + reaped children; ~1.8 s, old rescan ~10 s); diff-testing min-value-runs test (also seen failing under two concurrent suites) gets a 20 s budget so its reason is the value count. `audit/34/kwdo.js` also runs test/bug-injector.test.js on the mutated copy (it had no ok path with correct code). unpinned.js 7/7 ok, kwdo ok, mutants --check ok (260), the 8 mutants killed (baseline 518/518); 2× concurrent `npm test` ×2 green, `npm test` ×3 518/518, bench ok, coverage validation 94.21 / runner 93.88 / rl 98.99 / orchestrator 94.25. |
 | 2026-10-27 | audits r11 | PR #3 | SG39–SG43 and AUDIT-29..34 merged into the default branch (62dee97); work branch restarted. |
 | 2026-10-27 | audits r12 | AUDIT-36 | 0C/2H/0M/3L: a `,` / JS `;` after kept code followed by inserted code is exempt and commits (demotes the kept operand) → SG44 with TAP id collisions and doc drift. No switch leak; untested outcomes still produce no samples. |
+| 2026-10-27 | audits r12 | AUDIT-35 | 2C/2H/2M/1L: `with`/`switch`/Python `try`→`if` covered by its own condition (C1); load failures in a CLI child, Python subprocess or ESM `import()` still kill (C2); Python switch binding visible as module state (H1) → SG45; array holes, operand-splitting comma beside an inserted sibling, f-string `{x,}` (H2) → SG44. audit/31 0/17, audit/27 0/41, audit/23 5 (accepted). |
