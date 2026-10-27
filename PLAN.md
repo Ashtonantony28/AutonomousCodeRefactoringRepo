@@ -106,9 +106,9 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG49 | Continuation `;`, keyword-less loop swaps, shifting commas, slice colons | SG48 | thread worker | done |
 | SG50 | importlib loads, CJS via import(), nested runners, Node without registerHooks | SG48 | thread worker | done |
 | SG51 | Python excepthook after operator sitecustomize; pin SG49/SG50 arms | SG50 | thread worker | done |
-| SG52 | Python usercustomize excepthook, old-Node warning, timeout and shift-comma docs | SG51 | thread worker | in progress |
+| SG52 | Python usercustomize excepthook, old-Node warning, timeout and shift-comma docs | SG51 | thread worker | done |
 | SG53 | Deleted loop heads and braces, format-spec numbers, per-stretch keyword match | SG52 | thread worker | in progress |
-| SG54 | Worker-thread excuse race, runpy loads, memoised load failures | SG52 | thread worker | planned |
+| SG54 | Worker-thread excuse race, runpy loads, memoised load failures | SG52 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -611,3 +611,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | SG51 | green | Python hook runs the chained sitecustomize first, then wraps whatever `sys.excepthook` it set (in `finally`), C1. Tests pin `continued` arms, JS / Python `for` drops, call-subscript slices, the `exec_module` `__file__` path, the no-registerHooks `U` row and a `.cjs` top-level `return`; timing test added to audit/11 FLAKY. audit/42 py-excepthook, unpinned ok; 14 mutants killed; audit/39 0 committed; audit/37/38/40 ok; `--check` 354. npm test 542/542; coverage validation 95.28 / runner 94.12 / rl 99.05 / orchestrator 94.25. |
 | 2026-10-27 | audits r14 | AUDIT-44 | 1C/0H/1M/2L: operator `usercustomize` excepthook replaces the hook's logger after SG51's wrap (C1); no warning on Node without `registerHooks` (M1); timeout undocumented (L1); shift-comma rule on `def`/import lists (L2) → SG52. SDK, contracts, CLI unchanged; audit/39 corpus 0/12 committed. |
 | 2026-10-27 | audits r14 | AUDIT-43 | 2C/5H/1M/2L: 10 of 18 corpus edits committed. usercustomize excepthook (C1 = A44-C1, SG52); worker-thread exit-0 excuse race (C2); deleted loop head (H1), deleted braces (H2), format-spec precision (H3), per-hunk keyword count (M1) → SG53; runpy loads (H4), memoised load failure excused (H5) → SG54. |
+| 2026-10-27 | SG52 | green | Python processes outside pytest also log the main-module `T` row at exit when an uncaught exception was recorded and the excepthook was replaced later (operator `usercustomize`, C1 / A43-C1). One `[orch]` warning when the test `node` lacks `module.registerHooks` (M1). CLAUDE.md: SDK retries off, 300 s timeout (L1); `shifts` skips Python import lists, `def` parameter lists documented (L2). audit/44 run-all ok; audit/43 c1 ok; audit/42/40/39/38/37 ok; `--check` 354. 4 new tests. npm test 546/546. |
