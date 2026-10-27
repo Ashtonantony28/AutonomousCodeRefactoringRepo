@@ -818,3 +818,13 @@ test('loadFailed: 10,000 caught-load rows against 20,000 test ids index the ids 
   assert.strictEqual(check(['a#2'], { a: 'fail', 'a#2': 'pass' }), false);
   assert.strictEqual(check(['a'], { 'a#x': 'pass' }), true);
 });
+
+test('loadFailed: a failing test of the logged name is never excused by a later passing one or a passing suite (AUDIT-34 H3)', (t) => {
+  const { loadFailed } = require('../src/runner/test-runner');
+  const dir = tmp(t, 'refactor-lf34-');
+  const log = path.join(dir, 'load.log');
+  fs.writeFileSync(log, `T\t1.2\t${dir}/src/bad.js\t"x"\nP\t1.2\n`);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail', 'x#2': 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'fail' }, { x: 'pass' }), true);
+  assert.strictEqual(loadFailed(log, dir, { x: 'pass', 'x#2': 'pass' }, { x: 'pass' }), false);
+});

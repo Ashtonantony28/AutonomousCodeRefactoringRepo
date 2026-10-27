@@ -251,13 +251,24 @@ const manyFns = (n, p = 'g') => Array.from({ length: n }, (_, i) => `def ${p}_${
 
 test('a deletion of many tokens deep in a module is mapped in one pass and probed where it runs (AUDIT-14 H1)', () => {
   // 20,000 deleted tokens 100 KB into the file, after astral characters
-  // (UTF-16 offsets differ from Python's): the per-token rescan took ~10 s.
+  // (UTF-16 offsets differ from Python's): the per-token rescan took ~10 s
+  // of CPU. The bound is on CPU time (this process and its reaped children),
+  // so a contended host gets a wall-clock budget large enough for 100 runs.
   let pre = '"""module \u{1F600} \u{1F680}"""\n\n\n';
   for (let i = 0; pre.length < 100000; i++) pre += manyFns(1, `g${i}`);
   const cur = `def target(a, b):\n    unused = [${Array.from({ length: 10000 }, (_, i) => i).join(', ')}]\n    if a > 3:\n        return a - b\n    return a + b\n`;
-  const r = run(cur, 'def target(a, b):\n    if a > 3:\n        return a - b\n    return a + b\n', { pre, budgetMs: 4000, hardKillMs: 8000 });
+  const cpu = () => {
+    const { user, system } = process.cpuUsage();
+    let kids = 0;
+    try { const f = fs.readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' '); kids = (+f[13] + +f[14]) * 10; } catch { /* no procfs */ }
+    return (user + system) / 1000 + kids;
+  };
+  const c0 = cpu();
+  const r = run(cur, 'def target(a, b):\n    if a > 3:\n        return a - b\n    return a + b\n', { pre, budgetMs: 30000, hardKillMs: 40000 });
+  const used = cpu() - c0;
   assert.strictEqual(r.verdict, 'equivalent', r.reason);
   assert.strictEqual(r.deletions_observed, true);
+  assert(used < 6000, `${Math.round(used)} ms CPU`);
 });
 
 test('only callables on the edited lines are compared: unchanged ones are never dumped (AUDIT-14 H2)', () => {
