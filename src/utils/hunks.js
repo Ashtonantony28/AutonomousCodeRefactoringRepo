@@ -8,8 +8,9 @@
 // with no inserted token is a deletion: there is nothing in `after` to mutate.
 // Every literal comes from `lexView`: a string is one token, a template
 // literal or f-string is its text parts (each with its delimiters) and the
-// tokens of its interpolations, a JS regex literal is its delimiters, body
-// atoms and flags. Strings and numbers compare by value when only their
+// tokens of its interpolations (an f-string's conversion / format spec: one
+// token per number or other character), a JS regex literal is its
+// delimiters, body atoms and flags. Strings and numbers compare by value when only their
 // spelling differs ('a' / "a", 120 / 0x78): a respelled literal is no change.
 // A numeric token with no computable value (`0x1e+6000`, `6e3.toFixed`)
 // compares by its text.
@@ -30,8 +31,9 @@ const langOf = (file) => (/\.py$/i.test(file || '') ? 'python' : 'javascript');
 // (string contents, template/f-string text, regex bodies) blanked, lits }.
 // lits: { kind: 'string' | 'template' | 'fstring' | 'regex', s, e }, with
 // `parts` ([s, e, textStart, textEnd]) and `holes` ([s, e]) for templates
-// and f-strings, `body`, `atoms` and `flags` ([s, e]) for regexes; nested
-// literals are entries of their own.
+// and f-strings, `spec` ([s, e], the format spec's tokens) for f-strings,
+// `body`, `atoms` and `flags` ([s, e]) for regexes; nested literals are
+// entries of their own.
 function lexView(src, lang) {
   const n = src.length;
   const kept = src.split(''), code = src.split('');
@@ -127,26 +129,39 @@ function lexView(src, lang) {
   }
 
   function fString(i, plen, q) {
-    const t = { kind: 'fstring', s: i, q: i + plen, parts: [], holes: [] };
+    const t = { kind: 'fstring', s: i, q: i + plen, parts: [], holes: [], spec: [] };
     lits.push(t);
-    let ps = i, ts = i + plen + q.length, j = ts, field = 0;
+    let ps = i, ts = i + plen + q.length, j = ts;
     const part = (pe, te) => { t.parts.push([ps, pe, ts, te]); blank(code, ts, te); };
+    const end = (k) => src.startsWith(q, k) || (q.length === 1 && src[k] === '\n');
     while (j < n) {
-      if (!field && src.startsWith(q, j)) { part(j + q.length, j); return (t.e = j + q.length); }
+      if (src.startsWith(q, j)) { part(j + q.length, j); return (t.e = j + q.length); }
       const c = src[j];
       if (c === '\\') { j += 2; continue; }
       if (q.length === 1 && c === '\n') break;
-      if (c === '{' && !field && src[j + 1] === '{') { j += 2; continue; }
+      if (c === '{' && src[j + 1] === '{') { j += 2; continue; }
       if (c === '{') {
         part(j + 1, j);
-        const he = pyLex(j + 1, true);
+        let he = pyLex(j + 1, true);
         t.holes.push([j + 1, he]);
-        if (src[he] !== '}') field++;
-        ps = he; ts = he + 1; j = he + 1;
+        // A conversion / format spec up to the field's `}`: a token per
+        // number or other character, nested fields as holes.
+        while (he < n && src[he] !== '}' && !end(he)) {
+          if (src[he] === '{') {
+            const ne = pyLex(he + 1, true);
+            t.holes.push([he + 1, ne]);
+            he = src[ne] === '}' ? ne + 1 : ne;
+            continue;
+          }
+          const len = /^\d+/.exec(src.slice(he, he + 64))?.[0].length || 1;
+          if (!/\s/.test(src[he])) t.spec.push([he, he + len]);
+          blank(code, he, he + len);
+          he += len;
+        }
+        ps = he; ts = j = src[he] === '}' ? he + 1 : he;
         continue;
       }
-      if (c === '}' && field) field--;
-      else if (c === '}' && src[j + 1] === '}') j++;
+      if (c === '}' && src[j + 1] === '}') j++;
       j++;
     }
     part(j, j);
@@ -251,10 +266,9 @@ function tokensOf(v, lo, hi, lang) {
       push(lit.body[1], lit.body[1] + 1);
       for (const [a, b] of lit.flags) push(a, b, '\u0003');
     } else {
-      lit.parts.forEach(([a, b], k) => {
-        push(a, b);
-        if (lit.holes[k]) out.push(...tokensOf(v, Math.max(lo, lit.holes[k][0]), Math.min(hi, lit.holes[k][1]), lang).filter(t => !/^\u0001/.test(t.v)));
-      });
+      for (const [a, b] of lit.parts) push(a, b);
+      for (const [a, b] of lit.holes) out.push(...tokensOf(v, Math.max(lo, a), Math.min(hi, b), lang).filter(t => !/^\u0001/.test(t.v)));
+      for (const [a, b] of lit.spec || []) push(a, b, '\u0006');
     }
     re.lastIndex = lit.e;
   }

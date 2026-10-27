@@ -706,8 +706,8 @@ function insertedNames(src, before, h, lang, lit, blit) {
   return out;
 }
 
-// Literal sub-tokens of a lexView: Map(start -> { lit, kind: 'part' | 'atom' |
-// 'flag' | 'delim', at: [s, e, textStart, textEnd] }).
+// Literal sub-tokens of a lexView: Map(start -> { lit, kind: 'part' | 'spec' |
+// 'atom' | 'flag' | 'delim', at: [s, e, textStart, textEnd] }).
 function literalTokens(lits) {
   const out = new Map();
   for (const l of lits) {
@@ -716,18 +716,23 @@ function literalTokens(lits) {
       out.set(l.body[1], { lit: l, kind: 'delim' });
       for (const a of l.atoms) out.set(a[0], { lit: l, kind: 'atom', at: a });
       for (const a of l.flags) out.set(a[0], { lit: l, kind: 'flag', at: a });
-    } else if (l.parts) for (const a of l.parts) out.set(a[0], { lit: l, kind: 'part', at: a });
+    } else if (l.parts) {
+      for (const a of l.parts) out.set(a[0], { lit: l, kind: 'part', at: a });
+      for (const a of l.spec || []) out.set(a[0], { lit: l, kind: 'spec', at: a });
+    }
   }
   return out;
 }
 
 // Mutant of a literal sub-token: 'x' appended to a template / f-string text
-// part; a regex flag dropped, a quantifier's bound plus one, any other atom
+// part; a number in a format spec plus one (other spec tokens have none); a
+// regex flag dropped, a quantifier's bound plus one, any other atom
 // dropped (replaced by `(?!)` when that leaves no valid regex).
 // -> { edits, lo, hi } or null.
 function literalMutant(src, t) {
   const [s, e, , te] = t.at;
   if (t.kind === 'part') return { mutation: 'string_literal', edits: [[te, 0, 'x']], lo: te, hi: te };
+  if (t.kind === 'spec') return /^\d+$/.test(src.slice(s, e)) ? { mutation: 'numeric_off_by_one', ...bumpDigits(src, s, e) } : null;
   const { body, flags } = t.lit;
   const flagText = src.slice(flags.length ? flags[0][0] : body[1] + 1, t.lit.e);
   const valid = (b, f) => { if (!b) return false; try { new RegExp(b, f); return true; } catch { return false; } };
@@ -745,6 +750,36 @@ function literalMutant(src, t) {
   return null;
 }
 
+// The digits at [s, e) plus one, leading zeros kept -> { edits, lo, hi }.
+function bumpDigits(src, s, e) {
+  const d = src.slice(s, e);
+  return { edits: [[s, e - s, String(BigInt(d) + 1n).padStart(d.length, '0')]], lo: s, hi: e };
+}
+
+// printf (`%-08.3f`) and str.format (`{0:>10}`) directives of a string.
+const FORMAT_DIRECTIVE = /%(?:\([^)]*\))?[-#0 +]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[a-zA-Z%]|\{\w*(?:\.\w+|\[\w+\])*(?:![rsa])?(?::[^{}]*)?\}/g;
+
+// A new format directive with a number in an inserted Python string [a, b)
+// (one no string deleted in its stretch holds): each number that differs
+// from a deleted directive of the same shape is a site -> [[s, e]]; one with
+// no such directive is uncovered -> { uncovered: [s, e] }.
+function formatNumbers(src, before, h, a, b) {
+  const g = h.gaps.find(x => x.ins.some(([s]) => s === a));
+  const old = g ? g.del.flatMap(([s, e]) => [...before.slice(s, e).matchAll(FORMAT_DIRECTIVE)].map(m => m[0])) : [];
+  const shape = (d) => d.replace(/\d+/g, '0');
+  const out = [];
+  for (const m of src.slice(a, b).matchAll(FORMAT_DIRECTIVE)) {
+    if (!/\d/.test(m[0]) || old.includes(m[0])) continue;
+    const was = old.find(o => shape(o) === shape(m[0]));
+    if (!was) return { uncovered: [a + m.index, a + m.index + m[0].length] };
+    const prev = was.match(/\d+/g);
+    [...m[0].matchAll(/\d+/g)].forEach((d, k) => {
+      if (d[0] !== prev[k]) out.push([a + m.index + d.index, a + m.index + d.index + d[0].length]);
+    });
+  }
+  return out;
+}
+
 const EDIT_MAX_HUNKS = 16;
 const EDIT_MAX_CHARS = 32_000;
 const EDIT_MAX_SITES = 12;
@@ -760,8 +795,10 @@ const token = () => [...crypto.randomBytes(16)].map(b => String.fromCharCode(97 
 // per site. Every inserted identifier or member the edit reads is a site
 // too (one use-site mutant, `ref`: see jsUses), and one that replaced
 // another identifier in its stretch another (`revert`: the old name back).
-// Template / f-string text parts and regex atoms and flags are sites of
-// their own (literalMutant).
+// Template / f-string text parts, f-string format spec numbers and regex
+// atoms and flags are sites of their own (literalMutant), and so is each
+// changed number of a format directive in an inserted Python string
+// (formatNumbers; a new directive with a number is uncovered).
 // Fail closed per token (with `before`, uncoveredToken): an inserted token
 // nothing covers gives no mutants, marked `uncovered` ({ text, line, hunk }).
 // An edit over EDIT_MAX_HUNKS hunks, EDIT_MAX_CHARS changed characters or
@@ -794,6 +831,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   const code = view.code;
   const litToks = literalTokens(view.lits);
   const fQuotes = new Set(view.lits.filter(l => l.kind === 'fstring').map(l => l.q));
+  const strEnd = new Map(view.lits.filter(l => l.kind === 'string').map(l => [l.s, l.e]));
   const starts = [0];
   for (let k = src.indexOf('\n'); k >= 0; k = src.indexOf('\n', k + 1)) starts.push(k + 1);
   const lineOf = (i) => {
@@ -817,6 +855,7 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   if (!uses) return Object.assign([], { unchecked: true });
   const candidates = [];
   const needed = [];
+  let newFormat = null;
   for (let hi = 0; hi < hunks.length; hi++) {
     const h = hunks[hi];
     if (!h.ranges.length) continue;
@@ -847,6 +886,9 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
       const t = litToks.get(a);
       const mut = t && t.kind !== 'delim' && literalMutant(src, t);
       if (mut) lits.push({ ...mut, span: [a, t.at[1]], hunk: hi, site: a, line: lineOf(a) });
+      const fmt = diffed && lang === 'python' && strEnd.has(a) ? formatNumbers(src, before, h, a, strEnd.get(a)) : [];
+      if (fmt.uncovered) newFormat = newFormat || { text: src.slice(...fmt.uncovered), at: a, hunk: hi };
+      else for (const [s, e] of fmt) lits.push({ mutation: 'numeric_off_by_one', ...bumpDigits(src, s, e), span: [s, e], hunk: hi, site: s, line: lineOf(s) });
     }
     // Use sites: one per distinct use, plus one per replaced name.
     const refs = [];
@@ -938,30 +980,85 @@ function editMutants(src, { start, end, file, max = MAX_MUTANTS, before, timeout
   }
   const lost = needed.find(n => !kept.has(key(n)));
   if (lost) return Object.assign([], { unmutated_ref: { name: lost.ref, line: lost.line, hunk: lost.hunk } });
-  const bare = diffed && (uncoveredToken(src, hunks, out, names, litToks, view, shape, lang) || droppedKeyword(src, before, hunks, lang));
+  const bare = diffed && (uncoveredToken(src, hunks, out, names, litToks, view, shape, lang) || newFormat ||
+    droppedKeyword(src, before, hunks, lang) || droppedBlock(src, before, hunks, lang, file));
   if (bare) return Object.assign([], { uncovered: { ...bare, line: lineOf(bare.at) } });
   return out.sort((x, y) => x.hunk - y.hunk || x.site - y.site);
 }
 
-// A hunk that deletes a block keyword more often than it inserts it is no
-// evidence, whatever replaces it: a kill of the new step (`while (c) s;` ->
-// `c && s;`) shows only that the step matters -> { text, at, hunk } of the
-// hunk's first inserted token, or null.
+// A block keyword deleted from a stretch is no evidence, whatever replaces
+// it (`while (c) s;` -> `c && s;` or `s;`: a kill of the new step shows only
+// that the step matters), unless the same keyword is inserted in that
+// stretch, or in another stretch of the hunk with the tokens after it (a
+// moved statement) -> { text, at, hunk } of the hunk's first inserted token
+// (the keyword in a hunk that inserts none), or null.
 const BLOCK_KW = {
   javascript: new Set('do else for switch try catch finally while with'.split(' ')),
   python: new Set('else for while with try except finally match'.split(' '))
 };
+// { text, at, hunk } for hunk h: its first inserted token, else `text` at its start.
+const hunkToken = (src, h, hunk, text) => {
+  const r = h.ranges.find(([s, e]) => src.slice(s, e).trim()) || h.ranges[0];
+  return r ? { text: src.slice(r[0], r[1]), at: r[0], hunk } : { text, at: h.start, hunk };
+};
 function droppedKeyword(src, before, hunks, lang) {
   for (let hunk = 0; hunk < hunks.length; hunk++) {
-    const h = hunks[hunk], n = new Map();
-    if (!h.ranges.length) continue;
+    const h = hunks[hunk], dropped = [], added = [];
+    // Each keyword with the rest of its stretch's tokens.
+    const runs = (text, rs) => rs.map(([s, e]) => text.slice(s, e)).flatMap((t, k, a) => (BLOCK_KW[lang].has(t) ? [a.slice(k)] : []));
     for (const g of h.gaps) {
-      for (const [s, e] of g.del) if (BLOCK_KW[lang].has(before.slice(s, e))) n.set(before.slice(s, e), (n.get(before.slice(s, e)) || 0) + 1);
-      for (const [s, e] of g.ins) if (BLOCK_KW[lang].has(src.slice(s, e))) n.set(src.slice(s, e), (n.get(src.slice(s, e)) || 0) - 1);
+      const del = runs(before, g.del);
+      for (const r of runs(src, g.ins)) {
+        const k = del.findIndex(d => d[0] === r[0]);
+        if (k >= 0) del.splice(k, 1); else added.push(r);
+      }
+      dropped.push(...del);
     }
-    if ([...n.values()].some(k => k > 0)) {
-      const [a, b] = h.ranges.find(([s, e]) => src.slice(s, e).trim()) || h.ranges[0];
-      return { text: src.slice(a, b), at: a, hunk };
+    for (const d of dropped) {
+      const k = added.findIndex(r => Math.min(r.length, d.length) > 1 && r.every((t, j) => j >= d.length || t === d[j]));
+      if (k < 0) return hunkToken(src, h, hunk, d[0]);
+      added.splice(k, 1);
+    }
+  }
+  return null;
+}
+
+// A deleted `{` / `}` of a JS block that held more than one kept statement,
+// or a deleted Python header `:` whose one-line suite held more than one:
+// the statements after the first leave the guard or loop (`if (c) { a; b; }`
+// -> `c && a; b;`) -> { text, at, hunk } as droppedKeyword, or null.
+function droppedBlock(src, before, hunks, lang, file) {
+  const gone = new Uint8Array(before.length + 1);
+  const marks = [];
+  hunks.forEach((h, hunk) => h.deleted.forEach(([s, e]) => {
+    gone.fill(1, s, e);
+    if (lang === 'python' ? before.slice(s, e) === ':' : /^[{}]$/.test(before.slice(s, e))) marks.push({ s, hunk });
+  }));
+  if (!marks.length) return null;
+  const view = lexView(before, lang);
+  const kept = (a, b) => { for (let c = a; c < b; c++) if (!gone[c] && !/\s/.test(view.kept[c])) return true; return false; };
+  const hit = (m) => hunkToken(src, hunks[m.hunk], m.hunk, before[m.s]);
+  if (lang === 'python') {
+    for (const m of marks) {
+      const ls = before.lastIndexOf('\n', m.s - 1) + 1, le = before.indexOf('\n', m.s) < 0 ? before.length : before.indexOf('\n', m.s);
+      const head = view.code.slice(ls, m.s);
+      if (!/^\s*(?:if|elif|else|while|for|with|try|except|finally|async|def|class|match|case)\b/.test(head)) continue;
+      if ([...head].reduce((d, c) => d + ('([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0), 0)) continue;
+      for (let c = view.code.indexOf(';', m.s); c >= 0 && c < le; c = view.code.indexOf(';', c + 1)) if (!gone[c] && kept(c + 1, le)) return hit(m);
+    }
+    return null;
+  }
+  const { ast } = require('../validation/ast-checker').parseJs(before, file);
+  if (!ast) return hit(marks[0]);
+  const at = new Map(marks.map(m => [m.s, m]));
+  const stack = [ast.program];
+  while (stack.length) {
+    const n = stack.pop();
+    const m = n.type === 'BlockStatement' && (at.get(n.start) || at.get(n.end - 1));
+    if (m && n.body.filter(x => kept(x.start, x.end)).length > 1) return hit(m);
+    for (const k of Object.keys(n)) {
+      if (AST_SKIP.has(k)) continue;
+      for (const c of [].concat(n[k])) if (c && typeof c.type === 'string') stack.push(c);
     }
   }
   return null;
