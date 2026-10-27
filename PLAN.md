@@ -103,6 +103,8 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG46 | ESM hook beside async loaders, bounded separator scans, nested sitecustomize | SG45 | thread worker | done |
 | SG47 | Pin SG44/SG45 separator, keyword and child-process rules | SG46 | thread worker | done |
 | SG48 | Python load hook first on PYTHONPATH, SDK retries off | SG47 | thread worker | done |
+| SG49 | Continuation `;`, keyword-less loop swaps, shifting commas, slice colons | SG48 | thread worker | in progress |
+| SG50 | importlib loads, CJS via import(), nested runners, Node without registerHooks | SG48 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -298,6 +300,18 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - Per-call module-binding digests are bounded like SG20's export state (incremental hash, size cap).
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
+
+### SG50 — importlib loads, CJS via import(), nested runners, Node without registerHooks (A39-H3–H6, A39-L1, A39-L2)
+
+Problem: Python `importlib.import_module` / `reload` / `exec_module` loads are not logged; `import()` of CJS skips `Module._compile` beside `registerHooks`; a nested `node --test` with `NODE_TEST_CONTEXT` stripped is excused as `R`; no fail-closed row without `registerHooks`. Kill-control doc wording and README worker-thread limit drift.
+
+Acceptance: audit/39 h3–h6, load-probes, control-status ok; audit/37, audit/40 py-site-shadow, audit/38 ok; `audit/11/mutants.js --check` ok; `npm test` green.
+
+### SG49 — Continuation `;`, keyword-less loop swaps, shifting commas, slice colons (A39-C1, A39-H1, A39-H2, A39-M1)
+
+Problem: a `;` at the start of a continuation line is exempt; `while (c) s;` → `c && s;` commits on the `&&` kill; a `,` before kept arguments shifts them and commits on the sibling's kill; `s[k]` → `s[k:k + 1]` via an exempt `:`.
+
+Acceptance: audit/39 c1, h1, h2 and token-sites rows ok; audit/35, audit/31 0 committed; audit/38 ok; `audit/11/mutants.js --check` ok; `npm test` green.
 
 ### SG48 — Python load hook first on PYTHONPATH, SDK retries off (A40-C1, A40-M1)
 
@@ -562,3 +576,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | audits r13 | AUDIT-40 | 1C/0H/1M/2L: an operator PYTHONPATH `sitecustomize` shadows the load hook, child import errors count as kills and AUDIT-35 L03 commits (C1); SDK default retries (M1) → SG48. L1/L2 any `--import` / ES module CLI `process.exit()` fail closed. |
 | 2026-10-27 | audits r13 | AUDIT-41 | 0C/0H/2M/0L: any `--import` (also a plain setup module) disables kills (M1, same as A40-L1); a runtime `module.register()` loader still crashes test processes (M2, README limit). No new super-linear scan or leak; 20k-test exec 28.9 s mutant phase. |
 | 2026-10-27 | SG48 | green | Hook dir first on PYTHONPATH; the hook's sitecustomize still chains to the next non-copy (operator's) one. `getClient` `maxRetries: 0`, 300 s timeout (`callClaude` keeps its one 10 s 429 retry). audit/40 py-site-shadow, sdk-retries, audit/37 py-site-nest ok. 2 new tests. npm test 535/535. |
+| 2026-10-27 | audits r13 | AUDIT-39 | 1C/6H/1M/2L: 9 of 14 corpus edits committed. Continuation-line `;` (C1); keyword-less loop step (H1); comma shifting kept args (H2) → SG49. importlib loads (H3), CJS via `import()` beside registerHooks (H4, SG45 regression), nested runner `R` excuse (H5), no fail-closed row without registerHooks (H6) → SG50. |
