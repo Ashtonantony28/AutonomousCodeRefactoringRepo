@@ -107,6 +107,8 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG50 | importlib loads, CJS via import(), nested runners, Node without registerHooks | SG48 | thread worker | done |
 | SG51 | Python excepthook after operator sitecustomize; pin SG49/SG50 arms | SG50 | thread worker | done |
 | SG52 | Python usercustomize excepthook, old-Node warning, timeout and shift-comma docs | SG51 | thread worker | in progress |
+| SG53 | Deleted loop heads and braces, format-spec numbers, per-stretch keyword match | SG52 | thread worker | in progress |
+| SG54 | Worker-thread excuse race, runpy loads, memoised load failures | SG52 | thread worker | planned |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
 Planned order: SG0 → (SG2 ∥ SG4) → (SG3 ∥ SG7) → SG1 → (SG5 ∥ SG6) → SG8 → audits.
@@ -302,6 +304,18 @@ Audited at eb29324 (before SG18/SG19): re-run each repro on the current head fir
 - Per-call module-binding digests are bounded like SG20's export state (incremental hash, size cap).
 - **Accept:** `node audit/14/mutant-flaky.js --mode timing --repeat 20 --busy 8` keeps 0; `node audit/14/py-deletion.js`, `node audit/14/diff-size.js --lang py --kb 100,150,199`, `node audit/14/edit-sites.js --lang py --hunks 4,16 --sites 6,12 --contend 8`, `node audit/14/diff-bindings.js --kind const` within budget / ok; audit/5, audit/8, audit/12 e2e commit nothing.
 - **Verify:** `npm test && npm run bench`
+
+### SG54 — Worker-thread excuse race, runpy loads, memoised load failures (A43-C2, A43-H4, A43-H5, A43-L1, A43-L2)
+
+Problem: a worker thread that catches a load error and exits 0 writes a passed row that excuses it while the file process exits 1; `runpy.run_path` / `run_module` loads are not logged; a passing test catching a memoised loader's error excuses a later test's failure from the missing module.
+
+Acceptance: audit/43 c2, h4, h5 and load-probes ok (C2 race closed: audit/39/load-probes.js stable over repeated runs); audit/43/run.js W01, M01, M02, R01 stopped; earlier load repros ok; `npm test` green.
+
+### SG53 — Deleted loop heads and braces, format-spec numbers, per-stretch keyword match (A43-H1, A43-H2, A43-H3, A43-M1)
+
+Problem: `while (c) s;` → `s;` commits on the diff test alone; `if (c) { a; b; }` → `c && a; b;` commits on the `&&` kill; a format-spec precision is string text; `droppedKeyword` counts per hunk.
+
+Acceptance: audit/43 h1, h2, h3, m1 and token-sites ok; run.js D01, D02, G01, F01, F02 stopped; earlier corpora 0 committed; `npm test` green.
 
 ### SG52 — Python usercustomize excepthook, old-Node warning, timeout and shift-comma docs (A44-C1, A44-M1, A44-L1, A44-L2)
 
@@ -596,3 +610,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | audits r13 | AUDIT-42 | 1C/4H/1M/3L: operator `sys.excepthook` replaces the hook's main-module logger (C1); `continued`, `droppedKeyword`, call-subscript slice and `exec_module` path arms unpinned (H1–H4) → SG51. No flaky tests in 7 runs; 27 mutants added (354). |
 | 2026-10-27 | SG51 | green | Python hook runs the chained sitecustomize first, then wraps whatever `sys.excepthook` it set (in `finally`), C1. Tests pin `continued` arms, JS / Python `for` drops, call-subscript slices, the `exec_module` `__file__` path, the no-registerHooks `U` row and a `.cjs` top-level `return`; timing test added to audit/11 FLAKY. audit/42 py-excepthook, unpinned ok; 14 mutants killed; audit/39 0 committed; audit/37/38/40 ok; `--check` 354. npm test 542/542; coverage validation 95.28 / runner 94.12 / rl 99.05 / orchestrator 94.25. |
 | 2026-10-27 | audits r14 | AUDIT-44 | 1C/0H/1M/2L: operator `usercustomize` excepthook replaces the hook's logger after SG51's wrap (C1); no warning on Node without `registerHooks` (M1); timeout undocumented (L1); shift-comma rule on `def`/import lists (L2) → SG52. SDK, contracts, CLI unchanged; audit/39 corpus 0/12 committed. |
+| 2026-10-27 | audits r14 | AUDIT-43 | 2C/5H/1M/2L: 10 of 18 corpus edits committed. usercustomize excepthook (C1 = A44-C1, SG52); worker-thread exit-0 excuse race (C2); deleted loop head (H1), deleted braces (H2), format-spec precision (H3), per-hunk keyword count (M1) → SG53; runpy loads (H4), memoised load failure excused (H5) → SG54. |
