@@ -552,8 +552,9 @@ if (loader || !M.registerHooks) {
 `;
 // Python: the `__import__` wrapper and an excepthook for a main module that
 // raises (installed by a sitecustomize, so in every interpreter on this
-// PYTHONPATH; it then runs the first sitecustomize that is no copy of it,
-// if any: nested runs put several on PYTHONPATH), and the
+// PYTHONPATH; it first runs the first sitecustomize that is no copy of it,
+// if any: nested runs put several on PYTHONPATH, then wraps whatever
+// excepthook that set), and the
 // pytest plugin that keys them.
 const PY_LOAD_CORE = `import builtins, os
 _imp = builtins.__import__
@@ -590,13 +591,16 @@ _ext._LoaderBasics.exec_module = _exec_hook
 `;
 const PY_SITE = `import importlib.machinery, importlib.util, os, sys
 import refactor_load_core
-def _main_raised(*a, _prev=sys.excepthook):
+def _main_raised(*a):
     refactor_load_core.log('T\\t%s\\t%s' % (refactor_load_core.key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
     _prev(*a)
-sys.excepthook = _main_raised
-_spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))])
-if _spec and _spec.loader:
-    _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
+try:
+    _spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))])
+    if _spec and _spec.loader:
+        _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
+finally:
+    _prev = sys.excepthook
+    sys.excepthook = _main_raised
 `;
 const PY_LOAD_HOOK = `import refactor_load_core as _c
 _n, _bad = 0, False
