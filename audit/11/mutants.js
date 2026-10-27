@@ -44,6 +44,7 @@ const WT = 'src/runner/worktree.js';
 const RV = 'src/runner/reverter.js';
 const BI = 'src/rl/bug-injector.js';
 const HK = 'src/utils/hunks.js';
+const CC = 'src/utils/claude-client.js';
 
 const SAME_LINE_SB = '    if (value >= need && valued.length >= distinct && !differs && !ood && n >= calls.length) continue;';
 const PY_PASS = '        if value >= MIN_VALUE_RUNS and len(valued) >= need_distinct and not (differs or ood or nondet) and n == len(sched):';
@@ -766,7 +767,64 @@ const MUTANTS = [
       { file: TR, from: '} else {\n  globalThis[Symbol.for', to: '} else if (M.registerHooks) {\n  globalThis[Symbol.for' }
     ] },
   M('TR-pyexec', 'safety', TR, 'SG50: Python loader exec_module is not wrapped (importlib.import_module / reload / exec_module throws kill)',
-    '_ext._LoaderBasics.exec_module = _exec_hook', 'pass')
+    '_ext._LoaderBasics.exec_module = _exec_hook', 'pass'),
+
+  // --- AUDIT-42: SG48 / SG49 / SG50 rules, round 13
+  M('TR-pypathorder', 'safety', TR, 'SG48: the hook dir goes after an operator PYTHONPATH (its sitecustomize shadows the hook: a child import error kills)',
+    'env.PYTHONPATH = [pycDir, env.PYTHONPATH].filter(Boolean).join(path.delimiter);', 'env.PYTHONPATH = [env.PYTHONPATH, pycDir].filter(Boolean).join(path.delimiter);'),
+  M('TR-pypathkeep', 'safety', TR, 'SG48: an operator PYTHONPATH is kept as is (no hook dir: no load is logged)',
+    'env.PYTHONPATH = [pycDir, env.PYTHONPATH].filter(Boolean).join(path.delimiter);', 'env.PYTHONPATH = env.PYTHONPATH || pycDir;'),
+  M('CC-retries', 'perf', CC, 'SG48: the SDK client keeps its own retries (up to 6 requests on a persistent 429 / 5xx)',
+    'new Ctor({ apiKey, maxRetries: 0, timeout: REQUEST_TIMEOUT_MS })', 'new Ctor({ apiKey, timeout: REQUEST_TIMEOUT_MS })'),
+  M('CC-timeout', 'perf', CC, 'SG48: the SDK client keeps its 10-minute default request timeout',
+    'new Ctor({ apiKey, maxRetries: 0, timeout: REQUEST_TIMEOUT_MS })', 'new Ctor({ apiKey, maxRetries: 0 })'),
+  M('BI-contcall', 'safety', BI, 'SG49 continued: a kept `(` / `[` / template right of a line-start `;` is no continuation (a call of the line above is cut)',
+    '/^(?:[.,?:*%<>=&|^/([`]|', '/^(?:[.,?:*%<>=&|^/]|'),
+  M('BI-contin', 'safety', BI, 'SG49 continued: a kept `in` / `instanceof` right of a line-start `;` is no continuation',
+    '|!=|(?:in|instanceof)(?![\\w$]))/.test(code.slice(r.i, r.i + 11))', '|!=)/.test(code.slice(r.i, r.i + 11))'),
+  M('BI-contq', 'safety', BI, 'SG49 continued: a kept `?` / `:` right of a line-start `;` is no continuation (a ternary of the line above is cut)',
+    '/^(?:[.,?:*%<>=&|^/([`]|', '/^(?:[.,*%<>=&|^/([`]|'),
+  M('BI-contop', 'safety', BI, 'SG49 continued: a kept binary / comparison / assignment operator (`*` `%` `<` `>` `=` `&` `|` `^` `/`) right of a line-start `;` is no continuation',
+    '/^(?:[.,?:*%<>=&|^/([`]|', '/^(?:[.,?:([`]|'),
+  M('BI-contdot', 'safety', BI, 'SG49 continued: a kept `.` right of a line-start `;` is no continuation (a member chain is cut)',
+    '/^(?:[.,?:*%<>=&|^/([`]|', '/^(?:[,?:*%<>=&|^/([`]|'),
+  M('BI-contpp', 'label', BI, 'SG49 continued: a kept `++` / `--` line reads as a continuation (over-rejects, fails closed)',
+    '|\\+(?!\\+)|-(?!-)|!=|(?:in|instanceof)', '|\\+|-|!=|(?:in|instanceof)'),
+  M('BI-kwdropjs', 'safety', BI, 'SG49 droppedKeyword: only JS `while` counts (`try` / `catch` / `for` / `do` / `else` / `switch` / `with` dropped stand on the new step\'s kill)',
+    "javascript: new Set('do else for switch try catch finally while with'.split(' '))", "javascript: new Set('while'.split(' '))"),
+  M('BI-kwdroppy', 'safety', BI, 'SG49 droppedKeyword: only Python `while` counts (`try` / `except` / `for` / `with` / `else` dropped stand on the new step\'s kill)',
+    "python: new Set('else for while with try except finally match'.split(' '))", "python: new Set('while'.split(' '))"),
+  M('BI-kwdroptwice', 'safety', BI, 'SG49 droppedKeyword: a keyword must be dropped twice to count',
+    'if ([...n.values()].some(k => k > 0)) {', 'if ([...n.values()].some(k => k > 1)) {'),
+  M('BI-kwdropnet', 'label', BI, 'SG49 droppedKeyword: inserted keywords are not netted out (a moved loop is uncovered: over-rejects)',
+    '(n.get(src.slice(s, e)) || 0) - 1);', '(n.get(src.slice(s, e)) || 0) + 0);'),
+  M('BI-shiftsarr', 'safety', BI, 'SG49 shifts: only a kept `(` counts (a `,` before kept array elements is exempt)',
+    "    if (!'(['.includes(code[o] || '-') || c === undefined || fresh(o, o + 1)) return false;", "    if (!'('.includes(code[o] || '-') || c === undefined || fresh(o, o + 1)) return false;"),
+  M('BI-shiftsfresh', 'label', BI, 'SG49 shifts: an inserted `(` / `[` counts as kept (a new call\'s arguments are uncovered: over-rejects)',
+    "    if (!'(['.includes(code[o] || '-') || c === undefined || fresh(o, o + 1)) return false;", "    if (!'(['.includes(code[o] || '-') || c === undefined) return false;"),
+  M('BI-shiftspy', 'safety', BI, 'SG49 shifts: the Python arm is dropped (a `,` before kept Python arguments / elements is exempt)',
+    '    if (shifts(a)) return true;\n    if (beside(a) && tupleNew(a, o)) return true;', '    if (beside(a) && tupleNew(a, o)) return true;'),
+  M('BI-sliceapplied', 'safety', BI, 'SG49 slice `:`: only a subscript of a name counts (`f(x)[n]` / `xs[0][n]` -> slice is exempt)',
+    "if (text === ':') return code[o] === '[' && !fresh(o, o + 1) && pyApplied(o) &&", "if (text === ':') return code[o] === '[' && !fresh(o, o + 1) && /\\w/.test(code[prevCode(o)]) &&"),
+  M('BI-slicekept', 'label', BI, 'SG49 slice `:`: a `:` added to a kept slice (a step) is structural too (over-rejects)',
+    'pyApplied(o) && (colonAt.get(o) || []).every(i => fresh(i, i + 1));', 'pyApplied(o);'),
+  M('TR-pyexecname', 'safety', TR, 'SG50 exec_module: the logged path is the module name, not its __file__ (a source module loaded under a test-like name is excused)',
+    "log('T\\\\t%s\\\\t%s' % (key, getattr(module, '__file__', None) or module.__name__", "log('T\\\\t%s\\\\t%s' % (key, module.__name__"),
+  M('TR-cjsreq', 'label', TR, 'SG50: CommonJS loaded by require() also takes the completion mark and the node:test wrapper',
+    " && !(ctx.conditions || []).includes('require');", ';'),
+  M('TR-esmtestsrc', 'label', TR, 'SG50 node:test wrapper module exports the unwrapped node:test (throws in passing tests are name-less: blocks kills)',
+    'source: \'module.exports = globalThis[Symbol.for("refactor.test")](require("node:test"));\'', 'source: \'module.exports = require("node:test");\''),
+  M('TR-esmtestall', 'label', TR, 'SG50 node:test wrapper: every node:test import resolves to it (named ES imports of node:test break: fails closed)',
+    "spec === 'node:test' && viaEsm.has(ctx.parentURL) ?", "spec === 'node:test' ?"),
+  M('TR-rootkeep', 'safety', TR, 'SG50 REFACTOR_LOAD_ROOT: the root runner keeps it in its environment (a nested runner a test spawns logs `R`: its file processes\' caught throws are excused)',
+    'process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log(', 'process.env.REFACTOR_LOAD_ROOT) { log('),
+  M('TR-rootunset', 'label', TR, 'SG50 REFACTOR_LOAD_ROOT: runTests never sets it (no `R` row: every file process reads as spawned, fails closed)',
+    "    env.REFACTOR_LOAD_ROOT = '1';\n", ''),
+  M('TR-ulog', 'safety', TR, 'SG46/SG50: no `U` row is logged (async loader / no registerHooks: an unobserved ES module load throw kills)',
+    "  log('U\\\\t' + key);\n", ''),
+  M('TR-upfile', 'safety', TR, 'SG50 `U` branch: P on exit 0 without the file-process check (an env-stripped child on a node without registerHooks is excused)',
+    "  if (file) { log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true; }",
+    "  if (file) log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true;")
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.
