@@ -12,9 +12,13 @@
 //
 //   node audit/39/control-status.js
 //
-// FINDING when the edit is committed although no control run passed.
+// FINDING when the edit is committed although no control run passed while
+// CLAUDE.md still says the suite passes with the switch off (SG50 reworded it
+// to the per-test rule: the killing test passes in the control).
 // Temp state via audit/1/lib.js (test/helpers/env.js); stub client only.
 
+const fs = require('fs');
+const path = require('path');
 const { e2e, UNANIMOUS } = require('../5/lib');
 
 const L = (...l) => l.join('\n');
@@ -35,10 +39,11 @@ const files = {
   const o = r.proposal.test_outcome || {};
   const mut = o.mutation || {};
   const line = `status=${o.status} reason=${o.reason || '-'} killed=${mut.killed} by=${JSON.stringify(mut.killed_test)} runs=${mut.run} commit=${r.commit ? r.commit.slice(0, 12) : null}`;
-  if (r.commit) {
+  const doc = fs.readFileSync(path.join(__dirname, '../../CLAUDE.md'), 'utf8').replace(/\s+/g, ' ');
+  if (r.commit && /suite then passes with the switch off/.test(doc)) {
     console.log(`FINDING L1: committed although the env test fails in every switch-on and switch-off run\n        ${line}`);
     process.exitCode = 1;
   } else {
-    console.log(`ok      not committed\n        ${line}`);
+    console.log(`ok      ${r.commit ? 'committed on the killing test, as CLAUDE.md documents' : 'not committed'}\n        ${line}`);
   }
 })();

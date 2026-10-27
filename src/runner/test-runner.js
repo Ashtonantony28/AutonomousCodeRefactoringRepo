@@ -470,21 +470,26 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // and `P <key>` marks a key that passed: a throw caught on purpose
 // (`assert.throws(() => require(...))`, `pytest.raises` around an import) is
 // no load failure. JS: a preloaded wrapper of Module._compile, and for ES
-// modules a load hook that appends a completion mark (one loaded but not
-// completed at exit threw, or never ran). A throw inside a node:test test or
-// suite callback (CJS `require('node:test')`, wrapped through Module._load; a
-// subtest counts as its parent) is logged with that test's full name
+// modules, and CommonJS ones the ES module loader compiles (`import()`, and
+// what they `require`), a load hook that appends a completion mark (one
+// loaded but not completed at exit threw, or never ran). A throw inside a
+// node:test test or suite callback (CJS `require('node:test')`, wrapped
+// through Module._load, or through a resolve hook in CommonJS the ES module
+// loader compiles; a subtest counts as its parent) is logged with that test's full name
 // (`T <key> <file> <json name>`) and passes when that test or suite passed
 // (the process key when no reported one has that name); any other throw has
 // key = the process, passed when the process is a node:test file process
 // that exits 0. A process with an async loader (`--import`, `--loader`,
 // `--experimental-loader`) cannot take the ES module hook (node fails every
 // ES module load beside one): it logs `U <key>`, a load failure unless the
-// key passes. A process with NODE_TEST_CONTEXT logs its parent
-// (`C <key> <ppid>`) and a `node --test` runner its pid (`R <pid>`): one
-// whose parent is no runner is a child a test spawned (it inherits the
-// variable), so its key never passes and its rows carry no test name.
-// Python: `__import__` wrapped from a sitecustomize on PYTHONPATH, so every
+// key passes; so does every process on a node without `module.registerHooks`.
+// A process with NODE_TEST_CONTEXT logs its parent (`C <key> <ppid>`) and the
+// root `node --test` runner its pid (`R <pid>`; REFACTOR_LOAD_ROOT, taken
+// out of its environment, so a runner a test spawns is none): one whose
+// parent is no runner is a child a test spawned (it inherits the variable),
+// so its key never passes and its rows carry no test name.
+// Python: `__import__` and the source loaders' `exec_module` (importlib
+// loads, reload) wrapped from a sitecustomize on PYTHONPATH, so every
 // child interpreter that keeps the environment logs too (an ImportError is a
 // missing optional module, not a load failure); as a pytest plugin, key =
 // the test or collected module, passed when every phase passed; a throw
@@ -492,7 +497,7 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile, ld = M._load;
 const key = process.pid + '.' + process.hrtime.bigint(), log = (s) => { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, s + '\\n'); } catch {} };
 const file = !!process.env.NODE_TEST_CONTEXT;
-if (process.execArgv.includes('--test')) log('R\\t' + process.pid);
+if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\t' + process.pid); }
 const cur = new (require('async_hooks').AsyncLocalStorage)(), api = new WeakMap(), API = new Set(['test', 'it', 'describe', 'suite', 'only', 'skip', 'todo']);
 const bind = (fn) => Object.defineProperties(function () { return cur.run(arguments[0], () => fn.apply(this, arguments)); },
   { name: { value: fn.name }, length: { value: fn.length } });
@@ -518,14 +523,21 @@ M.prototype._compile = function (...a) {
 const esm = new Map();
 const loader = process.execArgv.some(a => /^--(?:import|(?:experimental-)?loader)(?:=|$)/.test(a)) ||
   /(?:^|\\s)"?--(?:import|(?:experimental-)?loader)(?:[=\\s"]|$)/.test(process.env.NODE_OPTIONS || '');
-if (loader) {
+if (loader || !M.registerHooks) {
   if (file) { log('C\\t' + key + '\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\t' + key); }); seen = true; }
   log('U\\t' + key);
-} else if (M.registerHooks) {
+} else {
   globalThis[Symbol.for('refactor.loaded')] = (u) => esm.delete(u);
-  M.registerHooks({ load(url, ctx, next) {
+  globalThis[Symbol.for('refactor.test')] = wrap;
+  const viaEsm = new Set(), TEST = require('url').pathToFileURL(require('path').join(__dirname, 'node-test.cjs')).href;
+  M.registerHooks({ resolve(spec, ctx, next) {
+    return spec === 'node:test' && viaEsm.has(ctx.parentURL) ? { url: TEST, format: 'commonjs', shortCircuit: true } : next(spec, ctx);
+  }, load(url, ctx, next) {
+    if (url === TEST) return { format: 'commonjs', source: 'module.exports = globalThis[Symbol.for("refactor.test")](require("node:test"));', shortCircuit: true };
     const r = next(url, ctx);
-    if (r.format === 'module' && r.source != null) {
+    const cjs = /^commonjs/.test(r.format) && !(ctx.conditions || []).includes('require');
+    if ((r.format === 'module' || cjs) && r.source != null) {
+      if (cjs) viaEsm.add(url);
       esm.set(url, cur.getStore());
       r.source = (typeof r.source === 'string' ? r.source : Buffer.from(r.source).toString()) + '\\n;globalThis[Symbol.for("refactor.loaded")](' + JSON.stringify(url) + ');';
     }
@@ -561,6 +573,20 @@ def _hook(name, *a, **k):
         log('T\\t%s\\t%s.py' % (key, name.replace('.', '/')))
         raise
 builtins.__import__ = _hook
+try:
+    import _frozen_importlib_external as _ext
+except ImportError:
+    import importlib._bootstrap_external as _ext
+_exec = _ext._LoaderBasics.exec_module
+def _exec_hook(self, module):
+    try:
+        return _exec(self, module)
+    except ImportError:
+        raise
+    except Exception:
+        log('T\\t%s\\t%s' % (key, getattr(module, '__file__', None) or module.__name__.replace('.', '/') + '.py'))
+        raise
+_ext._LoaderBasics.exec_module = _exec_hook
 `;
 const PY_SITE = `import importlib.machinery, importlib.util, os, sys
 import refactor_load_core
@@ -691,6 +717,7 @@ async function runTests({ repoRoot, command, timeoutMs = TIMEOUT_MS, edit = null
     reportArgs.push('-p', 'refactor_load_hook');
   } else {
     fs.writeFileSync(path.join(pycDir, 'load-hook.js'), JS_LOAD_HOOK);
+    env.REFACTOR_LOAD_ROOT = '1';
     env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} "--require=${path.join(pycDir, 'load-hook.js')}"`.trim();
   }
   const baseOptions = env.NODE_OPTIONS;
