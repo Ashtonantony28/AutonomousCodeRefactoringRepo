@@ -273,8 +273,9 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   it inherits `NODE_TEST_CONTEXT`), so a throw it catches is a load
   failure, and so is one in a file process of a `node --test` a test
   spawns (only the root runner counts as one); a Python child logs through
-  a sitecustomize put first on `PYTHONPATH` (it then runs the next
-  sitecustomize on the path, e.g. the operator's), including a main module that raises, and modules loaded
+  a sitecustomize put first on `PYTHONPATH` (it first runs the next
+  sitecustomize on the path, e.g. the operator's, then wraps the
+  `sys.excepthook` that one set), including a main module that raises, and modules loaded
   through `importlib.import_module`, `importlib.reload` or a source
   loader's `exec_module`. An ES module, or a CommonJS module `import()`
   loads (node compiles it without `Module._compile`), that loads but does

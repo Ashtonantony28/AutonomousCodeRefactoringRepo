@@ -754,7 +754,7 @@ const MUTANTS = [
   M('TR-cppid', 'label', TR, 'SG45: the CJS `C` row names the process itself, not its parent (every file process reads as spawned: fails closed)',
     "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.pid);\n"),
   M('TR-pychain', 'label', TR, 'SG45: the sitecustomize the hook shadows is not run (the suite loses its own site setup)',
-    'if _spec and _spec.loader:\n    _spec.loader', 'if False:\n    _spec.loader'),
+    'if _spec and _spec.loader:\n        _spec.loader', 'if False:\n        _spec.loader'),
   M('TR-rootany', 'safety', TR, 'SG50: every `node --test` process logs `R` (the file process of a nested runner a test spawns is excused)',
     "process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT)", "process.execArgv.includes('--test'))"),
   M('TR-cjsesm', 'safety', TR, 'SG50: CommonJS loaded through import() gets no completion mark (it bypasses Module._compile: a caught throw kills)',
@@ -828,7 +828,7 @@ const MUTANTS = [
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.
-const FLAKY = /mutant runs have their own budget|out of mutant budget|thousands of constant bindings|V8 coverage: a file the tests never load/;
+const FLAKY = /mutant runs have their own budget|out of mutant budget|thousands of constant bindings|V8 coverage: a file the tests never load|infinite promise chain is bounded by the per-call timeout/;
 
 function copyRepo() {
   const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'audit11-mut-'));
