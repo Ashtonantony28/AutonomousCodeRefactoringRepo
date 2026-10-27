@@ -103,7 +103,7 @@ Claude client  callClaude({system,user,cacheTag}) unchanged; tests inject a stub
 | SG46 | ESM hook beside async loaders, bounded separator scans, nested sitecustomize | SG45 | thread worker | done |
 | SG47 | Pin SG44/SG45 separator, keyword and child-process rules | SG46 | thread worker | done |
 | SG48 | Python load hook first on PYTHONPATH, SDK retries off | SG47 | thread worker | done |
-| SG49 | Continuation `;`, keyword-less loop swaps, shifting commas, slice colons | SG48 | thread worker | in progress |
+| SG49 | Continuation `;`, keyword-less loop swaps, shifting commas, slice colons | SG48 | thread worker | done |
 | SG50 | importlib loads, CJS via import(), nested runners, Node without registerHooks | SG48 | thread worker | in progress |
 
 Conflicts (never concurrent): SG1/SG2/SG3 share `hybrid-validator.js` wiring (each touches only its own module; SG1 alone edits `hybrid-validator.js`); SG4/SG5 share `reverter.js`.
@@ -577,3 +577,4 @@ Separate sessions, none run by a worker that wrote the code under audit. Each wr
 | 2026-10-27 | audits r13 | AUDIT-41 | 0C/0H/2M/0L: any `--import` (also a plain setup module) disables kills (M1, same as A40-L1); a runtime `module.register()` loader still crashes test processes (M2, README limit). No new super-linear scan or leak; 20k-test exec 28.9 s mutant phase. |
 | 2026-10-27 | SG48 | green | Hook dir first on PYTHONPATH; the hook's sitecustomize still chains to the next non-copy (operator's) one. `getClient` `maxRetries: 0`, 300 s timeout (`callClaude` keeps its one 10 s 429 retry). audit/40 py-site-shadow, sdk-retries, audit/37 py-site-nest ok. 2 new tests. npm test 535/535. |
 | 2026-10-27 | audits r13 | AUDIT-39 | 1C/6H/1M/2L: 9 of 14 corpus edits committed. Continuation-line `;` (C1); keyword-less loop step (H1); comma shifting kept args (H2) → SG49. importlib loads (H3), CJS via `import()` beside registerHooks (H4, SG45 regression), nested runner `R` excuse (H5), no fail-closed row without registerHooks (H6) → SG50. |
+| 2026-10-27 | SG49 | green | `semiReach`: a line break left of a `;` ends a statement only when the next kept token cannot continue the line (C1). `droppedKeyword`: a hunk deleting a block keyword (JS `do else for switch try catch finally while with`, Python `else for while with try except finally match`) more often than it inserts it is `uncovered_token` (H1; `if`/`elif` swaps still stand on their operator's kill). `shifts`: a `,` inside a kept `(`/`[` with kept code after it is structural (H2); a Python `:` in a kept subscript with no kept `:` is structural (M1). audit/39 c1/h1/h2, token-sites ok; run.js only load entries left; audit/35, 31 0 committed; audit/38 ok; audit/11 `--check` 322, 4 new mutants killed. npm test 536/536. |
