@@ -477,9 +477,11 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // through Module._load, or through a resolve hook in CommonJS the ES module
 // loader compiles; a subtest counts as its parent) is logged with that test's full name
 // (`T <key> <file> <json name>`) and passes when that test or suite passed
-// (the process key when no reported one has that name); any other throw has
-// key = the process, passed when the process is a node:test file process
-// that exits 0. A process with an async loader (`--import`, `--loader`,
+// (the process key when no reported one has that name) and its process
+// exited 0 (`E <key>`: a sibling test may fail on the module the throw left
+// missing); any other throw has key = the process, passed when the process
+// is a node:test file process that exits 0. A worker thread logs neither
+// `P`, `E` nor a name (its exit is not the file process's). A process with an async loader (`--import`, `--loader`,
 // `--experimental-loader`) cannot take the ES module hook (node fails every
 // ES module load beside one): it logs `U <key>`, a load failure unless the
 // key passes; so does every process on a node without `module.registerHooks`.
@@ -488,15 +490,16 @@ const reporterConflict = (r) => r.exitCode !== 0 && /ERR_INVALID_ARG_VALUE[\s\S]
 // out of its environment, so a runner a test spawns is none): one whose
 // parent is no runner is a child a test spawned (it inherits the variable),
 // so its key never passes and its rows carry no test name.
-// Python: `__import__` and the source loaders' `exec_module` (importlib
-// loads, reload) wrapped from a sitecustomize on PYTHONPATH, so every
-// child interpreter that keeps the environment logs too (an ImportError is a
-// missing optional module, not a load failure); as a pytest plugin, key =
-// the test or collected module, passed when every phase passed; a throw
-// outside both (any other process) never passes.
+// Python: `__import__`, the source loaders' `exec_module` (importlib
+// loads, reload) and runpy's `_run_code` (`run_path`, `run_module`, `-m`)
+// wrapped from a sitecustomize on PYTHONPATH, so every child interpreter
+// that keeps the environment logs too (an ImportError is a missing optional
+// module, not a load failure); as a pytest plugin, key = the test or
+// collected module, passed when every phase passed and the session exited 0;
+// a throw outside both (any other process) never passes.
 const JS_LOAD_HOOK = `const M = require('module'), fs = require('fs'), c = M.prototype._compile, ld = M._load;
 const key = process.pid + '.' + process.hrtime.bigint(), log = (s) => { try { fs.appendFileSync(process.env.REFACTOR_LOAD_LOG, s + '\\n'); } catch {} };
-const file = !!process.env.NODE_TEST_CONTEXT;
+const file = !!process.env.NODE_TEST_CONTEXT, main = require('worker_threads').isMainThread;
 if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\t' + process.pid); }
 const cur = new (require('async_hooks').AsyncLocalStorage)(), api = new WeakMap(), API = new Set(['test', 'it', 'describe', 'suite', 'only', 'skip', 'todo']);
 const bind = (fn) => Object.defineProperties(function () { return cur.run(arguments[0], () => fn.apply(this, arguments)); },
@@ -509,22 +512,22 @@ const wrap = (f) => {
   return api.get(f);
 };
 M._load = function (req) { const r = ld.apply(this, arguments); return req === 'node:test' && typeof r === 'function' ? wrap(r) : r; };
-let seen = false;
+let seen = false, named = false;
+const fail = (f, t) => {
+  if (!seen && file) log('C\\t' + key + '\\t' + process.ppid);
+  seen = true;
+  const n = main && t && typeof t.fullName === 'string';
+  if (n) named = true;
+  log('T\\t' + key + '\\t' + f + (n ? '\\t' + JSON.stringify(t.fullName) : ''));
+};
 M.prototype._compile = function (...a) {
-  try { return c.apply(this, a); } catch (e) {
-    const t = cur.getStore();
-    if (!seen && file) log('C\\t' + key + '\\t' + process.ppid);
-    log('T\\t' + key + '\\t' + this.filename + (t && typeof t.fullName === 'string' ? '\\t' + JSON.stringify(t.fullName) : ''));
-    if (!seen && file) process.on('exit', (code) => { if (code === 0) log('P\\t' + key); });
-    seen = true;
-    throw e;
-  }
+  try { return c.apply(this, a); } catch (e) { fail(this.filename, cur.getStore()); throw e; }
 };
 const esm = new Map();
 const loader = process.execArgv.some(a => /^--(?:import|(?:experimental-)?loader)(?:=|$)/.test(a)) ||
   /(?:^|\\s)"?--(?:import|(?:experimental-)?loader)(?:[=\\s"]|$)/.test(process.env.NODE_OPTIONS || '');
 if (loader || !M.registerHooks) {
-  if (file) { log('C\\t' + key + '\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\t' + key); }); seen = true; }
+  if (file) { log('C\\t' + key + '\\t' + process.ppid); seen = true; }
   log('U\\t' + key);
 } else {
   globalThis[Symbol.for('refactor.loaded')] = (u) => esm.delete(u);
@@ -543,22 +546,23 @@ if (loader || !M.registerHooks) {
     }
     return r;
   } });
-  process.on('exit', (code) => {
-    if (esm.size && !seen && file) log('C\\t' + key + '\\t' + process.ppid);
-    for (const [u, t] of esm) log('T\\t' + key + '\\t' + require('url').fileURLToPath(u) + (t && typeof t.fullName === 'string' ? '\\t' + JSON.stringify(t.fullName) : ''));
-    if (esm.size && file && code === 0) log('P\\t' + key);
-  });
 }
+process.on('exit', (code) => {
+  for (const [u, t] of esm) fail(require('url').fileURLToPath(u), t);
+  if (code === 0 && main) { if (seen && file) log('P\\t' + key); if (named) log('E\\t' + key); }
+});
 `;
 // Python: the `__import__` wrapper and an excepthook for a main module that
 // raises (installed by a sitecustomize, so in every interpreter on this
 // PYTHONPATH; it first runs the first sitecustomize that is no copy of it,
 // if any: nested runs put several on PYTHONPATH, then wraps whatever
-// excepthook that set), and the
-// pytest plugin that keys them.
-const PY_LOAD_CORE = `import builtins, os
+// excepthook that set; an interpreter outside pytest whose excepthook was
+// replaced later, e.g. by a usercustomize, logs an uncaught exception
+// (`sys.last_value`) at exit), and the pytest plugin that keys them.
+const PY_LOAD_CORE = `import atexit, builtins, os, runpy, sys
 _imp = builtins.__import__
 key = ''
+hook = plugin = None
 def log(s):
     try:
         with open(os.environ['REFACTOR_LOAD_LOG'], 'a') as f:
@@ -588,11 +592,27 @@ def _exec_hook(self, module):
         log('T\\t%s\\t%s' % (key, getattr(module, '__file__', None) or module.__name__.replace('.', '/') + '.py'))
         raise
 _ext._LoaderBasics.exec_module = _exec_hook
+_run = runpy._run_code
+def _run_hook(code, *a, **k):
+    try:
+        return _run(code, *a, **k)
+    except ImportError:
+        raise
+    except Exception:
+        log('T\\t%s\\t%s' % (key, code.co_filename))
+        raise
+runpy._run_code = _run_hook
+def log_main():
+    log('T\\t%s\\t%s' % (key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
+def _exit():
+    if not plugin and sys.excepthook is not hook and getattr(sys, 'last_value', None) is not None:
+        log_main()
+atexit.register(_exit)
 `;
 const PY_SITE = `import importlib.machinery, importlib.util, os, sys
 import refactor_load_core
 def _main_raised(*a):
-    refactor_load_core.log('T\\t%s\\t%s' % (refactor_load_core.key, getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'))
+    refactor_load_core.log_main()
     _prev(*a)
 try:
     _spec = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if not os.path.isfile(os.path.join(p or '.', 'refactor_load_core.py'))])
@@ -601,17 +621,22 @@ try:
 finally:
     _prev = sys.excepthook
     sys.excepthook = _main_raised
+    refactor_load_core.hook = _main_raised
 `;
 const PY_LOAD_HOOK = `import refactor_load_core as _c
-_n, _bad = 0, False
+_c.plugin = True
+_n, _bad, _passed = 0, False, []
 def _start(what):
     global _n, _bad
     _n += 1
     _c.key, _bad = '%d:%s' % (_n, what), False
 def _finish(ok):
     if ok and _c.key:
-        _c.log('P\\t' + _c.key)
+        _passed.append(_c.key)
     _c.key = ''
+def pytest_sessionfinish(session, exitstatus):
+    if exitstatus == 0 and _passed:
+        _c.log('\\n'.join('P\\t' + k for k in _passed))
 def pytest_collectstart(collector):
     _start(collector.nodeid)
 def pytest_collectreport(report):
@@ -626,8 +651,8 @@ def pytest_runtest_logfinish(nodeid, location):
 `;
 // Logged load failures, not caught under a key that passed, of modules other
 // than tests and conftest (a spawned child's key never passes). One logged inside a JS test or suite is caught
-// when every test and suite of that name (in `tests`, `suites`) passed, or,
-// when none has it, its process key passed. A `U` row (ES module loads not
+// when its process exited 0 and every test and suite of that name (in
+// `tests`, `suites`) passed, or, when none has it, its process key passed. A `U` row (ES module loads not
 // observed) is one unless its key passed.
 function loadFailed(log, repoRoot, tests, suites) {
   let text;
@@ -637,6 +662,7 @@ function loadFailed(log, repoRoot, tests, suites) {
   const runners = new Set(rows.filter(r => r[0] === 'R').map(r => r[1]));
   const spawned = new Set(rows.filter(r => r[0] === 'C' && !runners.has(r[2])).map(r => r[1]));
   const passed = new Set(rows.filter(r => r[0] === 'P' && !spawned.has(r[1])).map(r => r[1]));
+  const exited = new Set(rows.filter(r => r[0] === 'E').map(r => r[1]));
   // name -> every id `name` or `name\t#<n>` passed, indexed once per call.
   let byName = null;
   const memo = new Map();
@@ -660,7 +686,14 @@ function loadFailed(log, repoRoot, tests, suites) {
   };
   return rows.some(([k, key, f, name]) => (k === 'U' && !passed.has(key)) ||
     (k === 'T' && f && !isTestFile(path.isAbsolute(f) ? path.relative(repoRoot, f) : f) && !/(?:^|\/)conftest\.py$/.test(f) &&
-    !(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))));
+    !(name && !spawned.has(key) ? exited.has(key) && testPassed(name, key) : passed.has(key))));
+}
+
+// The `node` a JS suite runs on (cwd, this env) has no `module.registerHooks`
+// (before 22.15 / 23.5): every process logs `U`, so no failing mutant run kills.
+function lacksRegisterHooks(cwd) {
+  const r = spawnSync('node', ['-p', "typeof require('module').registerHooks"], { cwd, encoding: 'utf8', timeout: 10_000 });
+  return r.status === 0 && r.stdout.trim() !== 'function';
 }
 
 function ownsReporters(repoRoot, env) {
@@ -807,4 +840,4 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '\n...[truncated]' : s;
 }
 
-module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, loadFailed, TIMEOUT_MS };
+module.exports = { runTests, runCommand, killActive, removeLiveDirs, detectCommand, parseCounts, changedSpan, coverageTool, tapResults, junitResults, loadFailed, lacksRegisterHooks, JS_EXT, TIMEOUT_MS };

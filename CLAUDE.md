@@ -79,7 +79,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `utils/hunks.lexView` mapped to the changed lines, so a line inside or
     closing a multi-line template / triple-quoted string gets the literal's
     tokens: a template literal or f-string is its text parts and the tokens
-    of its `${}` / `{}` interpolations; a JS regex literal is its body atoms
+    of its `${}` / `{}` interpolations (an f-string's `!r` / format spec: a
+    token per number or other character); a JS regex literal is its body atoms
     and flags; any other string (backslash-continued ones too; a `\` +
     CRLF continuation is mis-lexed and fails closed) is exactly one
     `lexView` literal, a quote that starts none is no evidence, and a
@@ -97,7 +98,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
     arity; `!`/`~`/`not`/`await` dropped; `in`/`instanceof` (JS) and a
     ternary test negated; `in` ↔ `not in`, `is` ↔ `is not`; `null`/`None` →
     `0`; boolean, `return`, `if`/`while` condition; a string, or a template /
-    f-string text part → `x` added; a regex flag dropped, a quantifier bound
+    f-string text part → `x` added; a number in an f-string format spec, or
+    a changed number of a printf / `str.format` directive in a Python string
+    (`'%5d'` → `'%6d'`), → value + 1; a regex flag dropped, a quantifier bound
     + 1, any other regex atom dropped; `bug-injector.editMutants`,
     parse-valid on the smallest statement around it that parses alone,
     Python in one `python3` batch, up to 3 per site). Every site needs its
@@ -115,7 +118,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `6000 | 0, - 1`, `a && b` → `a; log(b) && b`); a JS comma operator next
     to kept code (`return a` → `return a, b`) or array elision (`[x,,]`);
     a `,` in a kept call, array, pattern or parameter list (Python: call,
-    list, tuple) with kept elements after it, past inserted tokens (it
+    list, tuple, `def` parameter list; not an import list) with kept
+    elements after it, past inserted tokens (it
     shifts them: `slice(e)` → `slice(0, e)`, `[a, b]` → `[a, '', b]`);
     a Python `,` next to kept code that makes a tuple of a statement, a
     grouping paren, a subscript or an f-string field that held no kept comma
@@ -140,10 +144,17 @@ saturation figures are reported on the dashboard as a spend indicator only.
     `def`, a moved bracket or indentation; an `if` / `elif` / `while` whose
     stretch deletes another keyword (`while`, `else`, `with`, `switch`,
     `try`, `match`, `async for` → `if`), which its own condition site does
-    not cover; the first inserted token of a hunk that deletes a block
-    keyword (`while`, `for`, `do`, `else`, `with`, `switch`, `try`,
-    `catch` / `except`, `finally`, `match`) more often than it inserts it,
-    whatever replaces it: `while (c) s;` → `c && s;` / `c ? s : t = t;`) is no evidence
+    not cover; any other f-string spec token, and a new printf /
+    `str.format` directive holding a number (`'%s'` → `'%.6000s'`); the
+    first inserted token of a hunk (the keyword when it inserts none) that
+    deletes a block keyword (`while`, `for`, `do`, `else`, `with`, `switch`,
+    `try`, `catch` / `except`, `finally`, `match`) from a stretch that does
+    not insert it again, unless another stretch of the hunk inserts it with
+    the tokens after it (a moved statement), whatever replaces it: `while
+    (c) s;` → `c && s;` / `c ? s : t = t;` / `s;`; the same for a deleted
+    `{` / `}` of a block that held more than one kept statement, or a
+    deleted Python header `:` whose one-line suite did (`if (c) { a; b; }`
+    → `c && a; b;`, `if c: a; b` → `c and a; b`)) is no evidence
     (`tests_insensitive`, `mutation.uncovered_token`), whatever kills its
     siblings. More than 12 sites in one hunk is not judged
     (`mutation_budget`).
@@ -193,7 +204,8 @@ saturation figures are reported on the dashboard as a spend indicator only.
     Python: its statement, if-expression branch, later `and`/`or` operand,
     chained-comparison tail (`<= b` in `a < n <= b`), lambda body,
     comprehension element/condition/later iterable, `match` guard), and
-    every probe must run.
+    every probe must run. A deleted block keyword or block brace above
+    never stands on this alone.
     Otherwise only a stretch whose deleted tokens are replaced by at least as
     many inserted tokens holding a site stands, on that site's kill.
   Mutant and control runs use the main run's command, interpreter, import
@@ -211,21 +223,28 @@ saturation figures are reported on the dashboard as a spend indicator only.
   hooks every run installs, children that keep the environment included:
   a preloaded `Module._compile` wrapper, an ES module load hook (a module,
   or a CommonJS one `import()` loads, loaded but not completed at exit; a
-  process with an async loader, or on a node without `module.registerHooks`,
-  gets none and counts as a load failure unless it is a node:test file
-  process that exits 0), a sitecustomize wrapping `__import__` and the
-  source loaders' `exec_module` (`importlib.import_module`, `reload`)
-  (not `ImportError`) and logging a main module that raises, keyed by a
+  process with an async loader, or on a node without `module.registerHooks`
+  (before 22.15 / 23.5: no JS edit can commit; the Orchestrator warns once
+  when it executes one there), gets none and counts as a load failure unless it is a node:test file
+  process that exits 0), a sitecustomize wrapping `__import__`, the
+  source loaders' `exec_module` (`importlib.import_module`, `reload`) and
+  `runpy`'s code runner (`run_path`, `run_module`) (not `ImportError`) and logging a main module that raises (its
+  `sys.excepthook` wrap, or at exit outside pytest when a later hook such as
+  a `usercustomize` replaced it), keyed by a
   pytest plugin; test files and
   `conftest.py` excluded, and a throw caught on purpose is none: logged
   inside a node:test test or suite callback (CJS `require('node:test')`, a
   subtest counting as its parent; names compared as TAP ids: `\#` / `\\`
   unescaped, control characters as TAP writes them) that
-  passed (with no reported test or suite of that name, as below), elsewhere in a node:test
-  file process that exits 0 (not a child it spawns, though that inherits
+  passed (with no reported test or suite of that name, as below), in a
+  process that exits 0, elsewhere in a node:test
+  file process that exits 0 (its main thread: never a worker thread, nor a
+  child it spawns, though that inherits
   `NODE_TEST_CONTEXT`, nor a file process of a `node --test` it spawns),
   or in a pytest test or collected
-  module that passed — or a pytest collection error, whatever the exit
+  module that passed, in a session that exits 0 (so a sibling test failing
+  on the module a memoised loader left missing is no kill) — or a pytest
+  collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
@@ -427,7 +446,8 @@ same snippet in a later run adds a sample/point. Entries stored without
 
 ## Error handling rules
 
-- Every Claude API call: retry once on rate limit (10 s backoff), then fail
+- Every Claude API call: SDK retries off, a 300 s request timeout (no
+  retry); retry once on rate limit (10 s backoff), then fail
   gracefully — never let one bad proposal crash the pipeline.
 - File ops: wrap in try/catch, log, continue.
 - `SIGINT`/`SIGTERM`: revert the in-flight edit, remove its temp dirs, flush state, exit 0.

@@ -143,7 +143,8 @@ const CASES = {
   // check -> the child's U is excused.
   'TR-upfile': {
     finding: 'H4',
-    mutate: { file: TR, from: "  if (file) { log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true; }", to: "  if (file) log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true;" },
+    // SG54: re-anchored (the exit handler is shared).
+    mutate: { file: TR, from: "  log('U\\\\t' + key);", to: "  log('U\\\\t' + key); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });" },
     tests: /test-runner|executor/,
     oldNode: true,
     probe: () => ({
