@@ -124,7 +124,8 @@ const CASES = {
   // exit handler logs no C row, so the child's exit-0 P row excuses it.
   'TR-esmcrow': {
     finding: 'H4',
-    mutate: { file: TR, from: "    if (esm.size && !seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", to: '' },
+    // SG54: re-anchored (the exit handler logs ES module rows through the shared logger).
+    mutate: { file: TR, from: '  for (const [u, t] of esm) fail(', to: '  for (const [u, t] of esm) seen = true, fail(' },
     tests: /test-runner|executor/,
     probe: runTestsProbe({ 'package.json': PKG, 'src/m.mjs': MJS, 'bin/cli.mjs': CLI_MJS, 'test/cli.test.js': cliTest('process.env') }),
     unsafe: excused
@@ -136,7 +137,8 @@ const CASES = {
   // logs P on exit 0 without the file-process check.
   'TR-esmpfile': {
     finding: 'H4',
-    mutate: { file: TR, from: "    if (esm.size && file && code === 0) log('P\\\\t' + key);", to: "    if (esm.size && code === 0) log('P\\\\t' + key);" },
+    // SG54: re-anchored (one exit handler for CJS and ES module rows).
+    mutate: { file: TR, from: "if (seen && file) log('P", to: "if (seen) log('P" },
     tests: /test-runner|executor/,
     probe: runTestsProbe({ 'package.json': PKG, 'src/m.mjs': MJS, 'bin/cli.mjs': CLI_MJS, 'test/cli.test.js': cliTest(NO_CTX) }),
     unsafe: excused
@@ -146,7 +148,8 @@ const CASES = {
   // file-process check.
   'TR-cjspfile': {
     finding: 'H4',
-    mutate: { file: TR, from: "    if (!seen && file) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });", to: "    if (!seen) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });" },
+    // SG54: re-anchored (one exit handler for CJS and ES module rows).
+    mutate: { file: TR, from: "{ if (seen && file) log('P\\\\t' + key);", to: "{ if (seen) log('P\\\\t' + key);" },
     tests: /test-runner|executor/,
     probe: runTestsProbe({ 'package.json': PKG, 'src/m.js': CJS, 'bin/cli.js': CLI_CJS, 'test/cli.test.js': cliTest(NO_CTX, 'cli.js') }),
     unsafe: excused
