@@ -257,18 +257,21 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   `make`), and node:test suites that set their own `--test-reporter` (also
   through a delegated script: node refusing the added reporters is re-run
   without them), get no kill and end `tests_insensitive`.
-- **Caught module-load throws are judged per test.** A module body that
-  throws while a node:test test or suite callback runs (CommonJS
+- **Caught module-load throws are judged per test and process.** A module
+  body that throws while a node:test test or suite callback runs (CommonJS
   `require('node:test')`; a subtest counts as its parent) is ignored when
   that test or suite passed (`assert.throws(() => require(...))`; a name no
-  reported test or suite has falls back to the file process, below), so other tests in
-  the same file or process (`--experimental-test-isolation=none`) still
-  kill; when that test failed the run is a load failure and kills nothing.
+  reported test or suite has falls back to the file process, below) and its
+  process exits 0. A failing test in the same file or process
+  (`--experimental-test-isolation=none`) may fail on the module the catch
+  left missing (a memoised loader), so that run is a load failure and kills
+  nothing; tests in other file processes still kill. When the catching test
+  failed the run is a load failure too.
   A throw outside a test callback (a test file's top-level `require`, a
   hook, an ESM `import test from 'node:test'` suite) is ignored only when
   its node:test file process exits 0, so there a caught throw beside the
   killing test still blocks every kill. pytest keys it by test or collected
-  module. The hooks reach child processes that keep the environment: a JS
+  module, ignored only when the session exits 0. The hooks reach child processes that keep the environment: a JS
   child a test spawns logs its throws but is never the file process (though
   it inherits `NODE_TEST_CONTEXT`), so a throw it catches is a load
   failure, and so is one in a file process of a `node --test` a test
@@ -278,8 +281,8 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   `sys.excepthook` that one set; outside pytest, an uncaught exception is
   also logged at exit when a later hook, e.g. an operator `usercustomize`,
   replaced that wrap), including a main module that raises, and modules loaded
-  through `importlib.import_module`, `importlib.reload` or a source
-  loader's `exec_module`. An ES module, or a CommonJS module `import()`
+  through `importlib.import_module`, `importlib.reload`, a source
+  loader's `exec_module` or `runpy.run_path` / `run_module`. An ES module, or a CommonJS module `import()`
   loads (node compiles it without `Module._compile`), that loads but does
   not complete is logged too (named when a CommonJS node:test callback
   imports it, else by the file process); so is a CommonJS module loaded
@@ -288,7 +291,8 @@ scripts/       coverage.js · worker-coverage.js (npm run coverage)
   replaced, `python -I` / `-E` / `-S`, a child that ends through
   `os._exit`, a custom Python loader with its own `exec_module`, and
   code a custom loader runs through `vm.runInThisContext` / `vm.Script`
-  (no module load). Worker threads take the same preload. On a Node
+  (no module load). Worker threads take the same preload, but a worker's
+  exit never excuses: a throw a worker catches is a load failure. On a Node
   without `module.registerHooks` (before 22.15 / 23.5) every process fails
   closed like one with an async loader (below): such a suite runs, but a
   failing mutant run is no kill, so no JS edit can commit (the Orchestrator

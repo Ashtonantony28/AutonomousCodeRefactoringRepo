@@ -381,11 +381,13 @@ const MUTANTS = [
     ' || !!(perTest && perTest.load) || !loaded);', ' || !!(perTest && perTest.load));'),
   M('TR-caught', 'safety', TR, 'SG33: a module body throw a passing test caught on purpose is a load failure (no kill on such a target)',
     // AUDIT-30: re-anchored after SG38 (loadFailed takes per-test names).
-    '!(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))', '!(name && !spawned.has(key) ? testPassed(name, key) : false)'),
+    // SG54: re-anchored (a named row also needs its process's exit-0 `E` row).
+    '!(name && !spawned.has(key) ? exited.has(key) && testPassed(name, key) : passed.has(key))', '!(name && !spawned.has(key) ? exited.has(key) && testPassed(name, key) : false)'),
   M('TR-jspass', 'safety', TR, 'SG33: a JS load throw is excused in a test process that exits non-zero (uncaught or wrapped load failure is a kill)',
-    // SG46: re-anchored (the async-loader branch passes its key the same way).
-    "if (!seen && file) process.on('exit', (code) => { if (code === 0)", "if (!seen && file) process.on('exit', (code) => { if (true)"),
-  M('TR-pypass', 'safety', TR, 'SG33: a pytest load throw is excused in a test that failed (wrapped import failure is a kill)',
+    // SG46: re-anchored (the async-loader branch passes its key the same way). SG54: one exit handler.
+    'if (code === 0 && main) {', 'if (main) {'),
+  // SG54: redundant (a pytest key passes only when the session exits 0: TR-pysession).
+  M('TR-pypass', 'redundant', TR, 'SG33: a pytest load throw is excused in a test that failed (wrapped import failure is a kill)',
     '    _finish(not _bad)\n', '    _finish(True)\n'),
   M('EX-sham', 'safety', EX, 'SG30/SG34: the control is the edit, not the same switched text (a source-reading test kills)',
     '        const control = await runSuite(m.src, m.control);', '        const control = await runSuite(edited, {});'),
@@ -535,13 +537,15 @@ const MUTANTS = [
   M('TR-dupprefix', 'safety', TR, 'SG38: a logged name matches every id it prefixes, not only its own `#n` duplicates',
     'for (const k of m ? [id, m[1]] : [id])', 'for (const k of Array.from(id, (_, i) => id.slice(0, i + 1)))'),
   M('TR-testkey', 'safety', TR, 'SG38: a load throw logged inside any test is excused, passed or not',
-    '!(name && !spawned.has(key) ? testPassed(name, key) : passed.has(key))', '!(name && !spawned.has(key) ? true : passed.has(key))'),
+    // SG54: re-anchored.
+    'exited.has(key) && testPassed(name, key) : passed.has(key)', 'true : passed.has(key)'),
   M('TR-nowrap', 'safety', TR, 'SG38: node:test is not wrapped (no per-test attribution; same-process caught throws block kills again)',
     "return req === 'node:test' && typeof r === 'function' ? wrap(r) : r;", 'return r;'),
   M('TR-lastfn', 'redundant', TR, 'SG38: the first function argument is bound, not the last (node:test takes the callback last)',
     "const i = a.findLastIndex(x => typeof x === 'function');", "const i = a.findIndex(x => typeof x === 'function');"),
   M('TR-hookany', 'redundant', TR, 'SG38: a store with no string fullName is logged as a test name (JSON of undefined; never passes, fails closed)',
-    "this.filename + (t && typeof t.fullName === 'string' ? ", 'this.filename + (t ? '),
+    // SG54: re-anchored (one logger for CJS and ES module rows).
+    "const n = main && t && typeof t.fullName === 'string';", 'const n = main && t;'),
   M('TR-suite', 'safety', TR, 'SG41: suites are not recorded (a caught load throw in a passing describe callback blocks every kill)',
     "if (cur.type === 'suite') addSuite(cur.id, cur.state);", "if (cur.type === 'suite');"),
   M('TR-untap', 'safety', TR, 'SG41: TAP ids keep the reporter\'s escapes (a logged name with `#` or a backslash never matches)',
@@ -588,7 +592,8 @@ const MUTANTS = [
   M('TR-ctrltab', 'label', TR, 'SG41: only a newline is written as TAP does (a name with a tab, CR, ... never matches: fails closed)',
     'byName.get(name.replace(/[\\b\\f\\t\\n\\r\\v]/g, c => CTRL[c]))', 'byName.get(name.replace(/[\\n]/g, c => CTRL[c]))'),
   M('TR-hookP', 'label', TR, 'SG41: the hook logs the process key\'s exit-0 row only for unnamed rows (a name with no test falls back to a key never passed: fails closed)',
-    "if (!seen && file) process.on('exit'", "if (!seen && !t && file) process.on('exit'"),
+    // SG54: re-anchored (no `P` once any row is named).
+    "if (seen && file) log('P", "if (seen && !named && file) log('P"),
   M('BI-pytry', 'safety', BI, 'SG37/SG41: a Python `;` on a try / except / finally line (joins its suite) is exempt',
     '|with|try|except|finally|def|', '|with|def|'),
   M('BI-pyasync', 'safety', BI, 'SG37/SG41: a Python `;` on an `async def` / `async for` / `async with` line is exempt',
@@ -620,7 +625,8 @@ const MUTANTS = [
   M('TR-childfile', 'safety', TR, 'SG45: a child inheriting NODE_TEST_CONTEXT counts as a file process (its caught throw is excused on exit 0)',
     "const spawned = new Set(rows.filter(r => r[0] === 'C' && !runners.has(r[2])).map(r => r[1]));", 'const spawned = new Set();'),
   M('TR-childname', 'safety', TR, 'SG45: a spawned child\'s named row is excused by a parent test of that name',
-    'name && !spawned.has(key) ? testPassed', 'name ? testPassed'),
+    // SG54: re-anchored.
+    'name && !spawned.has(key) ? exited', 'name ? exited'),
   M('TR-pysite', 'safety', TR, 'SG45: no sitecustomize (a python child that fails to import the code is unhooked)',
     "['sitecustomize.py', PY_SITE]", "['sitecustomize.txt', PY_SITE]"),
   M('TR-pymain', 'safety', TR, 'SG45: a python child whose main module raises is not logged',
@@ -735,11 +741,14 @@ const MUTANTS = [
   M('TR-runnerrow', 'label', TR, 'SG45: `node --test` runners log no `R` row (every file process reads as a spawned child: caught top-level throws block kills, fails closed)',
     "if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\\\t' + process.pid); }", ''),
   M('TR-crow', 'safety', TR, 'SG45: a CJS load throw logs no `C` row (a spawned child that catches and exits 0 is excused)',
-    "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", ''),
+    // SG54: re-anchored (one logger for CJS and ES module rows).
+    "  if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", ''),
   M('TR-esmcrow', 'safety', TR, 'SG45: an ES module load failure logs no `C` row (a spawned child that catches an import() throw and exits 0 is excused)',
-    "    if (esm.size && !seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", ''),
+    // SG54: re-anchored (the exit handler logs ES module rows through the shared logger).
+    '  for (const [u, t] of esm) fail(', '  for (const [u, t] of esm) seen = true, fail('),
   M('TR-esmpfile', 'safety', TR, 'SG45: an ES-module process without NODE_TEST_CONTEXT logs `P` on exit 0 (a runner or env-stripped child is excused)',
-    "    if (esm.size && file && code === 0) log('P\\\\t' + key);", "    if (esm.size && code === 0) log('P\\\\t' + key);"),
+    // SG54: re-anchored (one exit handler; the same mutant as TR-cjspfile).
+    "if (seen && file) log('P", "if (seen) log('P"),
   M('TR-esmmark', 'label', TR, 'SG45: the completion mark removes nothing (every ES module reads as failed to load: fails closed)',
     "globalThis[Symbol.for('refactor.loaded')] = (u) => esm.delete(u);", "globalThis[Symbol.for('refactor.loaded')] = (u) => 0;"),
   M('TR-esmname', 'label', TR, 'SG45: an ES module load is not attributed to the running test (falls back to the process key: fails closed)',
@@ -747,12 +756,14 @@ const MUTANTS = [
   M('TR-pymainname', 'safety', TR, 'SG45: a `python -c` main module that raises is logged with an empty file (rows without a file are ignored)',
     "getattr(sys.modules.get('__main__'), '__file__', None) or '<string>'", "getattr(sys.modules.get('__main__'), '__file__', None) or ''"),
   M('TR-cjspfile', 'safety', TR, 'SG45: a CJS process without NODE_TEST_CONTEXT logs `P` on exit 0 (an env-stripped child that catches a require() throw is excused)',
-    "    if (!seen && file) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });", "    if (!seen) process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });"),
+    // SG54: re-anchored (one exit handler; the same mutant as TR-esmpfile).
+    "{ if (seen && file) log('P\\\\t' + key);", "{ if (seen) log('P\\\\t' + key);"),
   M('TR-runnerall', 'safety', TR, 'SG45: every hooked process logs an `R` row (a file process reads as a runner, so its spawned children are not marked)',
     // SG50: re-anchored (only the root runner logs `R`).
     "if (process.execArgv.includes('--test') && process.env.REFACTOR_LOAD_ROOT) { delete process.env.REFACTOR_LOAD_ROOT; log('R\\\\t' + process.pid); }", "log('R\\\\t' + process.pid);"),
   M('TR-cppid', 'label', TR, 'SG45: the CJS `C` row names the process itself, not its parent (every file process reads as spawned: fails closed)',
-    "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", "    if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.pid);\n"),
+    // SG54: re-anchored.
+    "  if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.ppid);\n", "  if (!seen && file) log('C\\\\t' + key + '\\\\t' + process.pid);\n"),
   M('TR-pychain', 'label', TR, 'SG45: the sitecustomize the hook shadows is not run (the suite loses its own site setup)',
     'if _spec and _spec.loader:\n        _spec.loader', 'if False:\n        _spec.loader'),
   M('TR-rootany', 'safety', TR, 'SG50: every `node --test` process logs `R` (the file process of a nested runner a test spawns is excused)',
@@ -823,8 +834,14 @@ const MUTANTS = [
   M('TR-ulog', 'safety', TR, 'SG46/SG50: no `U` row is logged (async loader / no registerHooks: an unobserved ES module load throw kills)',
     "  log('U\\\\t' + key);\n", ''),
   M('TR-upfile', 'safety', TR, 'SG50 `U` branch: P on exit 0 without the file-process check (an env-stripped child on a node without registerHooks is excused)',
-    "  if (file) { log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true; }",
-    "  if (file) log('C\\\\t' + key + '\\\\t' + process.ppid); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); }); seen = true;")
+    // SG54: re-anchored (the exit handler is shared).
+    "  log('U\\\\t' + key);", "  log('U\\\\t' + key); process.on('exit', (code) => { if (code === 0) log('P\\\\t' + key); });"),
+  M('TR-worker', 'safety', TR, 'SG54: a worker thread passes as its file process (a worker that catches a load throw and exits 0 excuses it)',
+    "main = require('worker_threads').isMainThread;", 'main = true;'),
+  M('TR-runpy', 'safety', TR, 'SG54: runpy is not wrapped (a module body run_path / run_module raises in is unlogged)',
+    'runpy._run_code = _run_hook\n', ''),
+  M('TR-pysession', 'safety', TR, 'SG54: a pytest key passes although the session failed (a memoised import caught in a passing test excuses a sibling that fails on it)',
+    'if exitstatus == 0 and _passed:', 'if _passed:')
 ];
 
 // AUDIT-19: tests seen failing on unmutated code under host load.

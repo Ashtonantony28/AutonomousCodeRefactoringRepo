@@ -215,9 +215,9 @@ saturation figures are reported on the dashboard as a spend indicator only.
   process with an async loader, or on a node without `module.registerHooks`
   (before 22.15 / 23.5: no JS edit can commit; the Orchestrator warns once
   when it executes one there), gets none and counts as a load failure unless it is a node:test file
-  process that exits 0), a sitecustomize wrapping `__import__` and the
-  source loaders' `exec_module` (`importlib.import_module`, `reload`)
-  (not `ImportError`) and logging a main module that raises (its
+  process that exits 0), a sitecustomize wrapping `__import__`, the
+  source loaders' `exec_module` (`importlib.import_module`, `reload`) and
+  `runpy`'s code runner (`run_path`, `run_module`) (not `ImportError`) and logging a main module that raises (its
   `sys.excepthook` wrap, or at exit outside pytest when a later hook such as
   a `usercustomize` replaced it), keyed by a
   pytest plugin; test files and
@@ -225,11 +225,15 @@ saturation figures are reported on the dashboard as a spend indicator only.
   inside a node:test test or suite callback (CJS `require('node:test')`, a
   subtest counting as its parent; names compared as TAP ids: `\#` / `\\`
   unescaped, control characters as TAP writes them) that
-  passed (with no reported test or suite of that name, as below), elsewhere in a node:test
-  file process that exits 0 (not a child it spawns, though that inherits
+  passed (with no reported test or suite of that name, as below), in a
+  process that exits 0, elsewhere in a node:test
+  file process that exits 0 (its main thread: never a worker thread, nor a
+  child it spawns, though that inherits
   `NODE_TEST_CONTEXT`, nor a file process of a `node --test` it spawns),
   or in a pytest test or collected
-  module that passed — or a pytest collection error, whatever the exit
+  module that passed, in a session that exits 0 (so a sibling test failing
+  on the module a memoised loader left missing is no kill) — or a pytest
+  collection error, whatever the exit
   code), a run without per-test results (other
   runners), a missing, crashed or added test is never a kill.
   Mutant runs re-run the whole suite without coverage and
